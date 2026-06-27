@@ -16,9 +16,21 @@ exports** (JSON / NDJSON / CSV / Markdown / zip archive).
   CLI is a thin renderer, and a web UI can reuse the same core later.
 - **Exportable** — produce a portable, self-describing backup bundle on demand.
 
-> Status: v0.1 ships the full foundation plus a complete **Raindrop.io**
-> reference connector. Reddit and YouTube connectors follow the same contract —
-> see [docs/writing-a-connector.md](docs/writing-a-connector.md).
+> Status: v0.1 ships the full foundation plus three built-in connectors:
+> **Raindrop.io** (the REST/token reference), **Reddit** (saved posts &
+> comments), and **YouTube** (Watch Later, Liked, history, playlists). Reddit and
+> YouTube are *browser-session* connectors — they reuse your logged-in session
+> rather than an API token — and pull in heavy optional dependencies, so they
+> install via extras:
+>
+> ```bash
+> pip install -e ".[reddit]" && playwright install chromium   # Reddit (Playwright)
+> pip install -e ".[youtube]"                                  # YouTube (yt-dlp)
+> ```
+>
+> Both follow the same plugin contract as Raindrop — see
+> [docs/writing-a-connector.md](docs/writing-a-connector.md) (and its
+> "browser-session connectors" note).
 
 ---
 

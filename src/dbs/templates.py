@@ -27,6 +27,29 @@ page_size = 50                   # Raindrop max is 50
 poll_trash = true                # detect deletions quickly via the Trash collection
 token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 
+# Reddit saved posts/comments (browser session, no API token).
+# Needs the extra:  pip install 'daily-backup-system[reddit]' && playwright install chromium
+# REDDIT_SESSION_DIR must point at a logged-in Playwright session directory.
+# [sources.reddit]
+# type = "reddit"
+# enabled = true
+# username = "your-reddit-username"
+# headless = true
+# session_dir_env = "REDDIT_SESSION_DIR"
+
+# YouTube lists: Watch Later, Liked, (history), and your playlists (yt-dlp).
+# Needs the extra:  pip install 'daily-backup-system[youtube]'
+# Auth: a cookies.txt via YOUTUBE_COOKIES_FILE, OR set cookies_from_browser.
+# [sources.youtube]
+# type = "youtube"
+# enabled = true
+# watch_later = true
+# liked = true
+# history = false                # huge and timestamp-less via this route; opt-in
+# playlists = true
+# cookies_file_env = "YOUTUBE_COOKIES_FILE"
+# # cookies_from_browser = "chrome"
+
 # --- Optional: connector collision overrides ------------------------------
 # [connectors.raindrop]
 # plugin = "daily-backup-system:raindrop"
@@ -39,6 +62,14 @@ ENV_TEMPLATE = """\
 
 # Raindrop.io API test token: https://app.raindrop.io/settings/integrations
 RAINDROP_TOKEN=
+
+# Reddit: path to a logged-in Playwright persistent-context directory.
+# Create it once, e.g. with the reddit_saved_extractor tool: `reddit-saved -u <you> --login`.
+# REDDIT_SESSION_DIR=~/.reddit-extractor/browser-session
+
+# YouTube: path to a Netscape-format cookies.txt exported from a logged-in browser
+# (e.g. the "Get cookies.txt LOCALLY" extension). Or use cookies_from_browser instead.
+# YOUTUBE_COOKIES_FILE=~/yt-cookies.txt
 """
 
 __all__ = ["CONFIG_TEMPLATE", "ENV_TEMPLATE"]
