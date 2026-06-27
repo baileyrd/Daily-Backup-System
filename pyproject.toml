@@ -25,6 +25,11 @@ dependencies = [
 [project.optional-dependencies]
 yaml = ["pyyaml>=6.0"]
 dev = ["pytest>=8", "pytest-cov"]
+# Source connectors with heavy, browser/session-based dependencies. The core
+# never imports these; each connector imports them lazily at run time, so the
+# tool stays usable (and the connectors stay discoverable) without the extra.
+reddit = ["playwright>=1.40"]
+youtube = ["yt-dlp>=2024.1"]
 
 [project.scripts]
 dbs = "dbs.cli:main"
@@ -33,6 +38,8 @@ dbs = "dbs.cli:main"
 # third-party connector packages use. This is the extensibility seam.
 [project.entry-points."dbs.connectors"]
 raindrop = "dbs.connectors.raindrop:RaindropConnector"
+reddit = "dbs.connectors.reddit:RedditConnector"
+youtube = "dbs.connectors.youtube:YouTubeConnector"
 
 [project.urls]
 Homepage = "https://github.com/baileyrd/daily-backup-system"

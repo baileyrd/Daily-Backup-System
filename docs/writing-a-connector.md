@@ -131,6 +131,42 @@ engine uses that instead.
 `ctx.secrets` only exposes the keys you declared in `secret_keys`. A connector
 cannot read another connector's tokens, even in the same process.
 
+## Browser-session connectors (no token API)
+
+Some sources have no clean token API — the data lives behind your logged-in
+browser session (Reddit's saved feed, your YouTube lists, …). The built-in
+`reddit` (Playwright) and `youtube` (yt-dlp) connectors show the pattern; copy it
+when you wrap a browser/SDK source rather than a REST endpoint:
+
+- **Don't use the managed HTTP client.** Set `wants_managed_http = False`
+  (`ctx.http` will be `None`); you drive the SDK yourself.
+- **Import heavy deps lazily, inside `fetch()`/`open()`** — never at module top
+  level. A top-level `import playwright` that fails turns the whole connector
+  into a silent *load failure* (it vanishes from the registry, so even
+  `describe` breaks). A lazy import keeps the connector discoverable and turns a
+  missing dependency into a clear `ConnectorConfigError` at run time. Declare the
+  dep as an optional extra (`pip install 'your-pkg[reddit]'`).
+- **Path-valued secrets are fine.** Nothing assumes a secret is a token. Declare
+  a `secret_keys` entry whose *value* is a filesystem path (a cookies file, a
+  persistent-context dir) and reference it from config via a `*_env` key, exactly
+  like Raindrop's `token_env`. `requires_auth=True` only needs ≥1 `secret_key`.
+- **These are usually full-enumeration sources.** With no server-side `since`
+  filter, set `supports_incremental = False` (the engine then runs every backup
+  in `full` mode) and `supports_full_enumeration = True`, accumulate every live
+  id, and yield **one** `ReconcileMarker` at the very end so removed items get
+  soft-deleted. `supports_native_deletes` stays `False` — deletion is driven
+  entirely by the reconcile sweep.
+- **Raise, don't truncate.** If extraction fails partway, `raise`
+  `TransientFetchError` / `ConnectorConfigError` instead of returning a short
+  list. A raise aborts *before* the soft-delete sweep, so a flaky run can't
+  falsely delete your data (the engine also refuses to sweep >50% of live items,
+  but don't rely on that guard).
+- **Keep the acquisition step overridable** (e.g. a `_acquire(self, ctx)` method
+  that yields raw records) and put the pure `raw → BackupItem` mapping next to
+  it. Tests then subclass and override `_acquire` to inject fabricated records,
+  exercising the mapping and markers with no browser — see
+  `tests/connectors/test_reddit.py` and `tests/connectors/test_youtube.py`.
+
 ## Shipping it
 
 Built-ins and third-party connectors are discovered the same way — a
