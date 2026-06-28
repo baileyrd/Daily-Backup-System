@@ -148,7 +148,8 @@ Full guide: [docs/writing-a-connector.md](docs/writing-a-connector.md).
 
 ```bash
 pip install -e ".[dev,yaml]"
-pytest            # 70+ tests, no network (HTTP is mocked via httpx.MockTransport)
+pytest            # 100+ tests, no network (Raindrop mocks httpx.MockTransport; the
+                  # browser/file connectors stub their acquisition step)
 ```
 
 ## Project layout
@@ -158,7 +159,7 @@ src/dbs/
   core/        # the public plugin API + engine + service (UI-agnostic)
   storage/     # Storage ABC + SQLite implementation + migrations
   export/      # Exporter ABC + json/ndjson/csv/markdown/archive
-  connectors/  # built-in connectors (raindrop)
+  connectors/  # built-in connectors (raindrop, reddit, youtube, skool)
   config.py    # TOML/YAML config loading
   cli.py       # Typer CLI (the only module that prints/exits)
 docs/          # architecture, connector guide, scheduling
