@@ -44,7 +44,7 @@ exports** (JSON / NDJSON / CSV / Markdown / zip archive).
 ```bash
 # 1. Install (Python 3.11+)
 python -m venv .venv && source .venv/bin/activate
-pip install -e .            # add [yaml] for YAML config, [dev] for tests
+pip install -e .            # add [yaml] for YAML config, [web] for the UI, [dev] for tests
 
 # 2. Scaffold config + database
 dbs init                    # writes dbs.toml, .env.example, and dbs.sqlite3
@@ -59,6 +59,9 @@ dbs backup --all            # or: dbs backup raindrop
 # 5. Inspect & export
 dbs status
 dbs export --format archive --out my-backup.zip
+
+# …or drive it all from the browser
+pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 ```
 
 ## Commands
@@ -74,10 +77,33 @@ dbs export --format archive --out my-backup.zip
 | `dbs connectors list [--verbose] \| describe TYPE` | Inspect installed connectors (incl. load failures). |
 | `dbs verify [SOURCE]` | Database + per-source integrity self-check. |
 | `dbs schedule` | Print ready-to-use cron / systemd snippets. |
+| `dbs serve [--host H] [--port P]` | Launch the web management UI (needs the `[web]` extra). |
 | `dbs version` | Tool + core API version. |
 
 Export filters: `--source`, `--type`, `--since`, `--until`, `--include-deleted`,
 `--include-revisions`, `--no-raw`.
+
+## Web UI
+
+```bash
+pip install -e ".[web]"
+dbs serve                       # http://127.0.0.1:8000  (--host/--port to change)
+```
+
+`dbs serve` launches a small browser dashboard that is just another thin renderer
+over the same `BackupService` the CLI uses (it adds no behavior of its own). From
+it you can:
+
+- see per-source **status** and recent **run history**;
+- **run a backup** (one source or all) and watch a **live progress bar** —
+  it streams the engine's progress events over Server-Sent Events;
+- browse installed **connectors** (capabilities + config schema);
+- **add a source** (validated against the connector schema; secrets still live in
+  `.env` and are referenced by `*_env`, never entered in the UI);
+- **export** a bundle and **verify** database integrity.
+
+The web dependencies (`fastapi`, `uvicorn`) are optional — the core never imports
+them, and `dbs serve` prints an install hint if the `[web]` extra is missing.
 
 ## How incremental backup works
 
@@ -147,9 +173,10 @@ Full guide: [docs/writing-a-connector.md](docs/writing-a-connector.md).
 ## Development
 
 ```bash
-pip install -e ".[dev,yaml]"
-pytest            # 100+ tests, no network (Raindrop mocks httpx.MockTransport; the
-                  # browser/file connectors stub their acquisition step)
+pip install -e ".[dev,yaml,web]"
+pytest            # 130+ tests, no network (Raindrop mocks httpx.MockTransport; the
+                  # browser/file connectors stub their acquisition step; the web
+                  # tier drives a real backup via the offline skool connector)
 ```
 
 ## Project layout
@@ -160,6 +187,7 @@ src/dbs/
   storage/     # Storage ABC + SQLite implementation + migrations
   export/      # Exporter ABC + json/ndjson/csv/markdown/archive
   connectors/  # built-in connectors (raindrop, reddit, youtube, skool)
+  web/         # optional FastAPI UI (thin renderer over BackupService) + static SPA
   config.py    # TOML/YAML config loading
   cli.py       # Typer CLI (the only module that prints/exits)
 docs/          # architecture, connector guide, scheduling

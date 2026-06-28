@@ -24,7 +24,11 @@ dependencies = [
 
 [project.optional-dependencies]
 yaml = ["pyyaml>=6.0"]
-dev = ["pytest>=8", "pytest-cov"]
+# Web management UI. The core never imports these; `dbs.web` imports them
+# lazily and `dbs serve` errors helpfully if the extra is missing, so the CLI
+# stays usable without it.
+web = ["fastapi>=0.110", "uvicorn>=0.29"]
+dev = ["pytest>=8", "pytest-cov", "httpx>=0.27", "fastapi>=0.110", "uvicorn>=0.29"]
 # Source connectors with heavy, browser/session-based dependencies. The core
 # never imports these; each connector imports them lazily at run time, so the
 # tool stays usable (and the connectors stay discoverable) without the extra.

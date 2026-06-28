@@ -86,3 +86,11 @@ def test_verify_clean_db(tmp_path):
     result = runner.invoke(app, ["--config", str(cfg), "verify"])
     assert result.exit_code == 0
     assert "OK" in result.stdout
+
+
+def test_serve_command_registered():
+    # The web UI command exists and documents its options (no server launched).
+    result = runner.invoke(app, ["serve", "--help"])
+    assert result.exit_code == 0
+    assert "--host" in result.stdout
+    assert "--port" in result.stdout

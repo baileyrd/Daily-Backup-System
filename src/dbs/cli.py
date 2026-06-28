@@ -404,6 +404,32 @@ def schedule(
 
 
 @app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
+    port: int = typer.Option(8000, "--port", "-p", help="Port to listen on."),
+) -> None:
+    """Launch the web management UI (requires the [web] extra)."""
+    try:
+        import uvicorn
+
+        from .web import create_app
+    except ModuleNotFoundError:
+        typer.secho(
+            "The web UI requires the optional 'web' dependencies. Install them with:\n"
+            "    pip install 'daily-backup-system[web]'",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(4)
+
+    # The app factory reads this config path on every request, so it always
+    # reflects the latest on-disk config (e.g. sources added via the UI).
+    app_instance = create_app(_state["config"])
+    typer.secho(f"Serving Daily Backup System UI at http://{host}:{port}", fg=typer.colors.GREEN)
+    typer.echo(f"  (config: {_state['config']})  —  press Ctrl+C to stop")
+    uvicorn.run(app_instance, host=host, port=port)
+
+
+@app.command()
 def version() -> None:
     """Print the tool and core API versions."""
     typer.echo(f"daily-backup-system {__version__} (core API v{CORE_API_VERSION})")
