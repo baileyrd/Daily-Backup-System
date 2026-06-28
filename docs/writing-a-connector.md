@@ -167,6 +167,13 @@ when you wrap a browser/SDK source rather than a REST endpoint:
   exercising the mapping and markers with no browser — see
   `tests/connectors/test_reddit.py` and `tests/connectors/test_youtube.py`.
 
+The same shape works for a **local-file** source that indexes data another tool
+produced on disk. The built-in `skool` connector reads the JSON manifests written
+by `skool-downloader` (no network, no auth — `requires_auth=False`,
+`secret_keys=()`), walks the tree in an overridable `_acquire()`, and emits one
+full-enumeration `ReconcileMarker` so stale catalog entries are swept. Its tests
+exercise both the injected mapping and a real temp-dir tree.
+
 ## Shipping it
 
 Built-ins and third-party connectors are discovered the same way — a

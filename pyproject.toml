@@ -40,6 +40,7 @@ dbs = "dbs.cli:main"
 raindrop = "dbs.connectors.raindrop:RaindropConnector"
 reddit = "dbs.connectors.reddit:RedditConnector"
 youtube = "dbs.connectors.youtube:YouTubeConnector"
+skool = "dbs.connectors.skool:SkoolConnector"
 
 [project.urls]
 Homepage = "https://github.com/baileyrd/daily-backup-system"
