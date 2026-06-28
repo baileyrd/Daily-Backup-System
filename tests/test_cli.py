@@ -68,6 +68,18 @@ def test_backup_unknown_source_exit_5(tmp_path):
     assert result.exit_code == 5
 
 
+def test_backup_progress_flags_are_accepted(tmp_path):
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    # Both --progress and --no-progress parse and don't alter the outcome
+    # (here, an unknown source still exits 5).
+    for flag in ("--progress", "--no-progress"):
+        result = runner.invoke(
+            app, ["--config", str(cfg), "backup", "does-not-exist", flag]
+        )
+        assert result.exit_code == 5, result.stdout
+
+
 def test_verify_clean_db(tmp_path):
     cfg = tmp_path / "dbs.toml"
     runner.invoke(app, ["--config", str(cfg), "init"])

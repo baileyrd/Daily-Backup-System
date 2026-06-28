@@ -35,6 +35,9 @@ from .models import (
     BackupItem,
     Checkpoint,
     Cursor,
+    ProgressCallback,
+    ProgressEvent,
+    ProgressPhase,
     ReconcileMarker,
     RunContext,
     RunResult,
@@ -64,7 +67,13 @@ class Engine:
         # skipped, to protect backed-up data from a truncated/partial fetch.
         self.sweep_safety_fraction = sweep_safety_fraction
 
-    def run_source(self, rc: "RegisteredConnector", ctx: RunContext) -> RunResult:
+    def run_source(
+        self,
+        rc: "RegisteredConnector",
+        ctx: RunContext,
+        *,
+        on_progress: ProgressCallback | None = None,
+    ) -> RunResult:
         connector = rc.cls()
         caps = rc.cls.capabilities
         volatile = set(rc.cls.volatile_fields)
@@ -81,6 +90,28 @@ class Engine:
         status = RunStatus.SUCCESS
         error: str | None = None
 
+        def emit(phase: ProgressPhase, *, note: str = "", result: RunResult | None = None) -> None:
+            # Best-effort: a progress renderer must never break or slow a backup.
+            if on_progress is None:
+                return
+            try:
+                on_progress(
+                    ProgressEvent(
+                        phase=phase,
+                        source=ctx.source_name,
+                        mode=ctx.mode,
+                        fetched=items_seen,
+                        created=stats.created,
+                        updated=stats.updated,
+                        unchanged=stats.unchanged,
+                        deleted=stats.deleted,
+                        result=result,
+                        note=note,
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                ctx.logger.debug("progress callback raised", exc_info=True)
+
         def flush(cursor: Cursor | None) -> None:
             nonlocal buffer, committed_any, watermark_dt, last_cursor
             with self.storage.transaction():
@@ -96,6 +127,7 @@ class Engine:
             last_cursor = cursor
             buffer = []
 
+        emit(ProgressPhase.SOURCE_START)
         try:
             connector.open(ctx)
             for event in connector.fetch(ctx):
@@ -104,8 +136,10 @@ class Engine:
                     buffer.append(self._prepare(event, caps, volatile, valid_kinds))
                     if len(buffer) >= self.batch_max:
                         flush(last_cursor)  # bound memory; do NOT advance cursor
+                    emit(ProgressPhase.ITEM)
                 elif isinstance(event, Checkpoint):
                     flush(event.cursor)
+                    emit(ProgressPhase.CHECKPOINT, note=event.note)
                 elif isinstance(event, ReconcileMarker):
                     reconcile_live = (reconcile_live or set()) | set(event.live_ids)
                 else:
@@ -146,6 +180,8 @@ class Engine:
                         )
                     stats.deleted += swept
                     stats.revisions += swept
+                    if swept:
+                        emit(ProgressPhase.SWEEP, note=f"swept {swept} deleted")
 
             status = RunStatus.SUCCESS
         except (ConnectorConfigError, ConnectorAuthError) as exc:
@@ -185,7 +221,7 @@ class Engine:
                 )
             except Exception:
                 pass
-        return RunResult(
+        result = RunResult(
             source=ctx.source_name,
             status=status,
             started_at=started,
@@ -201,6 +237,8 @@ class Engine:
             revisions=stats.revisions,
             error=error,
         )
+        emit(ProgressPhase.SOURCE_DONE, result=result)
+        return result
 
     # -- item preparation ---------------------------------------------------
 

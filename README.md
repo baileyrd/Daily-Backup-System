@@ -66,7 +66,7 @@ dbs export --format archive --out my-backup.zip
 | Command | Description |
 |---|---|
 | `dbs init` | Create config + `.env.example` and initialize the DB (idempotent). |
-| `dbs backup [SOURCE] [--all] [--force-full] [--reconcile] [--dry-run]` | Run an incremental backup. `auto` mode picks incremental vs. reconcile. |
+| `dbs backup [SOURCE] [--all] [--force-full] [--reconcile] [--dry-run] [--progress/--no-progress]` | Run an incremental backup. `auto` mode picks incremental vs. reconcile. A live status line (running item counter + per-source `[i/N]` position) shows automatically on a TTY; force it with `--progress` or silence it with `--no-progress`. |
 | `dbs status [SOURCE] [--json]` | Per-source item counts, last run, cursor watermark, warnings. |
 | `dbs history [SOURCE] [-n N] [--json]` | Recent backup runs and their stats. |
 | `dbs export --format FMT --out PATH [filters]` | Export to `json`/`ndjson`/`csv`/`markdown`/`archive`. |

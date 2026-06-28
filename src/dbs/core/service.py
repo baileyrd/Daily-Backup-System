@@ -34,6 +34,7 @@ from .http import ManagedHTTPClient
 from .models import (
     ConnectorInfo,
     Cursor,
+    ProgressCallback,
     RunContext,
     RunResult,
     RunStatus,
@@ -127,6 +128,7 @@ class BackupService:
         force_full: bool = False,
         force_reconcile: bool = False,
         dry_run: bool = False,
+        on_progress: ProgressCallback | None = None,
     ) -> RunResult:
         self.storage.reap_interrupted_runs()
         sc = self.config.sources.get(name)
@@ -190,7 +192,7 @@ class BackupService:
                 full_refresh=(chosen_mode == "full"),
                 now=self.clock,
             )
-            result = self.engine.run_source(rc, ctx)
+            result = self.engine.run_source(rc, ctx, on_progress=on_progress)
         finally:
             # Each cleanup step is best-effort and independent so one failure
             # cannot mask the others or the run result.
@@ -210,16 +212,25 @@ class BackupService:
         return result
 
     def backup_all(
-        self, *, only_due: bool = False, continue_on_error: bool = True
+        self,
+        *,
+        only_due: bool = False,
+        continue_on_error: bool = True,
+        on_progress: ProgressCallback | None = None,
     ) -> list[RunResult]:
+        # Resolve the work-list up front so progress can report a determinate
+        # cross-source position ("source 2 of 5").
+        due = [
+            (name, sc)
+            for name, sc in self.config.sources.items()
+            if sc.enabled and (not only_due or self._is_due(name, sc))
+        ]
+        total = len(due)
         results: list[RunResult] = []
-        for name, sc in self.config.sources.items():
-            if not sc.enabled:
-                continue
-            if only_due and not self._is_due(name, sc):
-                continue
+        for index, (name, sc) in enumerate(due, start=1):
+            framed = self._frame_progress(on_progress, index, total)
             try:
-                results.append(self.backup_source(name))
+                results.append(self.backup_source(name, on_progress=framed))
             except Exception as exc:  # isolation: one source must not abort others
                 if not continue_on_error:
                     raise
@@ -231,6 +242,21 @@ class BackupService:
                     )
                 )
         return results
+
+    @staticmethod
+    def _frame_progress(
+        on_progress: ProgressCallback | None, index: int, total: int
+    ) -> ProgressCallback | None:
+        """Wrap a callback to stamp each event with its 1-based source position."""
+        if on_progress is None:
+            return None
+
+        def framed(ev) -> None:
+            ev.source_index = index
+            ev.source_total = total
+            on_progress(ev)
+
+        return framed
 
     def _choose_mode(
         self,

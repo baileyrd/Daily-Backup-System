@@ -119,14 +119,22 @@ def make_ctx(
     )
 
 
-def run_fake(storage: SqliteStorage, cls: type[Connector], *, mode="incremental", cursor=None, since=None):
+def run_fake(
+    storage: SqliteStorage,
+    cls: type[Connector],
+    *,
+    mode="incremental",
+    cursor=None,
+    since=None,
+    on_progress=None,
+):
     """Create a source + run row and execute the fake connector through the engine."""
     source = storage.upsert_source("fake", "fake", "test:fake", "{}", 1)
     cur_before = None
     run_id = storage.begin_run(source.id, "test:fake", mode, cur_before)
     engine = Engine(storage)
     ctx = make_ctx(source_id=source.id, run_id=run_id, mode=mode, cursor=cursor, since=since)
-    result = engine.run_source(registered(cls), ctx)
+    result = engine.run_source(registered(cls), ctx, on_progress=on_progress)
     storage.increment_run_count(source.id)
     return source, result
 

@@ -53,6 +53,24 @@
 6. **Least-privilege secrets.** Each connector sees only its declared
    `secret_keys`.
 
+## Progress reporting (UI-agnostic)
+
+Long runs (especially `dbs backup --all`) report live progress without breaking
+the "core never renders" rule. The engine accepts an optional
+`on_progress` callback and emits plain `ProgressEvent` data at run lifecycle
+points — `source_start`, `item` (running `fetched` counter), `checkpoint`
+(committed-so-far stats advance here), `sweep`, and `source_done` (carries the
+final `RunResult`). `BackupService.backup_all` wraps the callback to stamp each
+event with its 1-based `source_index` / `source_total`, giving a *determinate*
+cross-source position even though per-source item totals are unknown up front
+(connectors stream items; a cheap upstream count is rarely available).
+
+The callback is best-effort: an exception from a renderer is logged and
+swallowed, never aborting a backup. The CLI is the only renderer — it draws a
+transient, throttled status line to **stderr**, and only on a TTY, so cron /
+redirected runs stay clean (`--progress` / `--no-progress` override the
+auto-detection). A future web tier can subscribe to the same events.
+
 ## Data model (SQLite)
 
 - `sources` — configured source instances.

@@ -14,9 +14,11 @@ Exit codes (cron-friendly):
 from __future__ import annotations
 
 import json
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TextIO
 
 import typer
 
@@ -29,7 +31,7 @@ from .core.errors import (
     ConnectorLoadError,
     SourceLockedError,
 )
-from .core.models import RunResult, RunStatus
+from .core.models import ProgressEvent, ProgressPhase, RunResult, RunStatus
 from .core.service import BackupService
 from .export.base import ExportQuery
 from .templates import CONFIG_TEMPLATE, ENV_TEMPLATE
@@ -119,6 +121,67 @@ def _exit_code(results: list[RunResult]) -> int:
     return 0
 
 
+_SPINNER = "|/-\\"
+
+
+class _ProgressRenderer:
+    """A transient, throttled live status line for ``dbs backup``.
+
+    Writes to *stderr* so it never pollutes the results table on stdout (and so a
+    future piped/JSON consumer of stdout stays clean), and only when enabled
+    (auto-disabled for non-TTY runs like cron, where the line would just spam a
+    log file). Item totals are unknown mid-stream, so it shows a running item
+    counter with a spinner plus, for ``--all``, a determinate ``[i/N]`` source
+    position. The final results table remains the permanent record; this line is
+    cleared when the run ends.
+    """
+
+    _MIN_REDRAW = 0.1  # seconds between item-driven redraws
+
+    def __init__(self, stream: TextIO | None = None, *, enabled: bool = True) -> None:
+        self._stream = stream if stream is not None else sys.stderr
+        self._enabled = enabled
+        self._tick = 0
+        self._last_draw = 0.0
+        self._dirty = False  # an undrawn-over line is on screen
+
+    def __call__(self, ev: ProgressEvent) -> None:
+        if not self._enabled:
+            return
+        # START/DONE are infrequent and meaningful — never throttle them.
+        forced = ev.phase in (ProgressPhase.SOURCE_START, ProgressPhase.SOURCE_DONE)
+        now = time.monotonic()
+        if not forced and (now - self._last_draw) < self._MIN_REDRAW:
+            return
+        self._last_draw = now
+        if ev.phase is ProgressPhase.SOURCE_DONE:
+            # Clear; the source's outcome is rendered by the results table.
+            self._clear()
+            return
+        self._draw(ev)
+
+    def _draw(self, ev: ProgressEvent) -> None:
+        self._tick += 1
+        spin = _SPINNER[self._tick % len(_SPINNER)]
+        pos = f"[{ev.source_index}/{ev.source_total}] " if ev.source_total else ""
+        stats = f"+{ev.created} ~{ev.updated} ={ev.unchanged}"
+        if ev.deleted:
+            stats += f" x{ev.deleted}"
+        line = f"{spin} {pos}{ev.source} [{ev.mode}] {ev.fetched:,} fetched ({stats})"
+        self._stream.write("\r\033[K" + line)
+        self._stream.flush()
+        self._dirty = True
+
+    def _clear(self) -> None:
+        if self._dirty:
+            self._stream.write("\r\033[K")
+            self._stream.flush()
+            self._dirty = False
+
+    def close(self) -> None:
+        self._clear()
+
+
 # --------------------------------------------------------------------------- #
 # commands                                                                     #
 # --------------------------------------------------------------------------- #
@@ -162,18 +225,25 @@ def backup(
     force_full: bool = typer.Option(False, "--force-full", help="Full refetch, ignore cursor."),
     reconcile: bool = typer.Option(False, "--reconcile", help="Force a reconcile (edits + deletions)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show the chosen mode without running."),
+    progress: Optional[bool] = typer.Option(
+        None, "--progress/--no-progress",
+        help="Show a live progress status line (default: auto — on for a TTY).",
+    ),
 ) -> None:
     """Back up one source or, with --all, every enabled source."""
     svc = _service()
+    show_progress = progress if progress is not None else sys.stderr.isatty()
+    renderer = _ProgressRenderer(enabled=show_progress)
     try:
         if all_sources:
-            results = svc.backup_all(only_due=only_due)
+            results = svc.backup_all(only_due=only_due, on_progress=renderer)
         elif source:
             try:
                 results = [
                     svc.backup_source(
                         source, force_full=force_full,
                         force_reconcile=reconcile, dry_run=dry_run,
+                        on_progress=renderer,
                     )
                 ]
             except SourceLockedError as exc:  # subclass of BackupRunError — must come first
@@ -189,11 +259,13 @@ def backup(
             typer.secho("Specify a SOURCE name or --all.", fg=typer.colors.RED, err=True)
             raise typer.Exit(4)
 
+        renderer.close()
         typer.secho("Backup results:", bold=True)
         for r in results:
             _print_run(r)
         raise typer.Exit(_exit_code(results))
     finally:
+        renderer.close()
         svc.close()
 
 
