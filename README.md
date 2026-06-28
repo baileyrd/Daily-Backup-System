@@ -16,9 +16,10 @@ exports** (JSON / NDJSON / CSV / Markdown / zip archive).
   CLI is a thin renderer, and a web UI can reuse the same core later.
 - **Exportable** — produce a portable, self-describing backup bundle on demand.
 
-> Status: v0.1 ships the full foundation plus three built-in connectors:
+> Status: v0.1 ships the full foundation plus four built-in connectors:
 > **Raindrop.io** (the REST/token reference), **Reddit** (saved posts &
-> comments), and **YouTube** (Watch Later, Liked, history, playlists). Reddit and
+> comments), **YouTube** (Watch Later, Liked, history, playlists), and **Skool**
+> (a metadata catalog of courses downloaded by `skool-downloader`). Reddit and
 > YouTube are *browser-session* connectors — they reuse your logged-in session
 > rather than an API token — and pull in heavy optional dependencies, so they
 > install via extras:
@@ -28,7 +29,11 @@ exports** (JSON / NDJSON / CSV / Markdown / zip archive).
 > pip install -e ".[youtube]"                                  # YouTube (yt-dlp)
 > ```
 >
-> Both follow the same plugin contract as Raindrop — see
+> Skool needs no extra and no auth: it indexes the `.group.json` / `.course.json`
+> / `lesson.json` manifests that `skool-downloader` writes to disk (the large
+> video files stay there; DBS catalogs the community → course → lesson structure).
+>
+> All follow the same plugin contract as Raindrop — see
 > [docs/writing-a-connector.md](docs/writing-a-connector.md) (and its
 > "browser-session connectors" note).
 

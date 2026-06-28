@@ -45,6 +45,15 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # cookies_file_env = "YOUTUBE_COOKIES_FILE"
 # # cookies_from_browser = "chrome"
 
+# Skool: catalog courses already downloaded by skool-downloader (no auth, no
+# extra — it just indexes the JSON manifests on disk; videos stay where they are).
+# [sources.skool]
+# type = "skool"
+# enabled = true
+# downloads_dir = "~/skool-downloader/downloads"
+# include_kinds = ["community", "course", "lesson"]
+# include_incomplete = true       # also index lessons whose download is unfinished
+
 # --- Optional: connector collision overrides ------------------------------
 # [connectors.raindrop]
 # plugin = "daily-backup-system:raindrop"
