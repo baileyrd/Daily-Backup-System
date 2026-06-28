@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Daily Backup System</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Daily Backup System</h1>
+    <span id="meta" class="meta"></span>
+  </header>
+
+  <nav id="tabs">
+    <button data-tab="sources" class="active">Sources</button>
+    <button data-tab="history">History</button>
+    <button data-tab="connectors">Connectors</button>
+    <button data-tab="add">Add source</button>
+    <button data-tab="export">Export</button>
+    <button data-tab="verify">Verify</button>
+  </nav>
+
+  <!-- Live backup progress (shared across tabs) -->
+  <section id="progress" class="card hidden">
+    <div class="progress-head">
+      <strong id="progress-title">Backup</strong>
+      <span id="progress-sub" class="muted"></span>
+    </div>
+    <div class="bar"><div id="progress-bar" class="bar-fill"></div></div>
+    <div id="progress-line" class="mono"></div>
+    <div id="progress-results"></div>
+  </section>
+
+  <main>
+    <!-- Sources -->
+    <section id="tab-sources" class="tab">
+      <div class="row between">
+        <h2>Sources</h2>
+        <div>
+          <button id="backup-all" class="primary">Back up all</button>
+          <button id="refresh-sources">Refresh</button>
+        </div>
+      </div>
+      <table id="sources-table">
+        <thead>
+          <tr>
+            <th>Name</th><th>Type</th><th>Enabled</th><th>Live</th>
+            <th>Deleted</th><th>Runs</th><th>Last run</th><th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <!-- History -->
+    <section id="tab-history" class="tab hidden">
+      <div class="row between">
+        <h2>History</h2>
+        <div>
+          <label>Source <input id="history-source" placeholder="(all)" /></label>
+          <label>Limit <input id="history-limit" type="number" value="25" min="1" max="500" /></label>
+          <button id="refresh-history">Refresh</button>
+        </div>
+      </div>
+      <table id="history-table">
+        <thead>
+          <tr><th>Started</th><th>Source</th><th>Status</th><th>Mode</th>
+              <th>+</th><th>~</th><th>x</th><th>Error</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <!-- Connectors -->
+    <section id="tab-connectors" class="tab hidden">
+      <h2>Connectors</h2>
+      <div id="connectors-list"></div>
+    </section>
+
+    <!-- Add source -->
+    <section id="tab-add" class="tab hidden">
+      <h2>Add source</h2>
+      <form id="add-form" class="card">
+        <label>Name <input id="add-name" required placeholder="raindrop-personal" /></label>
+        <label>Type
+          <select id="add-type" required></select>
+        </label>
+        <div id="add-schema" class="schema"></div>
+        <details>
+          <summary>Advanced: options as JSON</summary>
+          <textarea id="add-options" rows="6" placeholder='{ "collection_id": 0 }'></textarea>
+        </details>
+        <button type="submit" class="primary">Add source</button>
+        <span id="add-result" class="result"></span>
+      </form>
+      <p class="muted">Secrets are never stored here — reference them by name via a
+        <code>*_env</code> option (e.g. <code>token_env = RAINDROP_TOKEN</code>) and keep the
+        value in your <code>.env</code>.</p>
+    </section>
+
+    <!-- Export -->
+    <section id="tab-export" class="tab hidden">
+      <h2>Export</h2>
+      <form id="export-form" class="card">
+        <label>Format <select id="export-format"></select></label>
+        <label>Source(s) <input id="export-source" placeholder="comma,separated (optional)" /></label>
+        <label>Type(s) <input id="export-type" placeholder="comma,separated (optional)" /></label>
+        <label>Since <input id="export-since" placeholder="YYYY-MM-DD" /></label>
+        <label>Until <input id="export-until" placeholder="YYYY-MM-DD" /></label>
+        <label class="check"><input type="checkbox" id="export-deleted" /> Include deleted</label>
+        <label class="check"><input type="checkbox" id="export-revisions" /> Include revisions (archive)</label>
+        <label class="check"><input type="checkbox" id="export-noraw" /> Omit raw payloads</label>
+        <button type="submit" class="primary">Download export</button>
+      </form>
+    </section>
+
+    <!-- Verify -->
+    <section id="tab-verify" class="tab hidden">
+      <div class="row between">
+        <h2>Verify</h2>
+        <button id="run-verify" class="primary">Run integrity check</button>
+      </div>
+      <div id="verify-result"></div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

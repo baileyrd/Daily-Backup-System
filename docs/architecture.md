@@ -2,7 +2,7 @@
 
 ```
             ┌─────────────┐
-  CLI  ───▶ │BackupService│ ◀── (future web/API tier)
+  CLI  ───▶ │BackupService│ ◀── Web UI (dbs.web, optional)
             └──────┬──────┘
                    │ orchestrates
       ┌────────────┼─────────────┬───────────────┐
@@ -21,8 +21,15 @@
   `Secrets`, `ManagedHTTPClient`, and helpers.
 - **`BackupService` (application core).** UI-agnostic façade returning plain
   dataclasses; never prints, exits, or reads stdin. The clock and HTTP factory
-  are injected for deterministic tests. The CLI and a future web tier are both
-  thin renderers over it.
+  are injected for deterministic tests. The CLI and the web tier are both thin
+  renderers over it.
+- **`dbs.web` (optional web tier).** A FastAPI app (`dbs serve`) that renders the
+  same `BackupService` over HTTP + a static single-page UI. Adds no behavior of
+  its own. Long backups run in a background thread (`JobManager`) and stream
+  their `ProgressEvent`s to the browser over Server-Sent Events. Its deps
+  (`fastapi`, `uvicorn`) live behind the `[web]` extra; the core never imports
+  them. Each request uses a fresh `BackupService` (the SQLite connection is
+  single-thread).
 - **`Engine`.** Drives one source's `fetch()` stream into storage, enforcing the
   correctness invariants below.
 - **`Storage` (ABC) + `SqliteStorage`.** All persistence. An ABC so a future
@@ -52,6 +59,25 @@
    clears their locks at the start of each operation.
 6. **Least-privilege secrets.** Each connector sees only its declared
    `secret_keys`.
+
+## Progress reporting (UI-agnostic)
+
+Long runs (especially `dbs backup --all`) report live progress without breaking
+the "core never renders" rule. The engine accepts an optional
+`on_progress` callback and emits plain `ProgressEvent` data at run lifecycle
+points — `source_start`, `item` (running `fetched` counter), `checkpoint`
+(committed-so-far stats advance here), `sweep`, and `source_done` (carries the
+final `RunResult`). `BackupService.backup_all` wraps the callback to stamp each
+event with its 1-based `source_index` / `source_total`, giving a *determinate*
+cross-source position even though per-source item totals are unknown up front
+(connectors stream items; a cheap upstream count is rarely available).
+
+The callback is best-effort: an exception from a renderer is logged and
+swallowed, never aborting a backup. The CLI is the only renderer — it draws a
+transient, throttled status line to **stderr**, and only on a TTY, so cron /
+redirected runs stay clean (`--progress` / `--no-progress` override the
+auto-detection). The web tier subscribes to the same events and relays them to
+the browser over Server-Sent Events for a live progress bar.
 
 ## Data model (SQLite)
 

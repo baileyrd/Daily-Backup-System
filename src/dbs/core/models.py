@@ -201,6 +201,49 @@ class RunResult:
         }
 
 
+class ProgressPhase(str, Enum):
+    """Lifecycle points emitted during a backup run for live progress UIs."""
+
+    SOURCE_START = "source_start"
+    ITEM = "item"
+    CHECKPOINT = "checkpoint"
+    SWEEP = "sweep"
+    SOURCE_DONE = "source_done"
+
+
+@dataclass(slots=True)
+class ProgressEvent:
+    """A point-in-time progress update for one source's backup run.
+
+    Emitted by the engine (and framed by the service) so a UI can render a live
+    status/progress display. Plain data; the core never renders it.
+
+    Item *totals* are generally unknown up front — connectors stream items and a
+    cheap full upstream count is rarely available — so ``fetched`` is a running
+    count, not a fraction. The committed-so-far stats (``created`` ...) advance
+    at each checkpoint. For ``dbs backup --all`` the service fills in
+    ``source_index``/``source_total`` to give determinate cross-source progress.
+    """
+
+    phase: ProgressPhase
+    source: str
+    mode: str
+    fetched: int = 0
+    created: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    deleted: int = 0
+    # Cross-source framing, set by BackupService.backup_all (1-based index).
+    source_index: int | None = None
+    source_total: int | None = None
+    # Set on SOURCE_DONE.
+    result: "RunResult | None" = None
+    note: str = ""
+
+
+ProgressCallback = Callable[["ProgressEvent"], None]
+
+
 @dataclass(slots=True)
 class SourceStatus:
     """Snapshot of one source for ``dbs status``."""
@@ -275,6 +318,9 @@ __all__ = [
     "RunContext",
     "RunStatus",
     "RunResult",
+    "ProgressPhase",
+    "ProgressEvent",
+    "ProgressCallback",
     "SourceStatus",
     "ConnectorInfo",
     "VerifyIssue",
