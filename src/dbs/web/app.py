@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -43,6 +44,34 @@ def _parse_date(value: Optional[str]) -> Optional[datetime]:
     except ValueError:
         dt = datetime.strptime(text, "%Y-%m-%d")
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _source_secret_names(rc, options: dict[str, Any]) -> list[str]:
+    """The secret env-var name(s) a configured source will actually read.
+
+    A connector declares ``secret_keys`` (the allow-list). The source picks which
+    one via a ``*_env`` option (e.g. ``token_env = "RAINDROP_TOKEN"``), defaulting
+    from the connector's config model. We resolve those ``*_env`` fields to the
+    concrete names; if a connector reads its secrets directly (no ``*_env``
+    indirection) we fall back to the declared ``secret_keys``.
+    """
+    secret_keys = tuple(rc.cls.secret_keys)
+    if not secret_keys:
+        return []
+    try:
+        inst = rc.cls.config_model(**options)
+        fields = list(type(inst).model_fields)
+    except Exception:  # invalid options — surface the declared names anyway
+        return list(secret_keys)
+    env_fields = [f for f in fields if f.endswith("_env")]
+    if not env_fields:
+        return list(secret_keys)
+    chosen = []
+    for f in env_fields:
+        val = getattr(inst, f, None)
+        if isinstance(val, str) and val and val in secret_keys:
+            chosen.append(val)
+    return sorted(set(chosen)) or list(secret_keys)
 
 
 # Per-format download metadata: (file extension, media type).
@@ -75,6 +104,7 @@ def create_app(config_path: str = "dbs.toml"):
     from ..core.service import BackupService
     from ..export import EXPORTERS
     from ..export.base import ExportQuery
+    from . import envfile
     from .jobs import JobAlreadyRunning, JobManager
 
     def open_service() -> BackupService:
@@ -165,6 +195,94 @@ def create_app(config_path: str = "dbs.toml"):
                     for x in report.issues
                 ],
             }
+        finally:
+            svc.close()
+
+    # -- secrets (API keys / tokens, stored in .env) ------------------------
+
+    def _allowed_secret_names(svc) -> set[str]:
+        allowed: set[str] = set()
+        for ci in svc.list_connectors():
+            allowed.update(ci.secret_keys)
+        return allowed
+
+    @app.get("/api/secrets")
+    def list_secrets() -> dict[str, Any]:
+        """List the secret env-vars relevant to the config and whether each is set.
+
+        Values are NEVER returned — only set/unset status and where it resolves
+        from. ``needed`` is keyed by configured sources; ``allowed`` lets the UI
+        set a connector's secret before its source exists.
+        """
+        svc = open_service()
+        try:
+            env_path = svc.config.base_dir / ".env"
+            in_file = envfile.read_keys(env_path)
+            in_proc = {k for k, v in os.environ.items() if v}
+
+            needed: dict[str, set[str]] = {}
+            for name, sc in svc.config.sources.items():
+                if not sc.enabled:
+                    continue
+                try:
+                    rc = svc.registry.get(sc.type)
+                except Exception:
+                    continue
+                for sk in _source_secret_names(rc, sc.options):
+                    needed.setdefault(sk, set()).add(name)
+
+            secrets = [
+                {
+                    "name": sk,
+                    "sources": sorted(srcs),
+                    "set": sk in in_file or sk in in_proc,
+                    "in_env_file": sk in in_file,
+                    "in_process_env": sk in in_proc,
+                }
+                for sk, srcs in sorted(needed.items())
+            ]
+            return {
+                "env_file": str(env_path),
+                "secrets": secrets,
+                "allowed": sorted(_allowed_secret_names(svc)),
+            }
+        finally:
+            svc.close()
+
+    @app.post("/api/secrets")
+    def set_secret(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """Write an API key/token to the .env file. The value is never echoed."""
+        name = (payload.get("name") or "").strip()
+        value = payload.get("value")
+        if not name:
+            raise HTTPException(status_code=400, detail="'name' is required")
+        if not isinstance(value, str) or value == "":
+            raise HTTPException(status_code=400, detail="'value' must be a non-empty string")
+        svc = open_service()
+        try:
+            if name not in _allowed_secret_names(svc):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{name!r} is not a declared secret of any installed connector",
+                )
+            env_path = svc.config.base_dir / ".env"
+            try:
+                envfile.set_var(env_path, name, value)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            # Warn if a process-env var of the same name will shadow the .env value.
+            return {"name": name, "set": True, "shadowed_by_process_env": bool(os.environ.get(name))}
+        finally:
+            svc.close()
+
+    @app.delete("/api/secrets/{name}")
+    def delete_secret(name: str) -> dict[str, Any]:
+        """Remove a secret from the .env file (does not touch the process env)."""
+        svc = open_service()
+        try:
+            env_path = svc.config.base_dir / ".env"
+            removed = envfile.unset_var(env_path, name)
+            return {"name": name, "removed": removed}
         finally:
             svc.close()
 

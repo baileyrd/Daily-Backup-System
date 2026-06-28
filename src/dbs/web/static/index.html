@@ -16,6 +16,7 @@
     <button data-tab="sources" class="active">Sources</button>
     <button data-tab="history">History</button>
     <button data-tab="connectors">Connectors</button>
+    <button data-tab="secrets">API keys</button>
     <button data-tab="add">Add source</button>
     <button data-tab="export">Export</button>
     <button data-tab="verify">Verify</button>
@@ -78,6 +79,25 @@
       <div id="connectors-list"></div>
     </section>
 
+    <!-- API keys / secrets -->
+    <section id="tab-secrets" class="tab hidden">
+      <div class="row between">
+        <h2>API keys &amp; tokens</h2>
+        <button id="refresh-secrets">Refresh</button>
+      </div>
+      <p class="muted">Values are written to your <code id="secrets-envpath">.env</code> file (gitignored) and
+        <strong>never shown back</strong> — only whether each is set. Connectors that don't need a key won't appear here.</p>
+      <div id="secrets-list"></div>
+      <div class="card">
+        <h3 style="margin:0 0 0.5rem;font-size:0.95rem;">Set another key</h3>
+        <form id="secret-other-form" class="row">
+          <select id="secret-other-name"></select>
+          <input id="secret-other-value" type="password" placeholder="value" autocomplete="new-password" />
+          <button type="submit" class="primary">Save</button>
+        </form>
+      </div>
+    </section>
+
     <!-- Add source -->
     <section id="tab-add" class="tab hidden">
       <h2>Add source</h2>
@@ -94,9 +114,9 @@
         <button type="submit" class="primary">Add source</button>
         <span id="add-result" class="result"></span>
       </form>
-      <p class="muted">Secrets are never stored here — reference them by name via a
-        <code>*_env</code> option (e.g. <code>token_env = RAINDROP_TOKEN</code>) and keep the
-        value in your <code>.env</code>.</p>
+      <p class="muted">Secrets are never stored in the config — reference them by name via a
+        <code>*_env</code> option (e.g. <code>token_env = RAINDROP_TOKEN</code>) and set the
+        value in the <strong>API keys</strong> tab (it writes your <code>.env</code>).</p>
     </section>
 
     <!-- Export -->

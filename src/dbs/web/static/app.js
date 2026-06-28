@@ -148,6 +148,84 @@ async function loadConnectors() {
 }
 LOADERS.connectors = loadConnectors;
 
+// --- secrets / API keys ----------------------------------------------------
+
+async function saveSecret(name, value, statusEl) {
+  if (!value) { toast("Enter a value first.", "err"); return; }
+  try {
+    const r = await api("/api/secrets", { method: "POST", body: JSON.stringify({ name, value }) });
+    toast(`Saved ${name}.`, "ok");
+    if (r.shadowed_by_process_env) toast(`Note: ${name} is also set in the process environment, which overrides .env.`, "");
+    loadSecrets();
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = e.message; statusEl.className = "result st-failed"; }
+    else toast(e.message, "err");
+  }
+}
+
+async function clearSecret(name) {
+  try {
+    await api(`/api/secrets/${encodeURIComponent(name)}`, { method: "DELETE" });
+    toast(`Cleared ${name}.`, "ok");
+    loadSecrets();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function loadSecrets() {
+  const box = $("#secrets-list");
+  box.innerHTML = "";
+  try {
+    const data = await api("/api/secrets");
+    $("#secrets-envpath").textContent = data.env_file;
+
+    if (!data.secrets.length) {
+      box.append(el("div", { className: "muted", textContent: "None of your configured sources require an API key." }));
+    }
+    data.secrets.forEach((s) => {
+      const status = el("span", { className: "pill " + (s.set ? "st-success" : "st-failed"),
+        textContent: s.set ? (s.in_env_file ? "set" : "set (process env)") : "not set" });
+      const input = el("input", { type: "password", placeholder: s.set ? "replace…" : "value", autocomplete: "new-password" });
+      const result = el("span", { className: "result" });
+      const save = el("button", { className: "primary small", textContent: "Save" });
+      save.addEventListener("click", () => saveSecret(s.name, input.value, result));
+      const row = el("div", { className: "row", style: "gap:0.5rem;flex-wrap:wrap;" },
+        el("strong", { className: "mono", textContent: s.name }), status, input, save);
+      if (s.in_env_file) {
+        const clear = el("button", { className: "small", textContent: "Clear" });
+        clear.addEventListener("click", () => clearSecret(s.name));
+        row.append(clear);
+      }
+      const used = el("div", { className: "tag", textContent: "used by: " + (s.sources.join(", ") || "—") });
+      const warn = s.in_process_env
+        ? el("div", { className: "tag st-partial", textContent: "also set in the process environment (overrides .env at runtime)" })
+        : document.createTextNode("");
+      box.append(el("div", { className: "connector" }, row, used, warn, result));
+    });
+
+    // "Set another key": allowed names not already listed above.
+    const listed = new Set(data.secrets.map((s) => s.name));
+    const sel = $("#secret-other-name");
+    sel.innerHTML = "";
+    const others = data.allowed.filter((n) => !listed.has(n));
+    if (!others.length) {
+      sel.append(el("option", { value: "", textContent: "(no other keys)" }));
+      $("#secret-other-form").querySelector("button").disabled = true;
+    } else {
+      $("#secret-other-form").querySelector("button").disabled = false;
+      others.forEach((n) => sel.append(el("option", { value: n, textContent: n })));
+    }
+  } catch (e) { toast(e.message, "err"); }
+}
+LOADERS.secrets = loadSecrets;
+$("#refresh-secrets").addEventListener("click", loadSecrets);
+$("#secret-other-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const name = $("#secret-other-name").value;
+  if (!name) return;
+  saveSecret(name, $("#secret-other-value").value);
+  $("#secret-other-value").value = "";
+});
+
 // --- add source ------------------------------------------------------------
 
 let CONNECTOR_SCHEMAS = {};
