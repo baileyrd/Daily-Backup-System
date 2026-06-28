@@ -29,7 +29,10 @@
   their `ProgressEvent`s to the browser over Server-Sent Events. Its deps
   (`fastapi`, `uvicorn`) live behind the `[web]` extra; the core never imports
   them. Each request uses a fresh `BackupService` (the SQLite connection is
-  single-thread).
+  single-thread). Secrets set from the UI go through `dbs.web.envfile` into
+  `.env` (never the config), restricted to names a connector declares as a
+  secret, and are never read back — the secrets API reports only set/unset
+  status. It binds to localhost and is unauthenticated by design (local use).
 - **`Engine`.** Drives one source's `fetch()` stream into storage, enforcing the
   correctness invariants below.
 - **`Storage` (ABC) + `SqliteStorage`.** All persistence. An ABC so a future

@@ -98,12 +98,28 @@ it you can:
 - **run a backup** (one source or all) and watch a **live progress bar** —
   it streams the engine's progress events over Server-Sent Events;
 - browse installed **connectors** (capabilities + config schema);
-- **add a source** (validated against the connector schema; secrets still live in
-  `.env` and are referenced by `*_env`, never entered in the UI);
+- **add a source** (validated against the connector schema);
+- set **API keys / tokens** (the *API keys* tab) — written to your `.env`, never
+  to the config, and never shown back; see below;
 - **export** a bundle and **verify** database integrity.
+
+### API keys in the UI
+
+The *API keys* tab lets you set the secrets your configured sources need (e.g.
+`RAINDROP_TOKEN`). It keeps the project's secret model intact:
+
+- values are written to **`.env`** (gitignored), never to the config file;
+- you can only set names a connector actually **declares** as a secret;
+- stored values are **never returned** by the API — the UI shows only
+  *set / not set*.
 
 The web dependencies (`fastapi`, `uvicorn`) are optional — the core never imports
 them, and `dbs serve` prints an install hint if the `[web]` extra is missing.
+
+> **Security:** `dbs serve` binds to `127.0.0.1` and has **no authentication** —
+> it's meant for local, single-user use (the same trust level as editing `.env`
+> by hand). Don't expose it to an untrusted network; put it behind your own auth
+> first if you must.
 
 ## How incremental backup works
 
