@@ -75,7 +75,17 @@
 
     <!-- Connectors -->
     <section id="tab-connectors" class="tab hidden">
-      <h2>Connectors</h2>
+      <div class="row between">
+        <h2>Connectors</h2>
+        <button id="refresh-connectors">Refresh</button>
+      </div>
+      <section id="setup-log-card" class="card hidden">
+        <div class="row between">
+          <strong id="setup-log-title">Setup</strong>
+          <button id="setup-log-hide" class="small">Hide</button>
+        </div>
+        <pre id="setup-log" class="log"></pre>
+      </section>
       <div id="connectors-list"></div>
     </section>
 

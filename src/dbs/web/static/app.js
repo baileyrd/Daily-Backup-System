@@ -37,21 +37,25 @@ const statusClass = (s) => "st-" + (s || "");
 // --- tabs ------------------------------------------------------------------
 
 const LOADERS = {};
+function switchTab(tab) {
+  $$("nav#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  $$(".tab").forEach((s) => s.classList.toggle("hidden", s.id !== "tab-" + tab));
+  if (LOADERS[tab]) LOADERS[tab]();
+}
 $$("nav#tabs button").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    $$("nav#tabs button").forEach((b) => b.classList.toggle("active", b === btn));
-    const tab = btn.dataset.tab;
-    $$(".tab").forEach((s) => s.classList.toggle("hidden", s.id !== "tab-" + tab));
-    if (LOADERS[tab]) LOADERS[tab]();
-  });
+  btn.addEventListener("click", () => switchTab(btn.dataset.tab));
 });
 
 // --- meta ------------------------------------------------------------------
 
+let META = {};
+
 async function loadMeta() {
   try {
     const m = await api("/api/meta");
-    $("#meta").textContent = `v${m.tool_version} · core API v${m.core_api_version} · ${m.config_path}`;
+    META = m;
+    $("#meta").textContent = `v${m.tool_version} · core API v${m.core_api_version} · ${m.config_path}`
+      + (m.setup_enabled ? " · setup on" : "");
     const fmt = $("#export-format");
     fmt.innerHTML = "";
     m.formats.forEach((f) => fmt.append(el("option", { value: f, textContent: f })));
@@ -136,17 +140,100 @@ async function loadConnectors() {
       Object.entries(c.capabilities).forEach(([k, v]) => {
         if (v === true) caps.append(el("span", { className: "pill", textContent: k.replace(/^supports_/, "") }));
       });
+
+      const ready = el("span", { className: "pill " + (c.ready ? "st-success" : "st-partial"),
+        textContent: c.ready ? "ready" : "needs setup" });
+
+      const actions = el("div", { className: "conn-actions" });
+      if (!c.ready) {
+        if (META.setup_enabled) {
+          const install = el("button", { className: "primary small", textContent: "Install" });
+          install.addEventListener("click", () => installConnector(c.type, install));
+          actions.append(install);
+        } else if (c.ready_detail) {
+          actions.append(el("code", { textContent: c.ready_detail }));
+        }
+        if (c.needs_playwright_browser && !META.setup_enabled) {
+          actions.append(el("span", { className: "tag", textContent: "+ playwright install chromium" }));
+        }
+      }
+      if (c.supports_interactive_login && META.setup_enabled) {
+        const login = el("button", { className: "small", textContent: "Log in (browser)" });
+        login.disabled = !c.ready;  // need the package before logging in
+        login.title = c.ready ? "Opens a browser on the server host" : "Install the connector first";
+        login.addEventListener("click", () => loginConnector(c.type, login));
+        actions.append(login);
+      }
+      if (c.secret_keys.length) {
+        const jump = el("a", { href: "#", textContent: "set API key →" });
+        jump.addEventListener("click", (e) => { e.preventDefault(); switchTab("secrets"); });
+        actions.append(jump);
+      }
+      if (c.docs_url) actions.append(el("a", { href: c.docs_url, target: "_blank", rel: "noopener", textContent: "docs ↗" }));
+
       const card = el("div", { className: "connector" },
-        el("h3", { textContent: `${c.display_name} (${c.type})` }),
+        el("div", { className: "row", style: "gap:0.5rem;align-items:baseline;flex-wrap:wrap;" },
+          el("h3", { textContent: `${c.display_name} (${c.type})`, style: "margin:0;" }), ready),
         el("div", { className: "muted", textContent: c.description || "" }),
         el("div", { className: "tag", textContent: `${c.is_builtin ? "built-in" : c.dist_name} · secrets: ${c.secret_keys.join(", ") || "none"} · kinds: ${c.item_kinds.map((k) => k.name).join(", ")}` }),
         caps,
+        actions,
       );
+      if (c.type === "youtube") {
+        card.append(el("div", { className: "tag", style: "margin-top:0.4rem;",
+          textContent: "Tip: instead of a cookies file you can set cookies_from_browser (e.g. chrome) in the source config to read your logged-in browser's cookies." }));
+      }
       box.append(card);
     });
   } catch (e) { toast(e.message, "err"); }
 }
 LOADERS.connectors = loadConnectors;
+$("#refresh-connectors").addEventListener("click", loadConnectors);
+$("#setup-log-hide").addEventListener("click", () => $("#setup-log-card").classList.add("hidden"));
+
+// --- setup actions (install / login) ---------------------------------------
+
+let setupES = null;
+
+async function installConnector(type, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const job = await api(`/api/connectors/${encodeURIComponent(type)}/install`, { method: "POST" });
+    streamSetup(job.id, `Installing ${type}…`);
+  } catch (e) { toast(e.message, "err"); if (btn) btn.disabled = false; }
+}
+
+async function loginConnector(type, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const job = await api(`/api/connectors/${encodeURIComponent(type)}/login`, { method: "POST" });
+    streamSetup(job.id, `${type}: browser login (check the server host for a window)`);
+  } catch (e) { toast(e.message, "err"); if (btn) btn.disabled = false; }
+}
+
+function streamSetup(jobId, title) {
+  if (setupES) { setupES.close(); setupES = null; }
+  const card = $("#setup-log-card");
+  const log = $("#setup-log");
+  $("#setup-log-title").textContent = title;
+  log.textContent = "";
+  card.classList.remove("hidden");
+  setupES = new EventSource(`/api/setup/${jobId}/stream`);
+  setupES.onmessage = (m) => {
+    const { line } = JSON.parse(m.data);
+    log.textContent += line + "\n";
+    log.scrollTop = log.scrollHeight;
+  };
+  setupES.addEventListener("end", (m) => {
+    if (setupES) { setupES.close(); setupES = null; }
+    const snap = JSON.parse(m.data);
+    const ok = snap.status === "done";
+    toast(ok ? "Setup finished." : `Setup failed: ${snap.error || "error"}`, ok ? "ok" : "err");
+    loadConnectors();
+    loadSecrets();
+  });
+  setupES.onerror = () => { /* 'end' handles teardown */ };
+}
 
 // --- secrets / API keys ----------------------------------------------------
 

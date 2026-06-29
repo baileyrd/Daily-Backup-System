@@ -32,6 +32,7 @@ Minimal connector skeleton::
 
 from __future__ import annotations
 
+import importlib.util
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, ClassVar, Iterator
 
@@ -86,6 +87,36 @@ class Connector(ABC):
     description: ClassVar[str] = ""
     docs_url: ClassVar[str] = ""
 
+    # -- optional runtime dependencies (for setup tooling) ------------------
+    # A connector whose acquisition step needs heavy/optional packages declares
+    # them here so a UI/CLI can report readiness and offer to install them. The
+    # core never installs anything; these are pure metadata.
+    #
+    # pip_requirements
+    #     Concrete pip requirement specifiers to install (e.g. ``("yt-dlp>=2024.1",)``).
+    # runtime_imports
+    #     Top-level module names to probe for "is this connector ready to run?".
+    # needs_playwright_browser
+    #     True if, beyond pip, a Playwright browser must be installed
+    #     (``playwright install chromium``).
+    pip_requirements: ClassVar[tuple[str, ...]] = ()
+    runtime_imports: ClassVar[tuple[str, ...]] = ()
+    needs_playwright_browser: ClassVar[bool] = False
+
+    @classmethod
+    def check_ready(cls) -> tuple[bool, str]:
+        """Report whether the connector's runtime dependencies are importable.
+
+        Returns ``(ready, hint)``: ``hint`` is a human install suggestion when
+        not ready. Default probes :attr:`runtime_imports`; connectors with no
+        optional deps are always ready. Override for a richer check.
+        """
+        missing = [m for m in cls.runtime_imports if not _module_available(m)]
+        if not missing:
+            return True, ""
+        hint = "pip install " + " ".join(cls.pip_requirements) if cls.pip_requirements else ""
+        return False, hint
+
     # -- lifecycle ----------------------------------------------------------
 
     def open(self, ctx: "RunContext") -> None:
@@ -130,6 +161,13 @@ class Connector(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not implement enumerate_ids()"
         )
+
+
+def _module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 __all__ = ["Connector"]

@@ -77,7 +77,7 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | `dbs connectors list [--verbose] \| describe TYPE` | Inspect installed connectors (incl. load failures). |
 | `dbs verify [SOURCE]` | Database + per-source integrity self-check. |
 | `dbs schedule` | Print ready-to-use cron / systemd snippets. |
-| `dbs serve [--host H] [--port P]` | Launch the web management UI (needs the `[web]` extra). |
+| `dbs serve [--host H] [--port P] [--allow-setup]` | Launch the web management UI (needs the `[web]` extra). `--allow-setup` enables in-UI dependency install + browser login. |
 | `dbs version` | Tool + core API version. |
 
 Export filters: `--source`, `--type`, `--since`, `--until`, `--include-deleted`,
@@ -97,11 +97,38 @@ it you can:
 - see per-source **status** and recent **run history**;
 - **run a backup** (one source or all) and watch a **live progress bar** —
   it streams the engine's progress events over Server-Sent Events;
-- browse installed **connectors** (capabilities + config schema);
+- browse installed **connectors** (capabilities, config schema, readiness);
+- **install** a connector's optional dependencies and run reddit's one-time
+  **browser login** — see *Getting connectors working* below;
 - **add a source** (validated against the connector schema);
 - set **API keys / tokens** (the *API keys* tab) — written to your `.env`, never
   to the config, and never shown back; see below;
 - **export** a bundle and **verify** database integrity.
+
+### Getting connectors working
+
+Two of the built-in connectors need optional packages and a one-time auth
+artifact. The **Connectors** tab shows each one's readiness and, when you start
+the server with `dbs serve --allow-setup`, can do the setup for you:
+
+| Connector | Needs | In the UI (`--allow-setup`) |
+|---|---|---|
+| **raindrop** | `RAINDROP_TOKEN` | set it in *API keys* |
+| **skool** | nothing (offline) | just set `downloads_dir` when adding the source |
+| **reddit** | `[reddit]` extra + `playwright install chromium`; a logged-in session dir | **Install** button, then **Log in (browser)** — opens a browser on the host, you log in and close it; `REDDIT_SESSION_DIR` is saved for you |
+| **youtube** | `[youtube]` extra; a `cookies.txt` *or* `cookies_from_browser` | **Install** button; then set `YOUTUBE_COOKIES_FILE` in *API keys*, or set `cookies_from_browser` (e.g. `chrome`) in the source config |
+
+`--allow-setup` enables the **Install** and **Log in** actions, which run
+`pip install` / `playwright` and open a browser **on the machine running the
+server** (the commands are derived from connector metadata, never from the
+browser). It's off by default; only turn it on for trusted, local use. Without
+it, the Connectors tab still shows exactly what to install/set, so you can do it
+by hand.
+
+> The reddit/youtube auth artifacts (a Playwright session dir / a `cookies.txt`)
+> are inherently created on a machine with a browser — the UI can drive that when
+> it runs on your desktop, but on a headless server you create them locally and
+> point the `*_env` secret at the path.
 
 ### API keys in the UI
 

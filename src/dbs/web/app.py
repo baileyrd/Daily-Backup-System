@@ -84,8 +84,13 @@ _FORMAT_META = {
 }
 
 
-def create_app(config_path: str = "dbs.toml"):
-    """Build the FastAPI app bound to a config file. Raises if deps are absent."""
+def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
+    """Build the FastAPI app bound to a config file. Raises if deps are absent.
+
+    ``allow_setup`` enables the privileged setup actions (install deps, browser
+    login) that shell out on the host; off by default, keep it off on shared
+    machines.
+    """
     try:
         from fastapi import Body, FastAPI, HTTPException, Query
         from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
@@ -105,7 +110,9 @@ def create_app(config_path: str = "dbs.toml"):
     from ..export import EXPORTERS
     from ..export.base import ExportQuery
     from . import envfile
+    from . import setup as setupmod
     from .jobs import JobAlreadyRunning, JobManager
+    from .setup import SetupManager
 
     def open_service() -> BackupService:
         try:
@@ -114,6 +121,7 @@ def create_app(config_path: str = "dbs.toml"):
             raise HTTPException(status_code=500, detail=f"Config error: {exc}")
 
     jobs = JobManager(lambda: BackupService.from_config_file(config_path))
+    setup_mgr = SetupManager()
 
     app = FastAPI(title="Daily Backup System", version=__version__)
 
@@ -126,6 +134,7 @@ def create_app(config_path: str = "dbs.toml"):
             "core_api_version": CORE_API_VERSION,
             "config_path": str(config_path),
             "formats": sorted(EXPORTERS),
+            "setup_enabled": allow_setup,
         }
 
     # -- read views ---------------------------------------------------------
@@ -162,6 +171,16 @@ def create_app(config_path: str = "dbs.toml"):
         try:
             out = []
             for i in svc.list_connectors():
+                try:
+                    rc = svc.registry.get(i.type)
+                    ready, ready_detail = rc.cls.check_ready()
+                    pip_requirements = list(rc.cls.pip_requirements)
+                    needs_browser = rc.cls.needs_playwright_browser
+                    docs_url = rc.cls.docs_url
+                except Exception:
+                    ready, ready_detail, pip_requirements, needs_browser, docs_url = (
+                        True, "", [], False, "",
+                    )
                 out.append(
                     {
                         "type": i.type,
@@ -170,6 +189,7 @@ def create_app(config_path: str = "dbs.toml"):
                         "is_builtin": i.is_builtin,
                         "display_name": i.display_name,
                         "description": i.description,
+                        "docs_url": docs_url,
                         "secret_keys": list(i.secret_keys),
                         "item_kinds": [
                             {"name": k.name, "display_name": k.display_name}
@@ -177,6 +197,11 @@ def create_app(config_path: str = "dbs.toml"):
                         ],
                         "capabilities": dataclasses.asdict(i.capabilities),
                         "config_schema": i.config_schema,
+                        "ready": ready,
+                        "ready_detail": ready_detail,
+                        "pip_requirements": pip_requirements,
+                        "needs_playwright_browser": needs_browser,
+                        "supports_interactive_login": i.type == "reddit",
                     }
                 )
             return out
@@ -285,6 +310,90 @@ def create_app(config_path: str = "dbs.toml"):
             return {"name": name, "removed": removed}
         finally:
             svc.close()
+
+    # -- setup actions (install deps / interactive login) -------------------
+    # Privileged: these shell out / open a browser on the host. Gated behind
+    # allow_setup and meant for localhost use only.
+
+    def _require_setup() -> None:
+        if not allow_setup:
+            raise HTTPException(
+                status_code=403,
+                detail="setup actions are disabled; start the server with `dbs serve --allow-setup`",
+            )
+
+    @app.post("/api/connectors/{ctype}/install")
+    def install_connector(ctype: str) -> dict[str, Any]:
+        """Install a connector's optional dependencies (server-derived commands)."""
+        _require_setup()
+        svc = open_service()
+        try:
+            try:
+                rc = svc.registry.get(ctype)
+            except ConnectorLoadError as exc:
+                raise HTTPException(status_code=404, detail=str(exc))
+            commands = setupmod.install_commands(rc)
+        finally:
+            svc.close()
+        if not commands:
+            raise HTTPException(status_code=400, detail=f"{ctype!r} needs no installation")
+        try:
+            job = setup_mgr.start("install", ctype, setupmod.run_commands(commands))
+        except JobAlreadyRunning as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return job.snapshot()
+
+    @app.post("/api/connectors/{ctype}/login")
+    def login_connector(ctype: str) -> dict[str, Any]:
+        """Open a one-time interactive browser login (reddit) on the host."""
+        _require_setup()
+        if ctype != "reddit":
+            raise HTTPException(status_code=400, detail="interactive login is only supported for reddit")
+        svc = open_service()
+        try:
+            base = svc.config.base_dir
+        finally:
+            svc.close()
+        session_dir = str((base / ".reddit-session").resolve())
+        env_path = base / ".env"
+
+        def on_success() -> None:
+            envfile.set_var(env_path, "REDDIT_SESSION_DIR", session_dir)
+
+        try:
+            job = setup_mgr.start(
+                "login", ctype, setupmod.reddit_login_runner(session_dir, on_success)
+            )
+        except JobAlreadyRunning as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return {**job.snapshot(), "session_dir": session_dir}
+
+    @app.get("/api/setup/current")
+    def setup_current() -> dict[str, Any]:
+        return setup_mgr.current() or {"status": "idle"}
+
+    @app.get("/api/setup/{job_id}")
+    def setup_get(job_id: int) -> dict[str, Any]:
+        snap = setup_mgr.get(job_id)
+        if snap is None:
+            raise HTTPException(status_code=404, detail=f"no such setup job {job_id}")
+        return snap
+
+    @app.get("/api/setup/{job_id}/stream")
+    def setup_stream(job_id: int):
+        if setup_mgr.get(job_id) is None:
+            raise HTTPException(status_code=404, detail=f"no such setup job {job_id}")
+
+        def gen():
+            for line in setup_mgr.stream(job_id):
+                if line is None:
+                    yield ": keep-alive\n\n"
+                else:
+                    yield f"data: {json.dumps({'line': line})}\n\n"
+            snap = setup_mgr.get(job_id) or {}
+            yield f"event: end\ndata: {json.dumps(snap)}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
 
     # -- mutations ----------------------------------------------------------
 
