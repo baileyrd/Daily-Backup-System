@@ -77,7 +77,7 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | `dbs connectors list [--verbose] \| describe TYPE` | Inspect installed connectors (incl. load failures). |
 | `dbs verify [SOURCE]` | Database + per-source integrity self-check. |
 | `dbs schedule` | Print ready-to-use cron / systemd snippets. |
-| `dbs serve [--host H] [--port P] [--allow-setup]` | Launch the web management UI (needs the `[web]` extra). `--allow-setup` enables in-UI dependency install + browser login. |
+| `dbs serve [--host H] [--port P] [--no-setup]` | Launch the web management UI (needs the `[web]` extra). In-UI setup (dependency install + browser-login capture) is on by default; `--no-setup` disables it. |
 | `dbs version` | Tool + core API version. |
 
 Export filters: `--source`, `--type`, `--since`, `--until`, `--include-deleted`,
@@ -108,10 +108,10 @@ it you can:
 ### Getting connectors working
 
 Two of the built-in connectors need optional packages and a one-time auth
-artifact. The **Connectors** tab shows each one's readiness and, when you start
-the server with `dbs serve --allow-setup`, can do the setup for you:
+artifact. The **Connectors** tab shows each one's readiness and (with in-UI setup,
+on by default — `dbs serve`) can do the setup for you:
 
-| Connector | Needs | In the UI (`--allow-setup`) |
+| Connector | Needs | In the UI |
 |---|---|---|
 | **raindrop** | `RAINDROP_TOKEN` | set it in *API keys* |
 | **skool** | a `skool-downloader` output tree (`downloads_dir`) | set `downloads_dir`; optionally `downloader_cmd` to fetch first (below) |
@@ -122,10 +122,9 @@ the server with `dbs serve --allow-setup`, can do the setup for you:
 
 Connectors that need a browser session or cookies declare it, so a **capture
 button** appears wherever you manage that source: on the **Add source** form when
-you pick the type, on the **Sources** row, and on the **Connectors** card. **Start
-the server with `dbs serve --allow-setup`** for these to appear. Click it and a
-real browser opens **on the machine running the server** — you log in, close the
-window, and the artifact is captured and recorded in `.env`:
+you pick the type, on the **Sources** row, and on the **Connectors** card. Click it
+and a real browser opens **on the machine running the server** — you log in, close
+the window, and the artifact is captured and recorded in `.env`:
 
 - **reddit** → a Playwright persistent-session directory → `REDDIT_SESSION_DIR`;
 - **youtube** → a Netscape `cookies.txt` exported after login → `YOUTUBE_COOKIES_FILE`.
@@ -137,12 +136,10 @@ when `dbs serve` runs on your desktop; on a headless server, capture on a deskto
 and point the `*_env` secret at the resulting path. (For youtube you can skip
 capture entirely and set `cookies_from_browser` in the source config instead.)
 
-`--allow-setup` enables the **Install** and **Log in** actions, which run
-`pip install` / `playwright` and open a browser **on the machine running the
-server** (the commands are derived from connector metadata, never from the
-browser). It's off by default; only turn it on for trusted, local use. Without
-it, the Connectors tab still shows exactly what to install/set, so you can do it
-by hand.
+In-UI setup (the **Install** and **Log in** actions, which run `pip install` /
+`playwright` and open a browser on the host) is **on by default** for local use;
+pass `dbs serve --no-setup` to disable it (the buttons then hide and the
+Connectors tab just shows what to install/set by hand).
 
 > The reddit/youtube auth artifacts (a Playwright session dir / a `cookies.txt`)
 > are inherently created on a machine with a browser — the UI can drive that when

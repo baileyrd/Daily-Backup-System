@@ -410,9 +410,10 @@ def serve(
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
     port: int = typer.Option(8000, "--port", "-p", help="Port to listen on."),
     allow_setup: bool = typer.Option(
-        False, "--allow-setup/--no-setup",
-        help="Enable in-UI setup actions (install connector deps, browser login). "
-             "These shell out on the host — only for trusted localhost use.",
+        True, "--allow-setup/--no-setup",
+        help="In-UI setup actions (install connector deps, browser login capture). "
+             "On by default for local use; pass --no-setup to disable. These shell "
+             "out / open a browser on the host.",
     ),
 ) -> None:
     """Launch the web management UI (requires the [web] extra)."""
@@ -433,11 +434,18 @@ def serve(
     app_instance = create_app(_state["config"], allow_setup=allow_setup)
     typer.secho(f"Serving Daily Backup System UI at http://{host}:{port}", fg=typer.colors.GREEN)
     typer.echo(f"  (config: {_state['config']})  —  press Ctrl+C to stop")
-    if allow_setup:
+    is_local = host in ("127.0.0.1", "localhost", "::1", "")
+    if allow_setup and not is_local:
+        # Setup actions shell out / open a browser; exposing them off-localhost is
+        # a real risk. Loudly warn (but don't block — the user asked for this host).
         typer.secho(
-            "  setup actions ENABLED (install deps / browser login can run on this host)",
-            fg=typer.colors.YELLOW,
+            f"  WARNING: setup actions are ENABLED and bound to {host} (not localhost).\n"
+            "  Anyone who can reach this port could trigger installs/logins. "
+            "Use --no-setup to disable.",
+            fg=typer.colors.RED, bold=True,
         )
+    elif not allow_setup:
+        typer.echo("  (setup actions disabled — install/login buttons hidden)")
     uvicorn.run(app_instance, host=host, port=port)
 
 
