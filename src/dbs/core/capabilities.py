@@ -23,6 +23,32 @@ class ItemKind:
 
 
 @dataclass(frozen=True, slots=True)
+class AuthCapture:
+    """Declares that a connector's auth artifact can be captured interactively.
+
+    Pure metadata — no UI code lives in the connector. A UI tier (the web app)
+    reads this to offer a "capture login" action and knows *what* to capture and
+    *where to record it*; it owns the actual browser automation per ``kind``.
+
+    kind
+        ``"browser_session"`` — a Playwright persistent-context directory holding
+        a logged-in session (e.g. Reddit), or ``"browser_cookies"`` — a Netscape
+        ``cookies.txt`` exported after login (e.g. YouTube for yt-dlp).
+    secret_key
+        The ``secret_keys`` env name the captured path is written to (in ``.env``).
+    login_url
+        The page the capture browser should open for the user to log in.
+    label
+        Human label for the action button.
+    """
+
+    kind: str
+    secret_key: str
+    login_url: str = ""
+    label: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class Capabilities:
     """Declarative description of a connector's behavior.
 
@@ -79,4 +105,4 @@ class Capabilities:
             raise ValueError("media_inline=True requires produces_media=True")
 
 
-__all__ = ["Capabilities", "ItemKind"]
+__all__ = ["Capabilities", "ItemKind", "AuthCapture"]

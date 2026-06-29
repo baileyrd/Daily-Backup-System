@@ -32,6 +32,7 @@ from typing import Any, Iterator
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core import (
+    AuthCapture,
     BackupItem,
     Capabilities,
     Checkpoint,
@@ -77,6 +78,15 @@ class YouTubeConnector(Connector):
     # report readiness and offer a one-click install.
     pip_requirements = ("yt-dlp>=2024.1",)
     runtime_imports = ("yt_dlp",)
+    # Cookies can be captured from a UI by opening a browser and exporting them
+    # to a Netscape cookies.txt (what yt-dlp reads). Capture itself needs
+    # Playwright; the alternative is cookies_from_browser in the source config.
+    auth_capture = AuthCapture(
+        kind="browser_cookies",
+        secret_key="YOUTUBE_COOKIES_FILE",
+        login_url="https://www.youtube.com/",
+        label="YouTube login",
+    )
     item_kinds = (ItemKind(name="video", display_name="Video"),)
     capabilities = Capabilities(
         supports_incremental=False,  # no server-side delta -> every run is full

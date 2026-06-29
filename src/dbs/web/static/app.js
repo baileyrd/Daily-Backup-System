@@ -177,12 +177,11 @@ async function loadConnectors() {
           actions.append(el("span", { className: "tag", textContent: "+ playwright install chromium" }));
         }
       }
-      if (c.supports_interactive_login && META.setup_enabled) {
-        const login = el("button", { className: "small", textContent: "Log in (browser)" });
-        login.disabled = !c.ready;  // need the package before logging in
-        login.title = c.ready ? "Opens a browser on the server host" : "Install the connector first";
-        login.addEventListener("click", () => loginConnector(c.type, login));
-        actions.append(login);
+      if (c.auth_capture && META.setup_enabled) {
+        const cap = el("button", { className: "small", textContent: c.auth_capture.label });
+        cap.title = "Opens a browser on the server host so you can log in; the session/cookies are captured into .env";
+        cap.addEventListener("click", () => captureConnector(c.type, cap));
+        actions.append(cap);
       }
       if (c.secret_keys.length) {
         const jump = el("a", { href: "#", textContent: "set API key →" });
@@ -223,11 +222,11 @@ async function installConnector(type, btn) {
   } catch (e) { toast(e.message, "err"); if (btn) btn.disabled = false; }
 }
 
-async function loginConnector(type, btn) {
+async function captureConnector(type, btn) {
   if (btn) btn.disabled = true;
   try {
-    const job = await api(`/api/connectors/${encodeURIComponent(type)}/login`, { method: "POST" });
-    streamSetup(job.id, `${type}: browser login (check the server host for a window)`);
+    const job = await api(`/api/connectors/${encodeURIComponent(type)}/capture`, { method: "POST" });
+    streamSetup(job.id, `${type}: login capture — check the server host for a browser window`);
   } catch (e) { toast(e.message, "err"); if (btn) btn.disabled = false; }
 }
 

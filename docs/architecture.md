@@ -34,12 +34,15 @@
   secret, and are never read back — the secrets API reports only set/unset
   status. It binds to localhost and is unauthenticated by design (local use).
   Optional **setup actions** (`dbs.web.setup`, gated behind `--allow-setup`) can
-  install a connector's declared `pip_requirements` and run reddit's interactive
-  browser login as background jobs; the executed commands are derived from
-  connector metadata, never from client input. Connectors declare their optional
-  runtime deps (`pip_requirements` / `runtime_imports` / `needs_playwright_browser`)
-  and a `check_ready()` probe so the UI/CLI can report readiness — the core still
-  installs nothing itself.
+  install a connector's declared `pip_requirements` and run a connector's declared
+  interactive **auth capture** as background jobs; the executed commands are
+  derived from connector metadata, never from client input. Connectors declare
+  their optional runtime deps (`pip_requirements` / `runtime_imports` /
+  `needs_playwright_browser`) and a `check_ready()` probe, and may declare an
+  `AuthCapture` (kind `browser_session` → a Playwright session dir, or
+  `browser_cookies` → a Netscape `cookies.txt`) naming the `*_env` secret it
+  populates. The web layer owns the (Playwright) browser automation per kind; the
+  connector stays UI-agnostic and the core still installs/launches nothing itself.
 - **`Engine`.** Drives one source's `fetch()` stream into storage, enforcing the
   correctness invariants below.
 - **`Storage` (ABC) + `SqliteStorage`.** All persistence. An ABC so a future

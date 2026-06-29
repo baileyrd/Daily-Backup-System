@@ -41,6 +41,7 @@ from typing import Any, Iterator
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core import (
+    AuthCapture,
     BackupItem,
     Capabilities,
     Checkpoint,
@@ -85,6 +86,13 @@ class RedditConnector(Connector):
     pip_requirements = ("playwright>=1.40",)
     runtime_imports = ("playwright",)
     needs_playwright_browser = True
+    # The logged-in session can be captured from a UI by opening a browser.
+    auth_capture = AuthCapture(
+        kind="browser_session",
+        secret_key="REDDIT_SESSION_DIR",
+        login_url="https://www.reddit.com/login/",
+        label="Reddit login",
+    )
     item_kinds = (
         ItemKind(name="post", display_name="Post"),
         ItemKind(name="comment", display_name="Comment"),

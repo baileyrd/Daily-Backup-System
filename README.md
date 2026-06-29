@@ -115,8 +115,25 @@ the server with `dbs serve --allow-setup`, can do the setup for you:
 |---|---|---|
 | **raindrop** | `RAINDROP_TOKEN` | set it in *API keys* |
 | **skool** | a `skool-downloader` output tree (`downloads_dir`) | set `downloads_dir`; optionally `downloader_cmd` to fetch first (below) |
-| **reddit** | `[reddit]` extra + `playwright install chromium`; a logged-in session dir | **Install** button, then **Log in (browser)** — opens a browser on the host, you log in and close it; `REDDIT_SESSION_DIR` is saved for you |
-| **youtube** | `[youtube]` extra; a `cookies.txt` *or* `cookies_from_browser` | **Install** button; then set `YOUTUBE_COOKIES_FILE` in *API keys*, or set `cookies_from_browser` (e.g. `chrome`) in the source config |
+| **reddit** | `[reddit]` extra + `playwright install chromium`; a logged-in session dir | **Install**, then **Reddit login** — opens a browser on the host, you log in and close it; the session dir + `REDDIT_SESSION_DIR` are captured for you |
+| **youtube** | `[youtube]` extra; a `cookies.txt` *or* `cookies_from_browser` | **Install**, then **YouTube login** — captures a `cookies.txt` and sets `YOUTUBE_COOKIES_FILE`; or skip capture and set `cookies_from_browser` (e.g. `chrome`) in the source config |
+
+#### Capturing a login from the UI
+
+Connectors that need a browser session or cookies declare it, and the
+Connectors tab shows a **capture** button (with `--allow-setup`). Clicking it
+opens a real browser **on the machine running the server** — you log in, close
+the window, and the artifact is captured and recorded in `.env`:
+
+- **reddit** → a Playwright persistent-session directory → `REDDIT_SESSION_DIR`;
+- **youtube** → a Netscape `cookies.txt` exported after login → `YOUTUBE_COOKIES_FILE`.
+
+Capture drives the browser with **Playwright**, so it needs `pip install
+playwright && playwright install chromium` on the host (reddit's **Install**
+already does this; for youtube, install Playwright too if you want capture
+rather than `cookies_from_browser`). Because the browser opens on the host, this
+works when `dbs serve` runs on your desktop; on a headless server, capture on a
+desktop and point the `*_env` secret at the resulting path.
 
 `--allow-setup` enables the **Install** and **Log in** actions, which run
 `pip install` / `playwright` and open a browser **on the machine running the
