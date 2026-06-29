@@ -70,6 +70,11 @@ class YouTubeConnector(Connector):
     display_name = "YouTube (lists)"
     description = "Your YouTube lists (Watch Later, Liked, history, playlists) via yt-dlp."
     docs_url = "https://github.com/baileyrd/tubeyou"
+    setup_hint = (
+        "Google usually blocks sign-in in the capture browser. Easiest: set "
+        "cookies_from_browser (e.g. vivaldi, chrome, firefox, edge) to use your "
+        "logged-in browser's cookies — no login capture needed."
+    )
     config_model = YouTubeConfig
     secret_keys = ("YOUTUBE_COOKIES_FILE",)
     wants_managed_http = False

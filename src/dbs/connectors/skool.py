@@ -84,6 +84,10 @@ class SkoolConnector(Connector):
     display_name = "Skool (downloaded courses)"
     description = "Catalog of communities/courses/lessons from a skool-downloader output tree."
     docs_url = "https://github.com/baileyrd/skool-downloader"
+    setup_hint = (
+        "No login needed — it indexes a local skool-downloader tree. Set "
+        "downloads_dir to that output; optionally set downloader_cmd to fetch first."
+    )
     config_model = SkoolConfig
     secret_keys = ()  # reads local files; no credentials
     wants_managed_http = False

@@ -68,6 +68,10 @@ class RaindropConnector(Connector):
     display_name = "Raindrop.io"
     description = "Bookmarks/raindrops from raindrop.io via the REST API v1."
     docs_url = "https://developer.raindrop.io/"
+    setup_hint = (
+        "Create an API token at app.raindrop.io → Settings → Integrations, then "
+        "set RAINDROP_TOKEN in the API keys tab."
+    )
     config_model = RaindropConfig
     secret_keys = ("RAINDROP_TOKEN",)
     wants_managed_http = True

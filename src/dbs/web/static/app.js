@@ -209,6 +209,7 @@ async function loadConnectors() {
           el("h3", { textContent: `${c.display_name} (${c.type})`, style: "margin:0;" }), ready),
         el("div", { className: "muted", textContent: c.description || "" }),
         el("div", { className: "tag", textContent: `${c.is_builtin ? "built-in" : c.dist_name} · secrets: ${c.secret_keys.join(", ") || "none"} · kinds: ${c.item_kinds.map((k) => k.name).join(", ")}` }),
+        c.setup_hint ? el("div", { className: "hint", textContent: c.setup_hint }) : document.createTextNode(""),
         caps,
         actions,
       );
@@ -379,12 +380,15 @@ function renderTypeUI(type) {
   renderCaptureArea(type);
 }
 
-// A "Log in (capture session)" action right where you configure the source.
+// Per-connector setup guidance + a "Log in (capture session)" action, right
+// where you configure the source.
 function renderCaptureArea(type) {
   const box = $("#add-capture");
   box.innerHTML = "";
   const c = CONNECTORS[type];
-  if (!c || !c.auth_capture) return;
+  if (!c) return;
+  if (c.setup_hint) box.append(el("div", { className: "hint", textContent: c.setup_hint }));
+  if (!c.auth_capture) return;
   const ac = c.auth_capture;
   const wrap = el("div", { className: "capture-box" });
   wrap.append(el("div", { className: "muted",
