@@ -73,6 +73,10 @@ class YouTubeConnector(Connector):
     secret_keys = ("YOUTUBE_COOKIES_FILE",)
     wants_managed_http = False
     schema_version = 1
+    # Optional runtime deps (the `[youtube]` extra) — declared so the UI/CLI can
+    # report readiness and offer a one-click install.
+    pip_requirements = ("yt-dlp>=2024.1",)
+    runtime_imports = ("yt_dlp",)
     item_kinds = (ItemKind(name="video", display_name="Video"),)
     capabilities = Capabilities(
         supports_incremental=False,  # no server-side delta -> every run is full

@@ -144,6 +144,15 @@ code { background: var(--panel-2); padding: 0.05rem 0.3rem; border-radius: 4px; 
 }
 .connector h3 { margin: 0 0 0.3rem; font-size: 0.95rem; }
 .caps { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.4rem; }
+.conn-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
+.conn-actions a { color: var(--blue); text-decoration: none; font-size: 0.82rem; }
+.conn-actions a:hover { text-decoration: underline; }
+.log {
+  background: #0b0d11; border: 1px solid var(--border); border-radius: 6px;
+  padding: 0.6rem 0.8rem; margin: 0.5rem 0 0; max-height: 320px; overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem; white-space: pre-wrap; color: var(--text);
+}
 
 .toast {
   position: fixed; bottom: 1.25rem; right: 1.25rem;

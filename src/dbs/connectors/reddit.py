@@ -80,6 +80,11 @@ class RedditConnector(Connector):
     secret_keys = ("REDDIT_SESSION_DIR",)
     wants_managed_http = False
     schema_version = 1
+    # Optional runtime deps (the `[reddit]` extra) — declared so the UI/CLI can
+    # report readiness and offer a one-click install.
+    pip_requirements = ("playwright>=1.40",)
+    runtime_imports = ("playwright",)
+    needs_playwright_browser = True
     item_kinds = (
         ItemKind(name="post", display_name="Post"),
         ItemKind(name="comment", display_name="Comment"),
