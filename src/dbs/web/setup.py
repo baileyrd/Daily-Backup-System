@@ -19,6 +19,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from queue import Empty, Queue
@@ -27,6 +28,7 @@ from typing import Any, Callable, Iterator
 from .jobs import JobAlreadyRunning  # reuse the same "busy" signal
 
 _SENTINEL = object()
+_CAPTURE_POLL_SECONDS = 1.0
 
 
 def _now_iso() -> str:
@@ -131,6 +133,29 @@ def to_netscape_cookies(cookies: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _wait_until_closed(ctx, kind: str, *, wait_timeout: float = 900.0, poll: float = _CAPTURE_POLL_SECONDS) -> list:
+    """Block until the user closes the browser, returning the last cookie snapshot.
+
+    The Playwright **sync** API only dispatches events during a sync call, so a
+    plain ``Event.wait()`` never notices the window closing. Instead we round-trip
+    ``ctx.cookies()`` each tick: it pumps the event loop, snapshots cookies (for
+    the cookies kind), and *raises* once the browser is gone — which is our signal
+    that the user finished and closed the window.
+    """
+    latest: list = []
+    deadline = time.monotonic() + wait_timeout
+    while time.monotonic() < deadline:
+        try:
+            cookies = ctx.cookies()
+        except Exception:  # browser/window closed by the user
+            break
+        if kind == "browser_cookies":
+            latest = cookies
+        if poll:
+            time.sleep(poll)
+    return latest
+
+
 def browser_capture_runner(
     kind: str,
     target: str,
@@ -184,35 +209,18 @@ def browser_capture_runner(
                     f"`playwright install chromium`. On a headless server, capture on a "
                     f"desktop and point the secret at the resulting path."
                 ) from exc
-            closed = threading.Event()
-            ctx.on("close", lambda: closed.set())
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             if login_url:
                 try:
                     page.goto(login_url)
                 except Exception:  # navigation is best-effort
                     pass
-            emit("Waiting for you to finish… (close the browser window when logged in)")
-            # Snapshot cookies periodically so we have the latest set at close
-            # time (cookies can't be read once the context is gone).
-            deadline_loops = int(max(1, wait_timeout))
-            for _ in range(deadline_loops):
-                if closed.wait(timeout=1.0):
-                    break
-                if kind == "browser_cookies":
-                    try:
-                        latest_cookies = ctx.cookies()
-                    except Exception:  # noqa: BLE001
-                        pass
-            if kind == "browser_cookies" and not closed.is_set():
-                # Final snapshot if we timed out with the window still open.
-                try:
-                    latest_cookies = ctx.cookies()
-                except Exception:  # noqa: BLE001
-                    pass
+            emit("Waiting for you to finish — log in, then CLOSE the browser window.")
+            latest_cookies = _wait_until_closed(ctx, kind, wait_timeout=wait_timeout)
+            emit("Browser closed — saving…")
             try:
                 ctx.close()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 - already gone
                 pass
 
         if kind == "browser_cookies":
