@@ -75,9 +75,12 @@ async function loadSources() {
   const tbody = $("#sources-table tbody");
   tbody.innerHTML = "";
   let rows = [];
+  let conns = [];
   try {
-    rows = await api("/api/status");
+    [rows, conns] = await Promise.all([api("/api/status"), api("/api/connectors")]);
   } catch (e) { toast(e.message, "err"); return; }
+  const byType = Object.fromEntries(conns.map((c) => [c.type, c]));
+
   if (!rows.length) {
     tbody.append(el("tr", {}, el("td", { colSpan: 8, className: "muted", textContent: "No sources configured yet — add one in “Add source”." })));
   } else {
@@ -85,8 +88,17 @@ async function loadSources() {
       const last = s.last_run_status
         ? el("span", { className: statusClass(s.last_run_status), textContent: s.last_run_status })
         : el("span", { className: "muted", textContent: "—" });
+      const actions = el("div", { className: "row", style: "gap:0.4rem;justify-content:flex-end;" });
+      const ac = byType[s.type] && byType[s.type].auth_capture;
+      if (ac && META.setup_enabled) {
+        const login = el("button", { className: "small", textContent: ac.label });
+        login.title = "Open a browser to capture this source's login session";
+        login.addEventListener("click", () => captureConnector(s.type, login));
+        actions.append(login);
+      }
       const btn = el("button", { className: "small", textContent: "Back up", disabled: !s.enabled });
       btn.addEventListener("click", () => startBackup({ source: s.name }));
+      actions.append(btn);
       tbody.append(el("tr", {},
         el("td", { textContent: s.name }),
         el("td", { className: "tag", textContent: s.type }),
@@ -95,24 +107,21 @@ async function loadSources() {
         el("td", { textContent: num(s.deleted_items) }),
         el("td", { textContent: num(s.run_count) }),
         el("td", {}, last),
-        el("td", {}, btn),
+        el("td", {}, actions),
       ));
     });
   }
   // Hint: connectors that are available but have no configured source yet.
   const hint = $("#sources-hint");
   hint.innerHTML = "";
-  try {
-    const conns = await api("/api/connectors");
-    const have = new Set(rows.map((r) => r.type));
-    const missing = conns.map((c) => c.type).filter((t) => !have.has(t));
-    if (missing.length) {
-      hint.append(document.createTextNode(`Available connectors with no source yet: ${missing.join(", ")}. `));
-      const a = el("a", { href: "#", textContent: "Add a source →" });
-      a.addEventListener("click", (e) => { e.preventDefault(); switchTab("add"); });
-      hint.append(a);
-    }
-  } catch (e) { /* hint is best-effort */ }
+  const have = new Set(rows.map((r) => r.type));
+  const missing = conns.map((c) => c.type).filter((t) => !have.has(t));
+  if (missing.length) {
+    hint.append(document.createTextNode(`Available connectors with no source yet: ${missing.join(", ")}. `));
+    const a = el("a", { href: "#", textContent: "Add a source →" });
+    a.addEventListener("click", (e) => { e.preventDefault(); switchTab("add"); });
+    hint.append(a);
+  }
 }
 LOADERS.sources = loadSources;
 $("#refresh-sources").addEventListener("click", loadSources);
@@ -340,6 +349,7 @@ $("#secret-other-form").addEventListener("submit", (e) => {
 // --- add source ------------------------------------------------------------
 
 let CONNECTOR_SCHEMAS = {};
+let CONNECTORS = {};         // full connector objects by type
 let pendingAddType = null;  // a connector type to preselect on next form load
 
 async function loadAddForm() {
@@ -347,20 +357,51 @@ async function loadAddForm() {
   try {
     const items = await api("/api/connectors");
     CONNECTOR_SCHEMAS = {};
+    CONNECTORS = {};
     sel.innerHTML = "";
     items.forEach((c) => {
       CONNECTOR_SCHEMAS[c.type] = c.config_schema || {};
+      CONNECTORS[c.type] = c;
       sel.append(el("option", { value: c.type, textContent: `${c.type} — ${c.display_name}` }));
     });
     if (pendingAddType && CONNECTOR_SCHEMAS[pendingAddType]) {
       sel.value = pendingAddType;
     }
     pendingAddType = null;
-    renderSchemaFields(sel.value);
+    renderTypeUI(sel.value);
   } catch (e) { toast(e.message, "err"); }
 }
 LOADERS.add = loadAddForm;
-$("#add-type").addEventListener("change", (e) => renderSchemaFields(e.target.value));
+$("#add-type").addEventListener("change", (e) => renderTypeUI(e.target.value));
+
+function renderTypeUI(type) {
+  renderSchemaFields(type);
+  renderCaptureArea(type);
+}
+
+// A "Log in (capture session)" action right where you configure the source.
+function renderCaptureArea(type) {
+  const box = $("#add-capture");
+  box.innerHTML = "";
+  const c = CONNECTORS[type];
+  if (!c || !c.auth_capture) return;
+  const ac = c.auth_capture;
+  const wrap = el("div", { className: "capture-box" });
+  wrap.append(el("div", { className: "muted",
+    textContent: `This source needs a login. Capture it once — a browser opens on this machine, you log in, and ${ac.secret_key} is saved to your .env.` }));
+  if (META.setup_enabled) {
+    const btn = el("button", { type: "button", className: "primary small", textContent: `${ac.label} (open browser)` });
+    btn.addEventListener("click", () => captureConnector(type, btn));
+    wrap.append(btn);
+    if (c.capture_ready === false) {
+      wrap.append(el("div", { className: "tag", textContent: "First run installs Playwright + a browser, then opens the login window (watch the log)." }));
+    }
+  } else {
+    wrap.append(el("div", { className: "tag st-partial",
+      textContent: "Login capture is disabled — restart the server with:  dbs serve --allow-setup" }));
+  }
+  box.append(wrap);
+}
 
 // Jump to the Add-source tab with a connector type preselected.
 function startAddSource(type) {

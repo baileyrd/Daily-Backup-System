@@ -209,6 +209,7 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
                         "pip_requirements": pip_requirements,
                         "needs_playwright_browser": needs_browser,
                         "auth_capture": auth_capture,
+                        "capture_ready": setupmod.playwright_present() if auth_capture else None,
                     }
                 )
             return out
@@ -377,7 +378,15 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
         def on_success() -> None:
             envfile.set_var(env_path, spec.secret_key, target)
 
-        runner = setupmod.browser_capture_runner(spec.kind, target, spec.login_url, on_success)
+        capture = setupmod.browser_capture_runner(spec.kind, target, spec.login_url, on_success)
+        # One click: install Playwright + a browser first if they're missing,
+        # then open the login window.
+        if setupmod.playwright_present():
+            runner = capture
+        else:
+            runner = setupmod.chain_runners(
+                setupmod.run_commands(setupmod.playwright_install_commands()), capture
+            )
         try:
             job = setup_mgr.start("capture", ctype, runner)
         except JobAlreadyRunning as exc:

@@ -144,6 +144,12 @@ code { background: var(--panel-2); padding: 0.05rem 0.3rem; border-radius: 4px; 
 }
 .connector h3 { margin: 0 0 0.3rem; font-size: 0.95rem; }
 .caps { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.4rem; }
+.capture-box {
+  display: flex; flex-direction: column; gap: 0.45rem;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.7rem 0.8rem;
+}
+.capture-box button { align-self: flex-start; }
 .conn-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
 .conn-actions a { color: var(--blue); text-decoration: none; font-size: 0.82rem; }
 .conn-actions a:hover { text-decoration: underline; }

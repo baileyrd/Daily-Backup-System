@@ -33,6 +33,15 @@
     <div id="progress-results"></div>
   </section>
 
+  <!-- Setup / capture log (shared across tabs) -->
+  <section id="setup-log-card" class="card hidden">
+    <div class="row between">
+      <strong id="setup-log-title">Setup</strong>
+      <button id="setup-log-hide" class="small">Hide</button>
+    </div>
+    <pre id="setup-log" class="log"></pre>
+  </section>
+
   <main>
     <!-- Sources -->
     <section id="tab-sources" class="tab">
@@ -80,13 +89,6 @@
         <h2>Connectors</h2>
         <button id="refresh-connectors">Refresh</button>
       </div>
-      <section id="setup-log-card" class="card hidden">
-        <div class="row between">
-          <strong id="setup-log-title">Setup</strong>
-          <button id="setup-log-hide" class="small">Hide</button>
-        </div>
-        <pre id="setup-log" class="log"></pre>
-      </section>
       <div id="connectors-list"></div>
     </section>
 
@@ -118,6 +120,7 @@
           <select id="add-type" required></select>
         </label>
         <div id="add-schema" class="schema"></div>
+        <div id="add-capture"></div>
         <label class="check"><input type="checkbox" id="add-store-media" /> Store media bytes in the database</label>
         <label>Max media size per file (MB, 0 = no limit)
           <input id="add-max-media" type="number" min="0" value="0" />
