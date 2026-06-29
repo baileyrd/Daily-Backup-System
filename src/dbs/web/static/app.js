@@ -64,15 +64,18 @@ async function loadMeta() {
 
 // --- sources ---------------------------------------------------------------
 
+const num = (n) => (typeof n === "number" ? n.toLocaleString() : n);
+
 async function loadSources() {
   const tbody = $("#sources-table tbody");
   tbody.innerHTML = "";
+  let rows = [];
   try {
-    const rows = await api("/api/status");
-    if (!rows.length) {
-      tbody.append(el("tr", {}, el("td", { colSpan: 8, className: "muted", textContent: "No sources configured. Add one in the “Add source” tab." })));
-      return;
-    }
+    rows = await api("/api/status");
+  } catch (e) { toast(e.message, "err"); return; }
+  if (!rows.length) {
+    tbody.append(el("tr", {}, el("td", { colSpan: 8, className: "muted", textContent: "No sources configured yet — add one in “Add source”." })));
+  } else {
     rows.forEach((s) => {
       const last = s.last_run_status
         ? el("span", { className: statusClass(s.last_run_status), textContent: s.last_run_status })
@@ -83,14 +86,28 @@ async function loadSources() {
         el("td", { textContent: s.name }),
         el("td", { className: "tag", textContent: s.type }),
         el("td", { textContent: s.enabled ? "yes" : "no" }),
-        el("td", { textContent: s.live_items }),
-        el("td", { textContent: s.deleted_items }),
-        el("td", { textContent: s.run_count }),
+        el("td", { textContent: num(s.live_items) }),
+        el("td", { textContent: num(s.deleted_items) }),
+        el("td", { textContent: num(s.run_count) }),
         el("td", {}, last),
         el("td", {}, btn),
       ));
     });
-  } catch (e) { toast(e.message, "err"); }
+  }
+  // Hint: connectors that are available but have no configured source yet.
+  const hint = $("#sources-hint");
+  hint.innerHTML = "";
+  try {
+    const conns = await api("/api/connectors");
+    const have = new Set(rows.map((r) => r.type));
+    const missing = conns.map((c) => c.type).filter((t) => !have.has(t));
+    if (missing.length) {
+      hint.append(document.createTextNode(`Available connectors with no source yet: ${missing.join(", ")}. `));
+      const a = el("a", { href: "#", textContent: "Add a source →" });
+      a.addEventListener("click", (e) => { e.preventDefault(); switchTab("add"); });
+      hint.append(a);
+    }
+  } catch (e) { /* hint is best-effort */ }
 }
 LOADERS.sources = loadSources;
 $("#refresh-sources").addEventListener("click", loadSources);
@@ -145,6 +162,9 @@ async function loadConnectors() {
         textContent: c.ready ? "ready" : "needs setup" });
 
       const actions = el("div", { className: "conn-actions" });
+      const addBtn = el("button", { className: "small", textContent: "Add source" });
+      addBtn.addEventListener("click", () => startAddSource(c.type));
+      actions.append(addBtn);
       if (!c.ready) {
         if (META.setup_enabled) {
           const install = el("button", { className: "primary small", textContent: "Install" });
@@ -316,6 +336,7 @@ $("#secret-other-form").addEventListener("submit", (e) => {
 // --- add source ------------------------------------------------------------
 
 let CONNECTOR_SCHEMAS = {};
+let pendingAddType = null;  // a connector type to preselect on next form load
 
 async function loadAddForm() {
   const sel = $("#add-type");
@@ -327,11 +348,22 @@ async function loadAddForm() {
       CONNECTOR_SCHEMAS[c.type] = c.config_schema || {};
       sel.append(el("option", { value: c.type, textContent: `${c.type} — ${c.display_name}` }));
     });
+    if (pendingAddType && CONNECTOR_SCHEMAS[pendingAddType]) {
+      sel.value = pendingAddType;
+    }
+    pendingAddType = null;
     renderSchemaFields(sel.value);
   } catch (e) { toast(e.message, "err"); }
 }
 LOADERS.add = loadAddForm;
 $("#add-type").addEventListener("change", (e) => renderSchemaFields(e.target.value));
+
+// Jump to the Add-source tab with a connector type preselected.
+function startAddSource(type) {
+  pendingAddType = type;
+  switchTab("add");  // triggers loadAddForm(), which honors pendingAddType
+  $("#add-name").focus();
+}
 
 function renderSchemaFields(type) {
   const box = $("#add-schema");
