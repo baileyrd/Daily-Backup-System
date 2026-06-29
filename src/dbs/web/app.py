@@ -185,6 +185,9 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
                         auth_capture = {
                             "kind": ac.kind, "secret_key": ac.secret_key,
                             "label": ac.label or "Capture login",
+                            # per_source captures target another tool's dir (from
+                            # the source config) and run via /api/sources/{name}/capture.
+                            "per_source": bool(ac.target_dir_option),
                         }
                 except Exception:
                     ready, ready_detail, pip_requirements, needs_browser, docs_url = (
@@ -354,9 +357,18 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
             raise HTTPException(status_code=409, detail=str(exc))
         return job.snapshot()
 
+    def _capture_runner(spec, target, on_success):
+        """Build a capture runner; auto-install Playwright + a browser if missing."""
+        capture = setupmod.browser_capture_runner(spec.kind, target, spec.login_url, on_success)
+        if setupmod.playwright_present():
+            return capture
+        return setupmod.chain_runners(
+            setupmod.run_commands(setupmod.playwright_install_commands()), capture
+        )
+
     @app.post("/api/connectors/{ctype}/capture")
     def capture_connector(ctype: str) -> dict[str, Any]:
-        """Open a one-time interactive browser login/cookie capture on the host."""
+        """Connector-level browser login capture (target lives in the dbs dir)."""
         _require_setup()
         svc = open_service()
         try:
@@ -370,6 +382,11 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
             svc.close()
         if spec is None:
             raise HTTPException(status_code=400, detail=f"{ctype!r} has no interactive auth capture")
+        if spec.target_dir_option:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{ctype!r} captures per source — use POST /api/sources/{{name}}/capture",
+            )
         if spec.kind == "browser_session":
             target = str((base / f".{ctype}-session").resolve())
         elif spec.kind == "browser_cookies":
@@ -379,22 +396,59 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
         env_path = base / ".env"
 
         def on_success() -> None:
-            envfile.set_var(env_path, spec.secret_key, target)
+            if spec.secret_key:
+                envfile.set_var(env_path, spec.secret_key, target)
 
-        capture = setupmod.browser_capture_runner(spec.kind, target, spec.login_url, on_success)
-        # One click: install Playwright + a browser first if they're missing,
-        # then open the login window.
-        if setupmod.playwright_present():
-            runner = capture
-        else:
-            runner = setupmod.chain_runners(
-                setupmod.run_commands(setupmod.playwright_install_commands()), capture
-            )
         try:
-            job = setup_mgr.start("capture", ctype, runner)
+            job = setup_mgr.start("capture", ctype, _capture_runner(spec, target, on_success))
         except JobAlreadyRunning as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         return {**job.snapshot(), "target": target, "secret_key": spec.secret_key}
+
+    @app.post("/api/sources/{name}/capture")
+    def source_capture(name: str) -> dict[str, Any]:
+        """Per-source browser login capture (target lives in the source's tool dir).
+
+        e.g. skool → a Playwright storageState written into the configured
+        skool-downloader checkout's .auth/ so its own downloads pick it up.
+        """
+        _require_setup()
+        svc = open_service()
+        try:
+            sc = svc.config.sources.get(name)
+            if sc is None:
+                raise HTTPException(status_code=404, detail=f"no such source {name!r}")
+            try:
+                rc = svc.registry.get(sc.type)
+            except ConnectorLoadError as exc:
+                raise HTTPException(status_code=404, detail=str(exc))
+            spec = rc.cls.auth_capture
+            env_path = svc.config.base_dir / ".env"
+            if spec is None or not spec.target_dir_option:
+                raise HTTPException(status_code=400, detail=f"{sc.type!r} has no per-source login capture")
+            try:
+                cfg = rc.cls.config_model(**sc.options)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"invalid config for {name!r}: {exc}")
+            target_dir = getattr(cfg, spec.target_dir_option, None)
+            if not target_dir:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"set {spec.target_dir_option!r} in the {name!r} source config first",
+                )
+            target = str((Path(target_dir).expanduser() / spec.target_path).resolve())
+        finally:
+            svc.close()
+
+        def on_success() -> None:
+            if spec.secret_key:
+                envfile.set_var(env_path, spec.secret_key, target)
+
+        try:
+            job = setup_mgr.start("capture", name, _capture_runner(spec, target, on_success))
+        except JobAlreadyRunning as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return {**job.snapshot(), "target": target}
 
     @app.get("/api/setup/current")
     def setup_current() -> dict[str, Any]:

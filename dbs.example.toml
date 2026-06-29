@@ -45,21 +45,24 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # cookies_file_env = "YOUTUBE_COOKIES_FILE"
 # # cookies_from_browser = "chrome"
 
-# Skool: catalog courses already downloaded by skool-downloader (no auth, no
-# extra — it just indexes the JSON manifests on disk). By default videos stay
-# where they are (referenced); set store_media to archive the bytes into the DB.
+# Skool: catalog courses downloaded by skool-downloader (it indexes the JSON
+# manifests on disk). Set downloader_cwd to your skool-downloader checkout; the
+# web UI's "Skool login" button captures your Skool session into its .auth/
+# (the same Playwright storageState its own `npm run login` writes). By default
+# videos stay where they are (referenced); set store_media to archive the bytes.
 # [sources.skool]
 # type = "skool"
 # enabled = true
 # downloads_dir = "~/skool-downloader/downloads"
+# downloader_cwd = "~/skool-downloader"   # the checkout; login + fetch run here
 # include_kinds = ["community", "course", "lesson"]
 # include_incomplete = true       # also index lessons whose download is unfinished
 # store_media = true              # pull the downloaded lesson files INTO the DB
 # max_media_mb = 200              # per-file cap (0 = no limit); larger files stay referenced
-# Optionally run skool-downloader first, then index its output (argv list, no
-# shell; "{downloads_dir}" is substituted). Combine with store_media to get a
-# one-command "fetch from Skool -> store everything in the DB" backup.
-# downloader_cmd = ["skool-downloader", "--out", "{downloads_dir}"]
+# Run skool-downloader before indexing (argv list, no shell; "{downloads_dir}"
+# is substituted). Combine with store_media + "Skool login" for a one-command
+# "log in once -> fetch from Skool -> store everything in the DB" backup.
+# downloader_cmd = ["npm", "run", "skool", "--", "--out", "{downloads_dir}"]
 # downloader_timeout = 7200       # seconds (default 3600)
 
 # --- Optional: connector collision overrides ------------------------------

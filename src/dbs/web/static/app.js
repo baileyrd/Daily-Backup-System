@@ -93,7 +93,10 @@ async function loadSources() {
       if (ac && META.setup_enabled) {
         const login = el("button", { className: "small", textContent: ac.label });
         login.title = "Open a browser to capture this source's login session";
-        login.addEventListener("click", () => captureConnector(s.type, login));
+        // per_source captures write into the source's own tool dir -> per-source endpoint.
+        login.addEventListener("click", () => ac.per_source
+          ? sourceCapture(s.name, ac.label, login)
+          : captureConnector(s.type, login));
         actions.append(login);
       }
       const btn = el("button", { className: "small", textContent: "Back up", disabled: !s.enabled });
@@ -191,9 +194,11 @@ async function loadConnectors() {
           actions.append(el("span", { className: "tag", textContent: "+ playwright install chromium" }));
         }
       }
-      if (c.auth_capture && META.setup_enabled) {
+      // per_source captures need a configured source -> use the Sources-row
+      // button, not this connector-level one.
+      if (c.auth_capture && !c.auth_capture.per_source && META.setup_enabled) {
         const cap = el("button", { className: "small", textContent: c.auth_capture.label });
-        cap.title = "Opens a browser on the server host so you can log in; the session/cookies are captured into .env";
+        cap.title = "Opens a browser on the server host so you can log in; the session is captured into .env";
         cap.addEventListener("click", () => captureConnector(c.type, cap));
         actions.append(cap);
       }
@@ -242,6 +247,14 @@ async function captureConnector(type, btn) {
   try {
     const job = await api(`/api/connectors/${encodeURIComponent(type)}/capture`, { method: "POST" });
     streamSetup(job.id, `${type}: login capture — check the server host for a browser window`);
+  } catch (e) { toast(e.message, "err"); if (btn) btn.disabled = false; }
+}
+
+async function sourceCapture(name, label, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const job = await api(`/api/sources/${encodeURIComponent(name)}/capture`, { method: "POST" });
+    streamSetup(job.id, `${label} — check the server host for a browser window`);
   } catch (e) { toast(e.message, "err"); if (btn) btn.disabled = false; }
 }
 
@@ -391,6 +404,14 @@ function renderCaptureArea(type) {
   if (!c.auth_capture) return;
   const ac = c.auth_capture;
   const wrap = el("div", { className: "capture-box" });
+  if (ac.per_source) {
+    // The capture target depends on this source's config, so it runs after the
+    // source is added — from the Sources tab.
+    wrap.append(el("div", { className: "muted",
+      textContent: `Add the source (with its folder configured), then use the “${ac.label}” button on the Sources tab to capture the login.` }));
+    box.append(wrap);
+    return;
+  }
   wrap.append(el("div", { className: "muted",
     textContent: `This source needs a login. Capture it once — a browser opens on this machine, you log in, and ${ac.secret_key} is saved to your .env.` }));
   if (META.setup_enabled) {
