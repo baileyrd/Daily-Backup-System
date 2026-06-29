@@ -202,3 +202,76 @@ def test_volatile_updatedat_does_not_spawn_revisions(storage):
     assert r2.updated == 0
     revs = storage.conn.execute("SELECT COUNT(*) FROM item_revisions").fetchone()[0]
     assert revs == 1
+
+
+# --- downloader invocation (open() runs an external fetch, then we index) ---
+
+_WRITE_GROUP = (
+    "import sys, json, pathlib;"
+    "d = pathlib.Path(sys.argv[1]) / 'comm';"
+    "d.mkdir(parents=True, exist_ok=True);"
+    "(d / '.group.json').write_text(json.dumps({'slug': 'comm', 'groupName': 'Fetched Comm'}))"
+)
+
+
+def test_downloader_runs_then_indexes(tmp_path):
+    import sys
+
+    root = tmp_path / "downloads"
+    root.mkdir()
+    cfg = SkoolConfig(
+        downloads_dir=str(root),
+        downloader_cmd=[sys.executable, "-c", _WRITE_GROUP, "{downloads_dir}"],
+    )
+    conn = SkoolConnector()
+    ctx = make_ctx(source_id=1, run_id=1, mode="full", config=cfg)
+    # Nothing on disk yet; the downloader creates it during open().
+    conn.open(ctx)
+    items = [e for e in conn.fetch(ctx) if isinstance(e, BackupItem)]
+    assert any(i.external_id == "community:comm" for i in items)
+
+
+def test_downloader_substitutes_downloads_dir_placeholder(tmp_path):
+    import sys
+
+    root = tmp_path / "dl"
+    root.mkdir()
+    cfg = SkoolConfig(
+        downloads_dir=str(root),
+        downloader_cmd=[sys.executable, "-c", _WRITE_GROUP, "{downloads_dir}"],
+    )
+    SkoolConnector().open(make_ctx(source_id=1, run_id=1, mode="full", config=cfg))
+    assert (root / "comm" / ".group.json").is_file()
+
+
+def test_downloader_nonzero_exit_is_transient_error(tmp_path):
+    import sys
+    import pytest
+    from dbs.core import TransientFetchError
+
+    cfg = SkoolConfig(
+        downloads_dir=str(tmp_path),
+        downloader_cmd=[sys.executable, "-c", "import sys; sys.exit(2)"],
+    )
+    with pytest.raises(TransientFetchError):
+        SkoolConnector().open(make_ctx(source_id=1, run_id=1, mode="full", config=cfg))
+
+
+def test_downloader_missing_command_is_config_error(tmp_path):
+    import pytest
+    from dbs.core import ConnectorConfigError
+
+    cfg = SkoolConfig(
+        downloads_dir=str(tmp_path),
+        downloader_cmd=["this-binary-does-not-exist-xyz"],
+    )
+    with pytest.raises(ConnectorConfigError):
+        SkoolConnector().open(make_ctx(source_id=1, run_id=1, mode="full", config=cfg))
+
+
+def test_no_downloader_cmd_is_noop(tmp_path):
+    # Default: open() does nothing, no command runs.
+    SkoolConnector().open(make_ctx(
+        source_id=1, run_id=1, mode="full",
+        config=SkoolConfig(downloads_dir=str(tmp_path)),
+    ))

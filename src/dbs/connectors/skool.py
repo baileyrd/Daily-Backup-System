@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -48,6 +49,7 @@ from ..core import (
     MediaRef,
     ReconcileMarker,
     RunContext,
+    TransientFetchError,
     parse_iso,
 )
 
@@ -68,6 +70,13 @@ class SkoolConfig(BaseModel):
     # data). When False, only verifiably-complete lessons are indexed.
     include_incomplete: bool = True
     checkpoint_every: int = Field(default=200, ge=1)
+    # Optional: run an external fetch command (e.g. skool-downloader) BEFORE
+    # indexing, to refresh the local tree. argv list — run directly, never via a
+    # shell (so no shell-injection). The token "{downloads_dir}" in any argument
+    # is replaced with downloads_dir. Empty = don't run anything (default).
+    downloader_cmd: list[str] = []
+    downloader_cwd: str | None = None
+    downloader_timeout: int = Field(default=3600, ge=1)
 
 
 class SkoolConnector(Connector):
@@ -98,6 +107,41 @@ class SkoolConnector(Connector):
     # Manifests rewrite `updatedAt` on every download even when nothing of
     # substance changed; strip it before hashing to avoid revision spam.
     volatile_fields = ("updatedAt",)
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def open(self, ctx: RunContext) -> None:
+        """Refresh the local tree via an external downloader, if configured."""
+        cfg: SkoolConfig = ctx.config  # type: ignore[assignment]
+        if cfg.downloader_cmd:
+            self._run_downloader(cfg, ctx)
+
+    def _run_downloader(self, cfg: "SkoolConfig", ctx: RunContext) -> None:
+        argv = [tok.replace("{downloads_dir}", cfg.downloads_dir) for tok in cfg.downloader_cmd]
+        ctx.logger.info("skool: refreshing via %s", " ".join(argv))
+        try:
+            proc = subprocess.run(
+                argv,
+                cwd=cfg.downloader_cwd,
+                capture_output=True,
+                text=True,
+                timeout=cfg.downloader_timeout,
+            )
+        except FileNotFoundError as exc:
+            raise ConnectorConfigError(
+                f"downloader_cmd not found: {argv[0]!r} — check the path/command. ({exc})"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise TransientFetchError(
+                f"skool downloader timed out after {cfg.downloader_timeout}s"
+            ) from exc
+        if proc.stdout:
+            ctx.logger.debug("skool downloader stdout:\n%s", proc.stdout.strip())
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-15:]
+            raise TransientFetchError(
+                f"skool downloader exited {proc.returncode}: " + " | ".join(tail)
+            )
 
     # -- main entrypoint ----------------------------------------------------
 
