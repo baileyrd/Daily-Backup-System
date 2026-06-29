@@ -56,6 +56,11 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # include_incomplete = true       # also index lessons whose download is unfinished
 # store_media = true              # pull the downloaded lesson files INTO the DB
 # max_media_mb = 200              # per-file cap (0 = no limit); larger files stay referenced
+# Optionally run skool-downloader first, then index its output (argv list, no
+# shell; "{downloads_dir}" is substituted). Combine with store_media to get a
+# one-command "fetch from Skool -> store everything in the DB" backup.
+# downloader_cmd = ["skool-downloader", "--out", "{downloads_dir}"]
+# downloader_timeout = 7200       # seconds (default 3600)
 
 # --- Optional: connector collision overrides ------------------------------
 # [connectors.raindrop]

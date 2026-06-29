@@ -114,7 +114,7 @@ the server with `dbs serve --allow-setup`, can do the setup for you:
 | Connector | Needs | In the UI (`--allow-setup`) |
 |---|---|---|
 | **raindrop** | `RAINDROP_TOKEN` | set it in *API keys* |
-| **skool** | nothing (offline) | just set `downloads_dir` when adding the source |
+| **skool** | a `skool-downloader` output tree (`downloads_dir`) | set `downloads_dir`; optionally `downloader_cmd` to fetch first (below) |
 | **reddit** | `[reddit]` extra + `playwright install chromium`; a logged-in session dir | **Install** button, then **Log in (browser)** — opens a browser on the host, you log in and close it; `REDDIT_SESSION_DIR` is saved for you |
 | **youtube** | `[youtube]` extra; a `cookies.txt` *or* `cookies_from_browser` | **Install** button; then set `YOUTUBE_COOKIES_FILE` in *API keys*, or set `cookies_from_browser` (e.g. `chrome`) in the source config |
 
@@ -219,6 +219,30 @@ produces); remote URLs stay referenced. Archived bytes are included in the
 > **Heads-up:** embedding large media bloats SQLite and slows it down. It's
 > off by default and capped per file for that reason — turn it on deliberately,
 > and keep `max_media_mb` sane unless you really want multi-GB blobs in the DB.
+
+### Fetching before indexing (skool)
+
+The **skool** connector indexes a local `skool-downloader` tree rather than
+talking to Skool itself. To make one `dbs backup` *fetch then store*, point it at
+your downloader with `downloader_cmd` — an argv list run directly (no shell;
+`{downloads_dir}` is substituted) before indexing:
+
+```toml
+[sources.courses]
+type = "skool"
+downloads_dir = "~/skool-downloads"
+downloader_cmd = ["skool-downloader", "--out", "{downloads_dir}"]
+store_media = true              # ...and pull the fetched files into the DB
+```
+
+`dbs backup courses` then runs your downloader, indexes the refreshed tree, and
+(with `store_media`) archives the lesson files — Skool content lands in the DB
+without a separate manual step. A non-zero exit fails the run so you see auth/
+fetch problems instead of silently backing up a stale tree.
+
+> Only configure a `downloader_cmd` you trust — it runs on every backup. It's a
+> plain argv (never a shell string), so there's no shell-injection, but it is a
+> command your machine will execute.
 
 ## Scheduling daily backups
 
