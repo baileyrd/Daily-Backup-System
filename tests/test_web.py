@@ -354,6 +354,38 @@ def test_browser_capture_runner_errors_without_playwright():
         runner(lambda line: None)
 
 
+def test_wait_until_closed_detects_close_and_snapshots_cookies():
+    # Regression: the sync Playwright API only dispatches events during a sync
+    # call, so we detect "window closed" by ctx.cookies() raising — not an event.
+    from dbs.web.setup import _wait_until_closed
+
+    class FakeCtx:
+        def __init__(self):
+            self.n = 0
+
+        def cookies(self):
+            self.n += 1
+            if self.n <= 2:
+                return [{"name": f"c{self.n}", "value": "v", "domain": ".x.com"}]
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    # cookies kind: returns the last good snapshot taken before the close.
+    last = _wait_until_closed(FakeCtx(), "browser_cookies", poll=0)
+    assert last and last[-1]["name"] == "c2"
+    # session kind: ignores cookies but still terminates promptly on close.
+    assert _wait_until_closed(FakeCtx(), "browser_session", poll=0) == []
+
+
+def test_wait_until_closed_returns_on_immediate_close():
+    from dbs.web.setup import _wait_until_closed
+
+    class Dead:
+        def cookies(self):
+            raise RuntimeError("closed")
+
+    assert _wait_until_closed(Dead(), "browser_session", poll=0) == []
+
+
 def test_to_netscape_cookies_format():
     from dbs.web.setup import to_netscape_cookies
 
