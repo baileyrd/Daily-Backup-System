@@ -288,6 +288,13 @@ def test_playwright_install_commands_are_server_derived():
     assert all(argv[0] == sys.executable for _, argv in cmds)
 
 
+def test_connectors_expose_setup_hints(client):
+    conns = {c["type"]: c for c in client.get("/api/connectors").json()}
+    assert "downloads_dir" in conns["skool"]["setup_hint"]
+    assert "cookies_from_browser" in conns["youtube"]["setup_hint"]
+    assert "RAINDROP_TOKEN" in conns["raindrop"]["setup_hint"]
+
+
 def test_capture_ready_reflects_playwright(setup_client):
     # Playwright isn't installed in the test env -> capture_ready is False.
     conns = {c["type"]: c for c in setup_client.get("/api/connectors").json()}

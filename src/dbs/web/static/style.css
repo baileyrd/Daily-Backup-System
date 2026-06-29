@@ -144,6 +144,12 @@ code { background: var(--panel-2); padding: 0.05rem 0.3rem; border-radius: 4px; 
 }
 .connector h3 { margin: 0 0 0.3rem; font-size: 0.95rem; }
 .caps { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.4rem; }
+.hint {
+  font-size: 0.82rem; color: var(--text);
+  background: rgba(79,140,255,0.08); border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px; padding: 0.45rem 0.6rem; margin: 0.4rem 0;
+}
 .capture-box {
   display: flex; flex-direction: column; gap: 0.45rem;
   background: var(--panel-2); border: 1px solid var(--border);

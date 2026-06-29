@@ -77,6 +77,10 @@ class RedditConnector(Connector):
     display_name = "Reddit (saved)"
     description = "Your saved Reddit posts and comments, via a logged-in browser session."
     docs_url = "https://github.com/baileyrd/reddit_saved_extractor"
+    setup_hint = (
+        "Set username, then click ‘Reddit login’ to capture a session: a browser "
+        "opens, you log in, and you CLOSE the window to finish."
+    )
     config_model = RedditConfig
     secret_keys = ("REDDIT_SESSION_DIR",)
     wants_managed_http = False

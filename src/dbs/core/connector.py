@@ -86,6 +86,9 @@ class Connector(ABC):
     display_name: ClassVar[str] = ""
     description: ClassVar[str] = ""
     docs_url: ClassVar[str] = ""
+    # One-line, user-facing guidance shown in a UI when configuring this source:
+    # what auth/setup it needs (e.g. "set RAINDROP_TOKEN in API keys").
+    setup_hint: ClassVar[str] = ""
 
     # -- optional runtime dependencies (for setup tooling) ------------------
     # A connector whose acquisition step needs heavy/optional packages declares

@@ -172,12 +172,14 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
             out = []
             for i in svc.list_connectors():
                 auth_capture = None
+                setup_hint = ""
                 try:
                     rc = svc.registry.get(i.type)
                     ready, ready_detail = rc.cls.check_ready()
                     pip_requirements = list(rc.cls.pip_requirements)
                     needs_browser = rc.cls.needs_playwright_browser
                     docs_url = rc.cls.docs_url
+                    setup_hint = rc.cls.setup_hint
                     if rc.cls.auth_capture is not None:
                         ac = rc.cls.auth_capture
                         auth_capture = {
@@ -210,6 +212,7 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
                         "needs_playwright_browser": needs_browser,
                         "auth_capture": auth_capture,
                         "capture_ready": setupmod.playwright_present() if auth_capture else None,
+                        "setup_hint": setup_hint,
                     }
                 )
             return out
