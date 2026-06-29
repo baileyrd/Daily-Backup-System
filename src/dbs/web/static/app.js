@@ -5,7 +5,12 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const el = (tag, props = {}, ...kids) => {
-  const n = Object.assign(document.createElement(tag), props);
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    // `dataset` is a getter-only DOMStringMap — assign its keys, don't replace it.
+    if (k === "dataset") Object.assign(n.dataset, v);
+    else n[k] = v;
+  }
   for (const k of kids) n.append(k);
   return n;
 };
