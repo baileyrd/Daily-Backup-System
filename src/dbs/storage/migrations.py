@@ -121,9 +121,18 @@ CREATE TABLE source_locks (
 );
 """
 
+# Optionally archive the actual media bytes inline (opt-in per source via
+# store_media). The reference columns (local_path/sha256/fetched_at) already
+# exist from v1; this adds the blob payload + its size.
+MIGRATION_0002 = """
+ALTER TABLE media ADD COLUMN data BLOB;
+ALTER TABLE media ADD COLUMN byte_size INTEGER;
+"""
+
 # (version, sql) in ascending order.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, MIGRATION_0001),
+    (2, MIGRATION_0002),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]

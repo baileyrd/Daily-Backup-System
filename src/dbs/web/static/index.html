@@ -118,6 +118,10 @@
           <select id="add-type" required></select>
         </label>
         <div id="add-schema" class="schema"></div>
+        <label class="check"><input type="checkbox" id="add-store-media" /> Store media bytes in the database</label>
+        <label>Max media size per file (MB, 0 = no limit)
+          <input id="add-max-media" type="number" min="0" value="0" />
+        </label>
         <details>
           <summary>Advanced: options as JSON</summary>
           <textarea id="add-options" rows="6" placeholder='{ "collection_id": 0 }'></textarea>

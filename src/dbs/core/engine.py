@@ -115,7 +115,11 @@ class Engine:
         def flush(cursor: Cursor | None) -> None:
             nonlocal buffer, committed_any, watermark_dt, last_cursor
             with self.storage.transaction():
-                res = self.storage.upsert_items(ctx.source_id, ctx.run_id, buffer)
+                res = self.storage.upsert_items(
+                    ctx.source_id, ctx.run_id, buffer,
+                    store_media=ctx.store_media,
+                    max_media_bytes=ctx.max_media_bytes,
+                )
                 if res.max_updated_at:
                     mdt = parse_iso(res.max_updated_at)
                     if mdt and (watermark_dt is None or mdt > watermark_dt):

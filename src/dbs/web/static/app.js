@@ -427,6 +427,8 @@ $("#add-form").addEventListener("submit", async (e) => {
       name: $("#add-name").value.trim(),
       type: $("#add-type").value,
       options: collectOptions(),
+      store_media: $("#add-store-media").checked,
+      max_media_mb: parseInt($("#add-max-media").value || "0", 10),
     });
     const sc = await api("/api/sources", { method: "POST", body });
     result.textContent = `Added ${sc.name} (${sc.type}).`;

@@ -194,6 +194,32 @@ token_env = "RAINDROP_TOKEN"
 
 Run `dbs connectors describe raindrop` to see every option and its schema.
 
+### Storing media in the database
+
+By default `dbs` stores each item's **metadata + verbatim payload** in SQLite and
+keeps large binary media (videos, PDFs, cover images) as **references**
+(`MediaRef`) rather than embedding the bytes. To actually pull the bytes into the
+database — e.g. so the **skool** catalog also archives the downloaded lesson
+files — set `store_media` on the source:
+
+```toml
+[sources.courses]
+type = "skool"
+enabled = true
+downloads_dir = "~/skool-downloads"
+store_media = true              # archive media bytes into the DB
+max_media_mb = 200             # per-file cap; 0 = no limit (files over the cap
+                               #   are recorded by path + size, bytes skipped)
+```
+
+Today this ingests **local-file** media (which is what the skool connector
+produces); remote URLs stay referenced. Archived bytes are included in the
+`archive` export bundle (`media/<source>/<id>/<file>`).
+
+> **Heads-up:** embedding large media bloats SQLite and slows it down. It's
+> off by default and capped per file for that reason — turn it on deliberately,
+> and keep `max_media_mb` sane unless you really want multi-GB blobs in the DB.
+
 ## Scheduling daily backups
 
 ```bash

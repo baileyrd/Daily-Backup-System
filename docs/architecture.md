@@ -98,7 +98,10 @@ the browser over Server-Sent Events for a live progress bar.
   with the raw payload at that revision.
 - `sync_runs` — per-run status and counters (`success`/`partial`/`failed`/…).
 - `sync_state` — per-source opaque cursor + engine watermark + run count.
-- `media` — referenced assets (covers/thumbnails) per item.
+- `media` — assets per item: always a reference (url/kind/filename/mime), plus the
+  actual bytes (`data`/`byte_size`/`sha256`) when the source opts in with
+  `store_media` (local files only; size-capped via `max_media_mb`). Default is
+  reference-only — large binary media is not embedded unless asked for.
 - `source_locks` — single-writer guard per source.
 
 All timestamps are ISO-8601 UTC text with a trailing `Z`, so lexicographic order

@@ -406,10 +406,21 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
             raise HTTPException(status_code=400, detail="'name' and 'type' are required")
         if not isinstance(options, dict):
             raise HTTPException(status_code=400, detail="'options' must be an object")
+        try:
+            max_media_mb = int(payload.get("max_media_mb") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="'max_media_mb' must be an integer")
         svc = open_service()
         try:
-            sc = svc.add_source(name, stype, options)
-            return {"name": sc.name, "type": sc.type, "options": sc.options}
+            sc = svc.add_source(
+                name, stype, options,
+                store_media=bool(payload.get("store_media")),
+                max_media_mb=max_media_mb,
+            )
+            return {
+                "name": sc.name, "type": sc.type, "options": sc.options,
+                "store_media": sc.store_media, "max_media_mb": sc.max_media_mb,
+            }
         except (ConnectorLoadError, ConnectorConfigError, BackupRunError) as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         finally:

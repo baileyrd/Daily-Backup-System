@@ -18,6 +18,7 @@ are managed explicitly via :meth:`transaction` (re-entrant via a depth guard).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -48,6 +49,9 @@ class SqliteStorage(Storage):
         self.path = str(path)
         self._clock = clock
         self._depth = 0
+        # Per-run media-archiving toggles, set by upsert_items().
+        self._store_media = False
+        self._max_media_bytes = 0
         is_memory = self.path in (":memory:", "") or self.path.startswith("file::memory:")
         if not is_memory:
             Path(self.path).expanduser().parent.mkdir(parents=True, exist_ok=True)
@@ -231,11 +235,20 @@ class SqliteStorage(Storage):
     # -- items / batch commit ----------------------------------------------
 
     def upsert_items(
-        self, source_id: int, run_id: int, items: list[PreparedItem]
+        self,
+        source_id: int,
+        run_id: int,
+        items: list[PreparedItem],
+        *,
+        store_media: bool = False,
+        max_media_bytes: int = 0,
     ) -> BatchResult:
         res = BatchResult()
         if not items:
             return res
+        # Read by _replace_media (only invoked when media is (re)written).
+        self._store_media = store_media
+        self._max_media_bytes = max_media_bytes
         now = self._now()
         existing = self._existing_index(source_id, [it.external_id for it in items])
         with self.transaction():
@@ -374,12 +387,24 @@ class SqliteStorage(Storage):
             return
         self.conn.execute("DELETE FROM media WHERE item_id=?", (item_id,))
         for m in it.media:
+            url = m.get("url")
+            data = byte_size = sha = local_path = fetched = None
+            if self._store_media:
+                data, byte_size, sha, local_path = _resolve_local_media(
+                    url, self._max_media_bytes
+                )
+                if data is not None:
+                    fetched = self._now()
             # OR REPLACE (not OR IGNORE): if the same item lists the same URL
             # twice with differing metadata, keep the latest rather than dropping it.
             self.conn.execute(
-                "INSERT OR REPLACE INTO media(item_id, url, kind, filename, mime) "
-                "VALUES (?,?,?,?,?)",
-                (item_id, m.get("url"), m.get("kind", "image"), m.get("filename"), m.get("mime")),
+                "INSERT OR REPLACE INTO media"
+                "(item_id, url, kind, filename, mime, local_path, sha256, fetched_at, data, byte_size) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    item_id, url, m.get("kind", "image"), m.get("filename"), m.get("mime"),
+                    local_path, sha, fetched, data, byte_size,
+                ),
             )
 
     @staticmethod
@@ -535,6 +560,29 @@ class SqliteStorage(Storage):
                 out["raw"] = json.loads(row["raw_json"])
             yield out
 
+    def iter_media_blobs(self, query: ExportQuery) -> Iterator[ItemRow]:
+        where, params = _build_filter(query, table="i")
+        sql = (
+            "SELECT s.name AS source_name, i.external_id, m.filename, m.kind, "
+            "m.mime, m.sha256, m.byte_size, m.data "
+            "FROM media m "
+            "JOIN items i ON i.id = m.item_id "
+            "JOIN sources s ON s.id = i.source_id "
+            f"WHERE {where} AND m.data IS NOT NULL "
+            "ORDER BY s.name, i.external_id"
+        )
+        for row in self.conn.execute(sql, params):
+            yield {
+                "source": row["source_name"],
+                "external_id": row["external_id"],
+                "filename": row["filename"],
+                "kind": row["kind"],
+                "mime": row["mime"],
+                "sha256": row["sha256"],
+                "byte_size": row["byte_size"],
+                "data": row["data"],
+            }
+
     def item_counts(self, source_id: int) -> tuple[int, int, int]:
         row = self.conn.execute(
             "SELECT COUNT(*) AS total, "
@@ -572,6 +620,35 @@ def _source_from_row(row: sqlite3.Row) -> SourceRecord:
 def _chunks(seq: list[str], size: int) -> Iterator[list[str]]:
     for i in range(0, len(seq), size):
         yield seq[i : i + size]
+
+
+def _resolve_local_media(
+    url: str | None, max_bytes: int
+) -> tuple[bytes | None, int | None, str | None, str | None]:
+    """Load a local-file media reference for inline storage.
+
+    Returns ``(data, byte_size, sha256, local_path)``. Only **local files** are
+    ingested (a URL is left as a reference in v1). A file larger than
+    ``max_bytes`` (when >0) is recorded by path + size but its bytes are *not*
+    stored, so an opt-in archive can't be ballooned by one huge asset.
+    """
+    if not url:
+        return (None, None, None, None)
+    p = Path(url).expanduser()
+    try:
+        if not p.is_file():
+            return (None, None, None, None)
+        size = p.stat().st_size
+    except OSError:
+        return (None, None, None, None)
+    local_path = str(p)
+    if max_bytes and size > max_bytes:
+        return (None, size, None, local_path)  # too big: reference + size only
+    try:
+        data = p.read_bytes()
+    except OSError:
+        return (None, size, None, local_path)
+    return (data, len(data), hashlib.sha256(data).hexdigest(), local_path)
 
 
 def _build_filter(query: ExportQuery, *, table: str) -> tuple[str, list[Any]]:

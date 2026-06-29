@@ -148,6 +148,10 @@ class RunContext:
     full_refresh: bool = False
     limit: int | None = None
     now: Callable[[], datetime] = utcnow
+    # Archive media bytes into the DB (opt-in per source). max_media_bytes caps
+    # per-file size in bytes (0 = no cap).
+    store_media: bool = False
+    max_media_bytes: int = 0
 
 
 # --------------------------------------------------------------------------- #
