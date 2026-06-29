@@ -38,6 +38,35 @@ def _now_iso() -> str:
 # --------------------------------------------------------------------------- #
 
 
+def playwright_present() -> bool:
+    """Whether the Playwright Python package is importable (capture needs it)."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("playwright") is not None
+    except (ImportError, ValueError):  # pragma: no cover
+        return False
+
+
+def playwright_install_commands() -> list[tuple[str, list[str]]]:
+    """Fixed steps to make browser capture possible (server-derived argv)."""
+    return [
+        ("pip install playwright", [sys.executable, "-m", "pip", "install", "playwright"]),
+        ("playwright install chromium", [sys.executable, "-m", "playwright", "install", "chromium"]),
+    ]
+
+
+def chain_runners(*runners: Callable[[Callable[[str], None]], None]) -> Callable[[Callable[[str], None]], None]:
+    """Run several step-runners in order, sharing one log stream."""
+
+    def runner(emit: Callable[[str], None]) -> None:
+        for r in runners:
+            if r is not None:
+                r(emit)
+
+    return runner
+
+
 def install_commands(rc) -> list[tuple[str, list[str]]]:
     """Build the (label, argv) steps to make a connector runnable.
 

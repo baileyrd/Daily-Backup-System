@@ -275,20 +275,24 @@ def test_capture_unknown_connector_404(setup_client):
     assert setup_client.post("/api/connectors/nope/capture").status_code == 404
 
 
-def test_capture_runs_and_reports_missing_playwright(setup_client):
-    # Endpoint -> SetupManager -> browser_capture_runner. Playwright is absent in
-    # the test env, so the job ends in a clear error (no browser is launched).
-    job = setup_client.post("/api/connectors/reddit/capture").json()
-    assert job["status"] == "running" and "id" in job
-    deadline = time.time() + 10
-    snap = job
-    while time.time() < deadline:
-        snap = setup_client.get(f"/api/setup/{job['id']}").json()
-        if snap["status"] != "running":
-            break
-        time.sleep(0.05)
-    assert snap["status"] == "error"
-    assert any("Playwright" in line for line in snap["log"])
+def test_playwright_install_commands_are_server_derived():
+    # Capture auto-installs Playwright + a browser when missing; the commands are
+    # fixed and server-derived (never client input). Not executed here.
+    import sys
+    from dbs.web.setup import playwright_install_commands
+
+    cmds = playwright_install_commands()
+    labels = [label for label, _ in cmds]
+    assert any("pip install playwright" in lbl for lbl in labels)
+    assert any("chromium" in lbl for lbl in labels)
+    assert all(argv[0] == sys.executable for _, argv in cmds)
+
+
+def test_capture_ready_reflects_playwright(setup_client):
+    # Playwright isn't installed in the test env -> capture_ready is False.
+    conns = {c["type"]: c for c in setup_client.get("/api/connectors").json()}
+    assert conns["reddit"]["capture_ready"] is False
+    assert conns["skool"]["capture_ready"] is None  # no auth_capture
 
 
 def test_install_commands_are_server_derived(setup_client):

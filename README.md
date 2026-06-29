@@ -120,20 +120,22 @@ the server with `dbs serve --allow-setup`, can do the setup for you:
 
 #### Capturing a login from the UI
 
-Connectors that need a browser session or cookies declare it, and the
-Connectors tab shows a **capture** button (with `--allow-setup`). Clicking it
-opens a real browser **on the machine running the server** — you log in, close
-the window, and the artifact is captured and recorded in `.env`:
+Connectors that need a browser session or cookies declare it, so a **capture
+button** appears wherever you manage that source: on the **Add source** form when
+you pick the type, on the **Sources** row, and on the **Connectors** card. **Start
+the server with `dbs serve --allow-setup`** for these to appear. Click it and a
+real browser opens **on the machine running the server** — you log in, close the
+window, and the artifact is captured and recorded in `.env`:
 
 - **reddit** → a Playwright persistent-session directory → `REDDIT_SESSION_DIR`;
 - **youtube** → a Netscape `cookies.txt` exported after login → `YOUTUBE_COOKIES_FILE`.
 
-Capture drives the browser with **Playwright**, so it needs `pip install
-playwright && playwright install chromium` on the host (reddit's **Install**
-already does this; for youtube, install Playwright too if you want capture
-rather than `cookies_from_browser`). Because the browser opens on the host, this
-works when `dbs serve` runs on your desktop; on a headless server, capture on a
-desktop and point the `*_env` secret at the resulting path.
+Capture drives the browser with **Playwright**. It's **one click** — if Playwright
+or its browser are missing, capture installs them first (watch the streamed log),
+then opens the login window. Because the browser opens on the host, this works
+when `dbs serve` runs on your desktop; on a headless server, capture on a desktop
+and point the `*_env` secret at the resulting path. (For youtube you can skip
+capture entirely and set `cookies_from_browser` in the source config instead.)
 
 `--allow-setup` enables the **Install** and **Log in** actions, which run
 `pip install` / `playwright` and open a browser **on the machine running the
