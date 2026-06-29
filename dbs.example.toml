@@ -46,13 +46,16 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # # cookies_from_browser = "chrome"
 
 # Skool: catalog courses already downloaded by skool-downloader (no auth, no
-# extra — it just indexes the JSON manifests on disk; videos stay where they are).
+# extra — it just indexes the JSON manifests on disk). By default videos stay
+# where they are (referenced); set store_media to archive the bytes into the DB.
 # [sources.skool]
 # type = "skool"
 # enabled = true
 # downloads_dir = "~/skool-downloader/downloads"
 # include_kinds = ["community", "course", "lesson"]
 # include_incomplete = true       # also index lessons whose download is unfinished
+# store_media = true              # pull the downloaded lesson files INTO the DB
+# max_media_mb = 200              # per-file cap (0 = no limit); larger files stay referenced
 
 # --- Optional: connector collision overrides ------------------------------
 # [connectors.raindrop]

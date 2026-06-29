@@ -39,7 +39,9 @@ from pydantic import BaseModel, ConfigDict
 
 from .core.errors import ConfigError
 
-_RESERVED_SOURCE_KEYS = {"type", "enabled", "schedule", "reconcile_every_runs"}
+_RESERVED_SOURCE_KEYS = {
+    "type", "enabled", "schedule", "reconcile_every_runs", "store_media", "max_media_mb",
+}
 _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _SECRET_KEY_HINTS = ("token", "secret", "password", "api_key", "apikey", "access_key")
 
@@ -52,6 +54,10 @@ class SourceConfig(BaseModel):
     enabled: bool = True
     schedule: str | None = None
     reconcile_every_runs: int | None = None
+    # Archive media bytes into the DB for this source (opt-in; large/binary
+    # media otherwise stays referenced). max_media_mb caps per-file size (0 = no cap).
+    store_media: bool = False
+    max_media_mb: int = 0
     options: dict[str, Any] = {}
 
 
@@ -132,6 +138,8 @@ def load_config(path: str | Path) -> Config:
             enabled=bool(body.get("enabled", True)),
             schedule=body.get("schedule"),
             reconcile_every_runs=body.get("reconcile_every_runs"),
+            store_media=bool(body.get("store_media", False)),
+            max_media_mb=int(body.get("max_media_mb", 0) or 0),
             options=options,
         )
 

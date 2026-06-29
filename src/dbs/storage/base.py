@@ -138,9 +138,19 @@ class Storage(ABC):
 
     @abstractmethod
     def upsert_items(
-        self, source_id: int, run_id: int, items: list[PreparedItem]
+        self,
+        source_id: int,
+        run_id: int,
+        items: list[PreparedItem],
+        *,
+        store_media: bool = False,
+        max_media_bytes: int = 0,
     ) -> BatchResult:
-        """Idempotently persist a batch, classifying each item. Caller wraps in a tx."""
+        """Idempotently persist a batch, classifying each item. Caller wraps in a tx.
+
+        When ``store_media`` is set, local-file media references are archived
+        inline (up to ``max_media_bytes`` per file; 0 = no limit).
+        """
 
     @abstractmethod
     def soft_delete_missing(
@@ -183,6 +193,14 @@ class Storage(ABC):
 
     @abstractmethod
     def iter_revisions(self, query: "ExportQuery") -> Iterator[ItemRow]: ...
+
+    def iter_media_blobs(self, query: "ExportQuery") -> Iterator[ItemRow]:
+        """Yield archived media blobs (only items with stored bytes).
+
+        Default is empty so backends that don't archive media bytes need not
+        implement it; the SQLite backend overrides it.
+        """
+        return iter(())
 
     @abstractmethod
     def item_counts(self, source_id: int) -> tuple[int, int, int]:

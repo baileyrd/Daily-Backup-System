@@ -353,9 +353,11 @@ def export(
         except KeyError as exc:
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(4)
+        media = result.extra.get("media") if result.extra else 0
         typer.secho(
             f"Exported {result.item_count} item(s)"
             + (f", {result.revision_count} revision(s)" if result.revision_count else "")
+            + (f", {media} media file(s)" if media else "")
             + f" to {result.path} ({result.format})",
             fg=typer.colors.GREEN,
         )

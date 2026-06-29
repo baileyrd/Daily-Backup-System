@@ -103,6 +103,8 @@ def make_ctx(
     config: BaseModel | None = None,
     http=None,
     secrets: Secrets | None = None,
+    store_media: bool = False,
+    max_media_bytes: int = 0,
 ) -> RunContext:
     return RunContext(
         source_id=source_id,
@@ -116,6 +118,8 @@ def make_ctx(
         run_id=run_id,
         mode=mode,
         now=clock or (lambda: datetime(2024, 1, 1, tzinfo=UTC)),
+        store_media=store_media,
+        max_media_bytes=max_media_bytes,
     )
 
 
@@ -127,13 +131,18 @@ def run_fake(
     cursor=None,
     since=None,
     on_progress=None,
+    store_media=False,
+    max_media_bytes=0,
 ):
     """Create a source + run row and execute the fake connector through the engine."""
     source = storage.upsert_source("fake", "fake", "test:fake", "{}", 1)
     cur_before = None
     run_id = storage.begin_run(source.id, "test:fake", mode, cur_before)
     engine = Engine(storage)
-    ctx = make_ctx(source_id=source.id, run_id=run_id, mode=mode, cursor=cursor, since=since)
+    ctx = make_ctx(
+        source_id=source.id, run_id=run_id, mode=mode, cursor=cursor, since=since,
+        store_media=store_media, max_media_bytes=max_media_bytes,
+    )
     result = engine.run_source(registered(cls), ctx, on_progress=on_progress)
     storage.increment_run_count(source.id)
     return source, result

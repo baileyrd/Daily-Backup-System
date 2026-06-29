@@ -64,6 +64,9 @@ class _StorageExportSource:
     def revisions(self) -> Iterator[ItemRow]:
         return self._storage.iter_revisions(self._query)
 
+    def media_blobs(self) -> Iterator[ItemRow]:
+        return self._storage.iter_media_blobs(self._query)
+
     @property
     def manifest(self) -> dict[str, Any]:
         return self._manifest
@@ -191,6 +194,8 @@ class BackupService:
                 mode=chosen_mode,
                 full_refresh=(chosen_mode == "full"),
                 now=self.clock,
+                store_media=sc.store_media,
+                max_media_bytes=max(0, sc.max_media_mb) * 1024 * 1024,
             )
             result = self.engine.run_source(rc, ctx, on_progress=on_progress)
         finally:
@@ -405,7 +410,14 @@ class BackupService:
     # -- sources management -------------------------------------------------
 
     def add_source(
-        self, name: str, type: str, options: dict[str, Any], *, write: bool = True
+        self,
+        name: str,
+        type: str,
+        options: dict[str, Any],
+        *,
+        store_media: bool = False,
+        max_media_mb: int = 0,
+        write: bool = True,
     ) -> SourceConfig:
         if name in self.config.sources:
             raise BackupRunError(f"Source {name!r} already exists in config")
@@ -414,7 +426,10 @@ class BackupService:
             rc.cls.config_model(**options)  # validate before writing
         except Exception as exc:
             raise ConnectorConfigError(f"Invalid options for {type}: {exc}") from exc
-        sc = SourceConfig(name=name, type=type, options=options)
+        sc = SourceConfig(
+            name=name, type=type, options=options,
+            store_media=store_media, max_media_mb=max(0, max_media_mb),
+        )
         if write and self.config.source_path is not None:
             _append_source_to_config(self.config.source_path, sc)
         self.config.sources[name] = sc
@@ -549,6 +564,10 @@ def _toml_value(value: Any) -> str:
 
 def _append_source_to_config(path: Path, sc: SourceConfig) -> None:
     lines = [f"\n[sources.{sc.name}]", f'type = "{sc.type}"', "enabled = true"]
+    if sc.store_media:
+        lines.append("store_media = true")
+        if sc.max_media_mb:
+            lines.append(f"max_media_mb = {sc.max_media_mb}")
     for key, value in sc.options.items():
         lines.append(f"{key} = {_toml_value(value)}")
     with path.open("a", encoding="utf-8") as fh:

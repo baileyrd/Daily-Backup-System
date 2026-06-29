@@ -5,6 +5,7 @@ Layout::
     manifest.json                 # schema versions, query, counts, tool version, git sha
     items/<source>.ndjson         # one NDJSON file per source (lossless with raw)
     revisions/<source>.ndjson     # full change history (when include_revisions)
+    media/<source>/<id>/<file>    # archived media bytes (when any were stored)
 
 Entries are written sequentially as the storage iterator yields them (rows are
 ordered by source), so the whole dataset is never held in memory at once.
@@ -36,6 +37,7 @@ class ArchiveExporter(Exporter):
     ) -> ExportResult:
         item_count = 0
         revision_count = 0
+        media_count = 0
         by_source: dict[str, int] = {}
 
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -46,6 +48,10 @@ class ArchiveExporter(Exporter):
                 revision_count, _ = self._write_grouped(
                     zf, "revisions", source.revisions()
                 )
+            # Archived media bytes (only present when a source had store_media on).
+            blobs = getattr(source, "media_blobs", None)
+            if blobs is not None:
+                media_count = self._write_media(zf, blobs())
 
             manifest = dict(source.manifest)
             manifest["query"] = {
@@ -60,6 +66,7 @@ class ArchiveExporter(Exporter):
             manifest["counts"] = {
                 "items": item_count,
                 "revisions": revision_count,
+                "media": media_count,
                 "by_source": by_source,
             }
             zf.writestr(
@@ -71,7 +78,7 @@ class ArchiveExporter(Exporter):
             format=self.format,
             item_count=item_count,
             revision_count=revision_count,
-            extra={"by_source": by_source},
+            extra={"by_source": by_source, "media": media_count},
         )
 
     @staticmethod
@@ -99,6 +106,27 @@ class ArchiveExporter(Exporter):
             if handle is not None:
                 handle.close()
         return total, by_source
+
+    @staticmethod
+    def _write_media(zf: zipfile.ZipFile, rows) -> int:
+        """Write each stored media blob to media/<source>/<id>/<file>."""
+        count = 0
+        seen: set[str] = set()
+        for row in rows:
+            data = row.get("data")
+            if not data:
+                continue
+            src = _slug(row.get("source") or "unknown")
+            ext_id = _slug(row.get("external_id") or "item")
+            fname = _slug(row.get("filename") or (row.get("sha256") or "file"))
+            path = f"media/{src}/{ext_id}/{fname}"
+            if path in seen:  # disambiguate same filename under one item
+                sha = (row.get("sha256") or str(count))[:8]
+                path = f"media/{src}/{ext_id}/{sha}_{fname}"
+            seen.add(path)
+            zf.writestr(path, data)
+            count += 1
+        return count
 
 
 __all__ = ["ArchiveExporter"]
