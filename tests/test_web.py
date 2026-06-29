@@ -243,7 +243,10 @@ def test_connectors_report_readiness(client):
     assert conns["reddit"]["auth_capture"]["kind"] == "browser_session"
     assert conns["youtube"]["pip_requirements"] == ["yt-dlp>=2024.1"]
     assert conns["youtube"]["auth_capture"]["kind"] == "browser_cookies"
-    assert conns["skool"]["auth_capture"] is None
+    # skool captures a Playwright storageState into its own tool dir (per-source).
+    assert conns["skool"]["auth_capture"]["kind"] == "browser_storage_state"
+    assert conns["skool"]["auth_capture"]["per_source"] is True
+    assert conns["reddit"]["auth_capture"]["per_source"] is False
     assert conns["reddit"]["docs_url"]
 
 
@@ -267,12 +270,49 @@ def test_install_when_nothing_to_install_400(setup_client):
 
 
 def test_capture_unsupported_connector_400(setup_client):
-    # skool has no auth_capture spec.
+    # skool's capture is per-source -> the connector-level endpoint refuses it.
     assert setup_client.post("/api/connectors/skool/capture").status_code == 400
 
 
 def test_capture_unknown_connector_404(setup_client):
     assert setup_client.post("/api/connectors/nope/capture").status_code == 404
+
+
+# --- per-source capture (skool storageState into downloader's .auth/) -------
+
+
+def test_source_capture_disabled_403(client):
+    # client fixture has a skool source ("courses") but setup is off.
+    assert client.post("/api/sources/courses/capture").status_code == 403
+
+
+def test_source_capture_unknown_source_404(setup_client):
+    assert setup_client.post("/api/sources/nope/capture").status_code == 404
+
+
+def test_source_capture_requires_target_dir(setup_client):
+    # The "courses" skool source has no downloader_cwd set -> can't place the
+    # storageState; 400 with guidance (no browser is launched).
+    r = setup_client.post("/api/sources/courses/capture")
+    assert r.status_code == 400
+    assert "downloader_cwd" in r.json()["detail"]
+
+
+def test_wait_until_closed_snapshots_storage_state():
+    from dbs.web.setup import _wait_until_closed
+
+    class FakeCtx:
+        def __init__(self):
+            self.n = 0
+
+        def storage_state(self):
+            self.n += 1
+            if self.n <= 2:
+                return {"cookies": [{"name": f"c{self.n}"}], "origins": []}
+            raise RuntimeError("Target closed")
+
+    state = _wait_until_closed(FakeCtx(), "browser_storage_state", poll=0)
+    assert state["cookies"][-1]["name"] == "c2"
 
 
 def test_playwright_install_commands_are_server_derived():
@@ -299,7 +339,8 @@ def test_capture_ready_reflects_playwright(setup_client):
     # Playwright isn't installed in the test env -> capture_ready is False.
     conns = {c["type"]: c for c in setup_client.get("/api/connectors").json()}
     assert conns["reddit"]["capture_ready"] is False
-    assert conns["skool"]["capture_ready"] is None  # no auth_capture
+    assert conns["skool"]["capture_ready"] is False  # has auth_capture; playwright absent
+    assert conns["raindrop"]["capture_ready"] is None  # no auth_capture
 
 
 def test_install_commands_are_server_derived(setup_client):
@@ -380,7 +421,7 @@ def test_wait_until_closed_detects_close_and_snapshots_cookies():
     last = _wait_until_closed(FakeCtx(), "browser_cookies", poll=0)
     assert last and last[-1]["name"] == "c2"
     # session kind: ignores cookies but still terminates promptly on close.
-    assert _wait_until_closed(FakeCtx(), "browser_session", poll=0) == []
+    assert _wait_until_closed(FakeCtx(), "browser_session", poll=0) is None
 
 
 def test_wait_until_closed_returns_on_immediate_close():
@@ -390,7 +431,7 @@ def test_wait_until_closed_returns_on_immediate_close():
         def cookies(self):
             raise RuntimeError("closed")
 
-    assert _wait_until_closed(Dead(), "browser_session", poll=0) == []
+    assert _wait_until_closed(Dead(), "browser_session", poll=0) is None
 
 
 def test_to_netscape_cookies_format():

@@ -39,6 +39,7 @@ from typing import Any, Iterator
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core import (
+    AuthCapture,
     BackupItem,
     Capabilities,
     Checkpoint,
@@ -85,8 +86,20 @@ class SkoolConnector(Connector):
     description = "Catalog of communities/courses/lessons from a skool-downloader output tree."
     docs_url = "https://github.com/baileyrd/skool-downloader"
     setup_hint = (
-        "No login needed — it indexes a local skool-downloader tree. Set "
-        "downloads_dir to that output; optionally set downloader_cmd to fetch first."
+        "Set downloads_dir (skool-downloader's output) + downloader_cwd (its "
+        "folder) + downloader_cmd (to fetch). Then click ‘Skool login’ — it "
+        "captures your Skool session into skool-downloader's .auth/, the same "
+        "storageState its own `npm run login` would. No separate login step."
+    )
+    # The login session skool-downloader loads is a Playwright storageState JSON
+    # at <its checkout>/.auth/storage_state.json. We capture exactly that (a
+    # per-source target, since the path is under the configured downloader_cwd).
+    auth_capture = AuthCapture(
+        kind="browser_storage_state",
+        login_url="https://www.skool.com/login",
+        target_dir_option="downloader_cwd",
+        target_path=".auth/storage_state.json",
+        label="Skool login",
     )
     config_model = SkoolConfig
     secret_keys = ()  # reads local files; no credentials

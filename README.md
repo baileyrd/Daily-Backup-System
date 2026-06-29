@@ -114,7 +114,7 @@ on by default — `dbs serve`) can do the setup for you:
 | Connector | Needs | In the UI |
 |---|---|---|
 | **raindrop** | `RAINDROP_TOKEN` | set it in *API keys* |
-| **skool** | a `skool-downloader` output tree (`downloads_dir`) | set `downloads_dir`; optionally `downloader_cmd` to fetch first (below) |
+| **skool** | a `skool-downloader` checkout (`downloads_dir` + `downloader_cwd`) | set the paths; **Skool login** (on the Sources row) captures your session into its `.auth/`; optionally `downloader_cmd` to fetch first (below) |
 | **reddit** | `[reddit]` extra + `playwright install chromium`; a logged-in session dir | **Install**, then **Reddit login** — opens a browser on the host, you log in and close it; the session dir + `REDDIT_SESSION_DIR` are captured for you |
 | **youtube** | `[youtube]` extra; a `cookies.txt` *or* `cookies_from_browser` | **Install**, then **YouTube login** — captures a `cookies.txt` and sets `YOUTUBE_COOKIES_FILE`; or skip capture and set `cookies_from_browser` (e.g. `chrome`) in the source config |
 
@@ -127,7 +127,11 @@ and a real browser opens **on the machine running the server** — you log in, c
 the window, and the artifact is captured and recorded in `.env`:
 
 - **reddit** → a Playwright persistent-session directory → `REDDIT_SESSION_DIR`;
-- **youtube** → a Netscape `cookies.txt` exported after login → `YOUTUBE_COOKIES_FILE`.
+- **youtube** → a Netscape `cookies.txt` exported after login → `YOUTUBE_COOKIES_FILE`;
+- **skool** → a Playwright `storageState` written into your `skool-downloader`
+  checkout's `.auth/` (per-source — needs `downloader_cwd`; use the **Skool login**
+  button on the *Sources* row). It's the exact artifact skool-downloader's own
+  `npm run login` produces, so its downloads pick it up — no separate login.
 
 Capture drives the browser with **Playwright**. It's **one click** — if Playwright
 or its browser are missing, capture installs them first (watch the streamed log),

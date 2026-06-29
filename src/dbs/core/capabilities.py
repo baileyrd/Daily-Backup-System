@@ -32,20 +32,31 @@ class AuthCapture:
 
     kind
         ``"browser_session"`` — a Playwright persistent-context directory holding
-        a logged-in session (e.g. Reddit), or ``"browser_cookies"`` — a Netscape
-        ``cookies.txt`` exported after login (e.g. YouTube for yt-dlp).
+        a logged-in session (e.g. Reddit); ``"browser_cookies"`` — a Netscape
+        ``cookies.txt`` exported after login (e.g. YouTube for yt-dlp); or
+        ``"browser_storage_state"`` — a Playwright ``storageState`` JSON (e.g.
+        what ``skool-downloader`` loads).
     secret_key
         The ``secret_keys`` env name the captured path is written to (in ``.env``).
+        Empty when the artifact lives at a tool's own path (see ``target_dir_option``).
     login_url
         The page the capture browser should open for the user to log in.
     label
         Human label for the action button.
+    target_dir_option / target_path
+        For **per-source** captures that must land in another tool's directory:
+        write the artifact to ``join(source_config[target_dir_option], target_path)``
+        instead of the dbs config dir. (e.g. skool → ``<downloader_cwd>/.auth/
+        storage_state.json``.) When ``target_dir_option`` is empty the capture is
+        connector-level and lands in the dbs config dir under ``secret_key``.
     """
 
     kind: str
-    secret_key: str
+    secret_key: str = ""
     login_url: str = ""
     label: str = ""
+    target_dir_option: str = ""
+    target_path: str = ""
 
 
 @dataclass(frozen=True, slots=True)

@@ -16,6 +16,7 @@ the backup progress view uses. One setup job runs at a time.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -133,24 +134,31 @@ def to_netscape_cookies(cookies: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _wait_until_closed(ctx, kind: str, *, wait_timeout: float = 900.0, poll: float = _CAPTURE_POLL_SECONDS) -> list:
-    """Block until the user closes the browser, returning the last cookie snapshot.
+def _wait_until_closed(ctx, kind: str, *, wait_timeout: float = 900.0, poll: float = _CAPTURE_POLL_SECONDS):
+    """Block until the user closes the browser, returning the last snapshot.
 
     The Playwright **sync** API only dispatches events during a sync call, so a
     plain ``Event.wait()`` never notices the window closing. Instead we round-trip
-    ``ctx.cookies()`` each tick: it pumps the event loop, snapshots cookies (for
-    the cookies kind), and *raises* once the browser is gone — which is our signal
-    that the user finished and closed the window.
+    into Playwright each tick: it pumps the event loop, snapshots what we'll save
+    (cookies, or the full storageState), and *raises* once the browser is gone —
+    which is our signal that the user finished and closed the window.
+
+    Returns the last cookie list (``browser_cookies``), the last storageState dict
+    (``browser_storage_state``), or ``None`` (``browser_session`` — nothing to
+    snapshot; the persistent profile already holds it).
     """
-    latest: list = []
+    latest = None
     deadline = time.monotonic() + wait_timeout
     while time.monotonic() < deadline:
         try:
-            cookies = ctx.cookies()
+            if kind == "browser_storage_state":
+                latest = ctx.storage_state()
+            else:
+                cookies = ctx.cookies()
+                if kind == "browser_cookies":
+                    latest = cookies
         except Exception:  # browser/window closed by the user
             break
-        if kind == "browser_cookies":
-            latest = cookies
         if poll:
             time.sleep(poll)
     return latest
@@ -172,10 +180,13 @@ def browser_capture_runner(
     * ``browser_session`` — ``target`` is a Playwright persistent-context dir; the
       logged-in cookies are already persisted there on close.
     * ``browser_cookies`` — cookies are exported to a Netscape ``cookies.txt`` at
-      ``target`` (snapshotted while the window is open, since cookies can't be
-      read after it closes).
+      ``target`` (snapshotted while the window is open).
+    * ``browser_storage_state`` — a Playwright ``storageState`` JSON is written to
+      ``target`` (plus a sibling ``cookies.txt``), the format e.g.
+      ``skool-downloader`` loads.
 
-    ``on_success`` records the resulting path. Requires a display + Playwright.
+    ``on_success`` records the result (e.g. a secret in .env). Needs a display +
+    Playwright.
     """
 
     def runner(emit: Callable[[str], None]) -> None:
@@ -189,20 +200,25 @@ def browser_capture_runner(
                 "`pip install playwright` and `playwright install chromium`."
             ) from exc
 
-        if kind == "browser_session":
-            profile_dir = target
-        elif kind == "browser_cookies":
-            profile_dir = target + ".profile"  # keep the .txt path clean
-        else:
+        if kind not in ("browser_session", "browser_cookies", "browser_storage_state"):
             raise RuntimeError(f"unsupported capture kind: {kind!r}")
-        Path(profile_dir).mkdir(parents=True, exist_ok=True)
+        # storageState writes a JSON file (no persistent profile); the others use
+        # a persistent-context directory.
+        persistent = kind != "browser_storage_state"
+        if persistent:
+            profile_dir = target if kind == "browser_session" else target + ".profile"
+            Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
         emit("Opening a browser window on the server host.")
         emit(f"Log in at {login_url or 'the opened page'}, then CLOSE the window to finish.")
-        latest_cookies: list[dict] = []
+        latest = None
         with sync_playwright() as p:
             try:
-                ctx = p.chromium.launch_persistent_context(profile_dir, headless=False)
+                if persistent:
+                    ctx = p.chromium.launch_persistent_context(profile_dir, headless=False)
+                else:
+                    browser = p.chromium.launch(headless=False)
+                    ctx = browser.new_context()
             except Exception as exc:  # no display / browser not installed
                 raise RuntimeError(
                     f"could not launch a browser ({exc}). The host needs a display and "
@@ -216,7 +232,7 @@ def browser_capture_runner(
                 except Exception:  # navigation is best-effort
                     pass
             emit("Waiting for you to finish — log in, then CLOSE the browser window.")
-            latest_cookies = _wait_until_closed(ctx, kind, wait_timeout=wait_timeout)
+            latest = _wait_until_closed(ctx, kind, wait_timeout=wait_timeout)
             emit("Browser closed — saving…")
             try:
                 ctx.close()
@@ -224,12 +240,22 @@ def browser_capture_runner(
                 pass
 
         if kind == "browser_cookies":
-            Path(target).write_text(to_netscape_cookies(latest_cookies), encoding="utf-8")
-            emit(f"Exported {len(latest_cookies)} cookie(s) to {target}")
+            Path(target).write_text(to_netscape_cookies(latest or []), encoding="utf-8")
+            emit(f"Exported {len(latest or [])} cookie(s) to {target}")
+        elif kind == "browser_storage_state":
+            state = latest or {"cookies": [], "origins": []}
+            tgt = Path(target)
+            tgt.parent.mkdir(parents=True, exist_ok=True)
+            tgt.write_text(json.dumps(state), encoding="utf-8")
+            # Also drop a sibling cookies.txt, mirroring skool-downloader's login.
+            (tgt.parent / "cookies.txt").write_text(
+                to_netscape_cookies(state.get("cookies", [])), encoding="utf-8"
+            )
+            emit(f"Saved {len(state.get('cookies', []))} cookie(s) as storageState to {target}")
         else:
             emit(f"Saved session to {target}")
         on_success()
-        emit("Done — the secret has been recorded in .env.")
+        emit("Done.")
 
     return runner
 
