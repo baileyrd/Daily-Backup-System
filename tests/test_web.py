@@ -240,8 +240,10 @@ def test_connectors_report_readiness(client):
     # reddit/youtube declare optional deps + docs links.
     assert conns["reddit"]["pip_requirements"] == ["playwright>=1.40"]
     assert conns["reddit"]["needs_playwright_browser"] is True
-    assert conns["reddit"]["supports_interactive_login"] is True
+    assert conns["reddit"]["auth_capture"]["kind"] == "browser_session"
     assert conns["youtube"]["pip_requirements"] == ["yt-dlp>=2024.1"]
+    assert conns["youtube"]["auth_capture"]["kind"] == "browser_cookies"
+    assert conns["skool"]["auth_capture"] is None
     assert conns["reddit"]["docs_url"]
 
 
@@ -252,7 +254,7 @@ def test_meta_reports_setup_flag(client, setup_client):
 
 def test_install_disabled_returns_403(client):
     assert client.post("/api/connectors/reddit/install").status_code == 403
-    assert client.post("/api/connectors/reddit/login").status_code == 403
+    assert client.post("/api/connectors/reddit/capture").status_code == 403
 
 
 def test_install_unknown_connector_404(setup_client):
@@ -264,8 +266,29 @@ def test_install_when_nothing_to_install_400(setup_client):
     assert setup_client.post("/api/connectors/skool/install").status_code == 400
 
 
-def test_login_only_reddit(setup_client):
-    assert setup_client.post("/api/connectors/youtube/login").status_code == 400
+def test_capture_unsupported_connector_400(setup_client):
+    # skool has no auth_capture spec.
+    assert setup_client.post("/api/connectors/skool/capture").status_code == 400
+
+
+def test_capture_unknown_connector_404(setup_client):
+    assert setup_client.post("/api/connectors/nope/capture").status_code == 404
+
+
+def test_capture_runs_and_reports_missing_playwright(setup_client):
+    # Endpoint -> SetupManager -> browser_capture_runner. Playwright is absent in
+    # the test env, so the job ends in a clear error (no browser is launched).
+    job = setup_client.post("/api/connectors/reddit/capture").json()
+    assert job["status"] == "running" and "id" in job
+    deadline = time.time() + 10
+    snap = job
+    while time.time() < deadline:
+        snap = setup_client.get(f"/api/setup/{job['id']}").json()
+        if snap["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert snap["status"] == "error"
+    assert any("Playwright" in line for line in snap["log"])
 
 
 def test_install_commands_are_server_derived(setup_client):
@@ -318,13 +341,30 @@ def test_setup_manager_marks_failure_on_bad_command():
     assert mgr.get(job.id)["status"] == "error"
 
 
-def test_reddit_login_runner_errors_without_playwright():
+def test_browser_capture_runner_errors_without_playwright():
     # Playwright isn't installed in the test env -> a clear, non-crashing error.
-    from dbs.web.setup import reddit_login_runner
+    from dbs.web.setup import browser_capture_runner
 
-    runner = reddit_login_runner("/tmp/does-not-matter", lambda: None)
+    runner = browser_capture_runner("browser_session", "/tmp/x", "https://e/", lambda: None)
     with pytest.raises(RuntimeError, match="Playwright"):
         runner(lambda line: None)
+
+
+def test_to_netscape_cookies_format():
+    from dbs.web.setup import to_netscape_cookies
+
+    out = to_netscape_cookies([
+        {"name": "SID", "value": "abc", "domain": ".youtube.com", "path": "/",
+         "secure": True, "httpOnly": True, "expires": 1893456000.0},
+        {"name": "sess", "value": "v", "domain": "youtube.com", "path": "/",
+         "secure": False, "httpOnly": False, "expires": -1},  # session cookie
+    ])
+    assert out.startswith("# Netscape HTTP Cookie File")
+    lines = [ln for ln in out.splitlines() if ln and not ln.startswith("#") or ln.startswith("#HttpOnly_")]
+    # httpOnly cookie carries the #HttpOnly_ prefix and subdomain TRUE.
+    assert "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\tabc" in out
+    # session cookie -> expiry 0, host-only FALSE, secure FALSE.
+    assert "youtube.com\tFALSE\t/\tFALSE\t0\tsess\tv" in out
 
 
 # --- JobManager unit: concurrency guard ------------------------------------

@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, ClassVar, Iterator
 from pydantic import BaseModel
 
 from .. import CORE_API_VERSION
-from .capabilities import Capabilities, ItemKind
+from .capabilities import AuthCapture, Capabilities, ItemKind
 
 if TYPE_CHECKING:
     from .models import FetchEvent, RunContext
@@ -102,6 +102,10 @@ class Connector(ABC):
     pip_requirements: ClassVar[tuple[str, ...]] = ()
     runtime_imports: ClassVar[tuple[str, ...]] = ()
     needs_playwright_browser: ClassVar[bool] = False
+
+    # Optional: declares that this connector's auth artifact (a logged-in browser
+    # session dir / a cookies.txt) can be captured interactively by a UI tier.
+    auth_capture: ClassVar["AuthCapture | None"] = None
 
     @classmethod
     def check_ready(cls) -> tuple[bool, str]:

@@ -9,7 +9,7 @@ internal and may change without a version bump.
 from __future__ import annotations
 
 from .. import CORE_API_VERSION
-from .capabilities import Capabilities, ItemKind
+from .capabilities import AuthCapture, Capabilities, ItemKind
 from .connector import Connector
 from .errors import (
     ConnectorAuthError,
@@ -46,6 +46,7 @@ __all__ = [
     "Connector",
     "Capabilities",
     "ItemKind",
+    "AuthCapture",
     # models a connector emits / receives
     "BackupItem",
     "MediaRef",

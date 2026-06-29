@@ -171,12 +171,19 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
         try:
             out = []
             for i in svc.list_connectors():
+                auth_capture = None
                 try:
                     rc = svc.registry.get(i.type)
                     ready, ready_detail = rc.cls.check_ready()
                     pip_requirements = list(rc.cls.pip_requirements)
                     needs_browser = rc.cls.needs_playwright_browser
                     docs_url = rc.cls.docs_url
+                    if rc.cls.auth_capture is not None:
+                        ac = rc.cls.auth_capture
+                        auth_capture = {
+                            "kind": ac.kind, "secret_key": ac.secret_key,
+                            "label": ac.label or "Capture login",
+                        }
                 except Exception:
                     ready, ready_detail, pip_requirements, needs_browser, docs_url = (
                         True, "", [], False, "",
@@ -201,7 +208,7 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
                         "ready_detail": ready_detail,
                         "pip_requirements": pip_requirements,
                         "needs_playwright_browser": needs_browser,
-                        "supports_interactive_login": i.type == "reddit",
+                        "auth_capture": auth_capture,
                     }
                 )
             return out
@@ -343,30 +350,39 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
             raise HTTPException(status_code=409, detail=str(exc))
         return job.snapshot()
 
-    @app.post("/api/connectors/{ctype}/login")
-    def login_connector(ctype: str) -> dict[str, Any]:
-        """Open a one-time interactive browser login (reddit) on the host."""
+    @app.post("/api/connectors/{ctype}/capture")
+    def capture_connector(ctype: str) -> dict[str, Any]:
+        """Open a one-time interactive browser login/cookie capture on the host."""
         _require_setup()
-        if ctype != "reddit":
-            raise HTTPException(status_code=400, detail="interactive login is only supported for reddit")
         svc = open_service()
         try:
+            try:
+                rc = svc.registry.get(ctype)
+            except ConnectorLoadError as exc:
+                raise HTTPException(status_code=404, detail=str(exc))
+            spec = rc.cls.auth_capture
             base = svc.config.base_dir
         finally:
             svc.close()
-        session_dir = str((base / ".reddit-session").resolve())
+        if spec is None:
+            raise HTTPException(status_code=400, detail=f"{ctype!r} has no interactive auth capture")
+        if spec.kind == "browser_session":
+            target = str((base / f".{ctype}-session").resolve())
+        elif spec.kind == "browser_cookies":
+            target = str((base / f".{ctype}-cookies.txt").resolve())
+        else:
+            raise HTTPException(status_code=400, detail=f"unsupported capture kind {spec.kind!r}")
         env_path = base / ".env"
 
         def on_success() -> None:
-            envfile.set_var(env_path, "REDDIT_SESSION_DIR", session_dir)
+            envfile.set_var(env_path, spec.secret_key, target)
 
+        runner = setupmod.browser_capture_runner(spec.kind, target, spec.login_url, on_success)
         try:
-            job = setup_mgr.start(
-                "login", ctype, setupmod.reddit_login_runner(session_dir, on_success)
-            )
+            job = setup_mgr.start("capture", ctype, runner)
         except JobAlreadyRunning as exc:
             raise HTTPException(status_code=409, detail=str(exc))
-        return {**job.snapshot(), "session_dir": session_dir}
+        return {**job.snapshot(), "target": target, "secret_key": spec.secret_key}
 
     @app.get("/api/setup/current")
     def setup_current() -> dict[str, Any]:
