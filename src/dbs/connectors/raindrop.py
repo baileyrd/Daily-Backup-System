@@ -26,7 +26,6 @@ The cursor is opaque to the engine:
 
 from __future__ import annotations
 
-import mimetypes
 from datetime import timedelta
 from typing import Any, Iterator
 
@@ -46,23 +45,11 @@ from ..core import (
     iso_z,
     parse_iso,
 )
+from ._util import ext_for_mime
 
 _BASE_URL = "https://api.raindrop.io"
 _TRASH_COLLECTION = -99
 _TYPES = ("link", "article", "image", "video", "document", "audio")
-
-
-def _ext_for_mime(mime: str | None) -> str:
-    """A best-effort file extension for a permanent-copy blob's filename.
-
-    Falls back to a bare content-type-derived guess, then "" (no extension)
-    when the mime type is missing or unrecognized -- never raises.
-    """
-    if not mime:
-        return ""
-    # Strip parameters (e.g. "text/html; charset=utf-8").
-    base = mime.split(";", 1)[0].strip()
-    return mimetypes.guess_extension(base) or ""
 
 
 class RaindropConfig(BaseModel):
@@ -364,7 +351,7 @@ class RaindropConnector(Connector):
             url=location,
             kind="archive",
             mime=mime,
-            filename=f"{ext_id}{_ext_for_mime(mime)}",
+            filename=f"{ext_id}{ext_for_mime(mime)}",
             data=blob_resp.content,
         )
 
