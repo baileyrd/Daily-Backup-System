@@ -327,7 +327,7 @@ def history(
 @app.command()
 def export(
     out: Path = typer.Option(..., "--out", "-o", help="Output file (or .zip for archive)."),
-    fmt: str = typer.Option("ndjson", "--format", "-f", help="json|ndjson|csv|markdown|archive."),
+    fmt: str = typer.Option("ndjson", "--format", "-f", help="json|ndjson|csv|markdown|archive|obsidian."),
     source: Optional[list[str]] = typer.Option(None, "--source", help="Filter by source name (repeatable)."),
     item_type: Optional[list[str]] = typer.Option(None, "--type", help="Filter by item kind (repeatable)."),
     since: Optional[str] = typer.Option(None, "--since", help="Only items created on/after (YYYY-MM-DD)."),

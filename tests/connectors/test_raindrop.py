@@ -134,3 +134,96 @@ def test_rate_limit_retry_then_success():
 def test_config_validation_rejects_oversized_page():
     with pytest.raises(Exception):
         RaindropConfig(page_size=51)
+
+
+# -- permanent-copy archiving (archive_permanent_copy) ----------------------
+
+
+def make_cache_handler(dataset=DATASET, cache_ok_ids=(3,), s3_body=b"ARCHIVED-HTML"):
+    """Extends make_handler with /raindrop/{id}/cache -> 307 -> a fake S3 body."""
+    base_handler = make_handler(dataset=dataset, trash=[])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/s3/archived-copy":
+            # Second hop: must NOT receive the Raindrop Authorization header.
+            assert "authorization" not in {k.lower() for k in request.headers.keys()}
+            return httpx.Response(200, content=s3_body, headers={"content-type": "text/html"})
+        if "/raindrop/" in path and path.endswith("/cache"):
+            ext_id = int(path.rsplit("/", 2)[-2])
+            if ext_id in cache_ok_ids:
+                return httpx.Response(
+                    307, headers={"Location": "https://s3.example/s3/archived-copy"}
+                )
+            return httpx.Response(401, json={"result": False, "error": "not pro"})
+        return base_handler(request)
+
+    return handler
+
+
+def test_archive_permanent_copy_fetches_via_redirect():
+    conn = RaindropConnector()
+    cfg = RaindropConfig(poll_trash=False, archive_permanent_copy=True)
+    ctx = _ctx(cfg, make_cache_handler(cache_ok_ids=(3,)), mode="full")
+    ctx.store_media = True
+    events = list(conn.fetch(ctx))
+    items = {e.external_id: e for e in events if isinstance(e, BackupItem)}
+    archived = [m for m in items["3"].media if m.kind == "archive"]
+    assert len(archived) == 1
+    assert archived[0].data == b"ARCHIVED-HTML"
+    assert archived[0].mime == "text/html"
+    # Item "1"/"2" (not in cache_ok_ids) get no archive media, no crash.
+    assert not [m for m in items["1"].media if m.kind == "archive"]
+    assert not [m for m in items["2"].media if m.kind == "archive"]
+
+
+def test_archive_permanent_copy_best_effort_on_non_pro():
+    conn = RaindropConnector()
+    cfg = RaindropConfig(poll_trash=False, archive_permanent_copy=True)
+    ctx = _ctx(cfg, make_cache_handler(cache_ok_ids=()), mode="full")  # all 401
+    ctx.store_media = True
+    events = list(conn.fetch(ctx))  # must not raise
+    items = [e for e in events if isinstance(e, BackupItem)]
+    assert len(items) == 3
+    assert all(not [m for m in it.media if m.kind == "archive"] for it in items)
+
+
+def test_archive_permanent_copy_skipped_on_reconcile():
+    conn = RaindropConnector()
+    cfg = RaindropConfig(poll_trash=False, archive_permanent_copy=True)
+    calls = {"cache_hits": 0}
+
+    def counting_handler(request):
+        if request.url.path.endswith("/cache"):
+            calls["cache_hits"] += 1
+        return make_cache_handler(cache_ok_ids=(1, 2, 3))(request)
+
+    ctx = _ctx(cfg, counting_handler, mode="reconcile")
+    ctx.store_media = True
+    list(conn.fetch(ctx))
+    assert calls["cache_hits"] == 0  # reconcile never attempts the archive fetch
+
+
+def test_archive_permanent_copy_off_by_default():
+    conn = RaindropConnector()
+    cfg = RaindropConfig(poll_trash=False)  # archive_permanent_copy=False (default)
+    ctx = _ctx(cfg, make_cache_handler(cache_ok_ids=(1, 2, 3)), mode="full")
+    ctx.store_media = True
+    events = list(conn.fetch(ctx))
+    items = [e for e in events if isinstance(e, BackupItem)]
+    assert all(not [m for m in it.media if m.kind == "archive"] for it in items)
+
+
+def test_archive_permanent_copy_skipped_when_store_media_off():
+    conn = RaindropConnector()
+    cfg = RaindropConfig(poll_trash=False, archive_permanent_copy=True)
+    calls = {"cache_hits": 0}
+
+    def counting_handler(request):
+        if request.url.path.endswith("/cache"):
+            calls["cache_hits"] += 1
+        return make_cache_handler(cache_ok_ids=(1, 2, 3))(request)
+
+    ctx = _ctx(cfg, counting_handler, mode="full")  # ctx.store_media stays False
+    list(conn.fetch(ctx))
+    assert calls["cache_hits"] == 0  # no wasted round trips when bytes can't be persisted

@@ -51,9 +51,14 @@ class MediaRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     url: str
-    kind: str = "image"  # 'image' | 'video' | 'file'
+    kind: str = "image"  # 'image' | 'video' | 'file' | 'archive' (informal; not enforced)
     filename: str | None = None
     mime: str | None = None
+    # Optional connector-prefetched bytes (e.g. a permanent-copy fetch the
+    # connector already performed over HTTP). When set, the storage layer
+    # persists these bytes directly instead of trying to resolve `url` from
+    # local disk. `url` remains the reference of record either way.
+    data: bytes | None = None
 
 
 class BackupItem(BaseModel):
