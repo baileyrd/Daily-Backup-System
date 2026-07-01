@@ -2,17 +2,23 @@
 
 The browser-touching ``_acquire`` is overridden to inject fabricated raw records,
 so these exercise the real mapping, checkpoint, reconcile, and (through the
-engine) dedup/deletion/change-detection code paths offline.
+engine) dedup/deletion/change-detection code paths offline. The authenticated
+JSON-feed pieces (``_verify_login``, ``_walk_saved_json``, ``_record_from_child``)
+are exercised through a fake requester exposing the same surface as Playwright's
+``APIRequestContext``/``APIResponse`` (``.get(url)`` → ``.status``/``.json()``).
 """
 
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from dbs.core.engine import Engine
+from dbs.core.errors import ConnectorAuthError, RateLimitedError, TransientFetchError
 from dbs.core.http import ManagedHTTPClient
 from dbs.core.models import BackupItem, Checkpoint, ReconcileMarker
 from dbs.core.secrets import Secrets
+from dbs.core.timeutil import parse_iso
 from dbs.connectors.reddit import RedditConfig, RedditConnector
 from conftest import make_ctx, registered
 
@@ -278,3 +284,238 @@ def test_archive_outbound_link_never_attempted_for_comments():
     comment = next(i for i in items if i.external_id == "t1_1")
     assert not [m for m in comment.media if m.kind == "archive"]
     assert calls["n"] == 0
+
+
+# -- authenticated JSON feed (_verify_login / _walk_saved_json / mapping) -----
+
+
+class _FakeResponse:
+    def __init__(self, status=200, body=None):
+        self.status = status
+        self._body = body if body is not None else {}
+
+    def json(self):
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+
+class _FakeRequester:
+    """Same surface the connector uses from Playwright's APIRequestContext."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)  # consumed in order
+        self.urls: list[str] = []
+
+    def get(self, url):
+        self.urls.append(url)
+        return self.responses.pop(0)
+
+
+def _me(name="alice"):
+    return _FakeResponse(200, {"kind": "t2", "data": {"name": name}})
+
+
+def _listing(children, after=None):
+    return _FakeResponse(200, {"data": {"children": children, "after": after}})
+
+
+def _t3(i, **data):
+    d = {
+        "name": f"t3_{i}",
+        "title": f"Post {i}",
+        "subreddit_name_prefixed": "r/test",
+        "author": "alice",
+        "permalink": f"/r/test/comments/{i}/",
+        "url": "https://example.com/article",
+        "score": 10,
+        "num_comments": 2,
+        "link_flair_text": "Discussion",
+        "created_utc": 1704067200.0,  # 2024-01-01T00:00:00Z
+        "selftext": "",
+        "thumbnail": "self",
+    }
+    d.update(data)
+    return {"kind": "t3", "data": d}
+
+
+def _t1(i, **data):
+    d = {
+        "name": f"t1_{i}",
+        "subreddit_name_prefixed": "r/test",
+        "author": "alice",
+        "permalink": f"/r/test/comments/{i}/c/",
+        "score": 3,
+        "created_utc": 1704067200.0,
+        "body": "a reply",
+    }
+    d.update(data)
+    return {"kind": "t1", "data": d}
+
+
+# -- _record_from_child (pure mapping) ---------------------------------------
+
+
+def test_record_from_child_maps_post():
+    rec = RedditConnector._record_from_child(_t3(1), "2024-05-01T00:00:00Z")
+    assert rec["id"] == "t3_1"
+    assert rec["item_type"] == "post"
+    assert rec["title"] == "Post 1"
+    assert rec["subreddit"] == "r/test"
+    assert rec["permalink"] == "https://www.reddit.com/r/test/comments/1/"
+    assert rec["url"] == "https://example.com/article"
+    assert rec["score"] == 10 and rec["num_comments"] == 2
+    assert rec["flair"] == "Discussion"
+    assert rec["extracted_at"] == "2024-05-01T00:00:00Z"
+    # Epoch seconds must land as an ISO string parse_iso can round-trip
+    # (_to_item would raise on a raw epoch string).
+    assert rec["created_utc"] == "2024-01-01T00:00:00Z"
+    assert parse_iso(rec["created_utc"]) is not None
+
+
+def test_record_from_child_blanks_self_post_url():
+    child = _t3(1, url="https://www.reddit.com/r/test/comments/1/")
+    rec = RedditConnector._record_from_child(child, "x")
+    assert rec["url"] == ""
+
+
+def test_record_from_child_filters_placeholder_thumbnails():
+    for token in ("self", "default", "nsfw", "spoiler", ""):
+        rec = RedditConnector._record_from_child(_t3(1, thumbnail=token), "x")
+        assert rec["thumbnail"] == ""
+    rec = RedditConnector._record_from_child(
+        _t3(1, thumbnail="https://b.thumbs.redditmedia.com/x.jpg"), "x"
+    )
+    assert rec["thumbnail"] == "https://b.thumbs.redditmedia.com/x.jpg"
+
+
+def test_record_from_child_maps_comment():
+    rec = RedditConnector._record_from_child(_t1(9), "x")
+    assert rec["id"] == "t1_9"
+    assert rec["item_type"] == "comment"
+    assert rec["comment_body"] == "a reply"
+    assert rec["title"] == "" and rec["flair"] == ""
+    assert rec["num_comments"] == 0
+    assert rec["subreddit"] == "r/test"  # JSON enrichment (DOM path had "")
+
+
+def test_record_from_child_unknown_kind_and_missing_fields():
+    assert RedditConnector._record_from_child({"kind": "t5", "data": {}}, "x") is None
+    assert RedditConnector._record_from_child({"kind": "t3", "data": {}}, "x") is None  # no name
+    rec = RedditConnector._record_from_child(_t3(1, created_utc=None), "x")
+    assert rec["created_utc"] == ""  # missing timestamp -> "", not a crash
+
+
+# -- _verify_login ------------------------------------------------------------
+
+
+def test_verify_login_returns_authenticated_name():
+    conn = RedditConnector()
+    name = conn._verify_login(_FakeRequester([_me("Alice")]), RedditConfig(), _ctx())
+    assert name == "Alice"
+
+
+def test_verify_login_logged_out_raises_auth_error():
+    conn = RedditConnector()
+    with pytest.raises(ConnectorAuthError, match="not logged in"):
+        conn._verify_login(_FakeRequester([_FakeResponse(200, {})]), RedditConfig(), _ctx())
+
+
+def test_verify_login_status_matrix():
+    conn = RedditConnector()
+    for status, exc in ((401, ConnectorAuthError), (403, ConnectorAuthError),
+                        (429, RateLimitedError), (500, TransientFetchError)):
+        with pytest.raises(exc):
+            conn._verify_login(_FakeRequester([_FakeResponse(status)]), RedditConfig(), _ctx())
+
+
+def test_verify_login_non_json_body_is_transient():
+    conn = RedditConnector()
+    resp = _FakeResponse(200, ValueError("not json"))
+    with pytest.raises(TransientFetchError):
+        conn._verify_login(_FakeRequester([resp]), RedditConfig(), _ctx())
+
+
+def test_verify_login_username_mismatch_warns_but_uses_real_account(caplog):
+    conn = RedditConnector()
+    cfg = RedditConfig(username="someone-else")
+    with caplog.at_level("WARNING", logger="test"):
+        name = conn._verify_login(_FakeRequester([_me("alice")]), cfg, _ctx(cfg))
+    assert name == "alice"
+    assert any("does not match" in r.message for r in caplog.records)
+
+
+def test_verify_login_username_match_is_case_insensitive(caplog):
+    conn = RedditConnector()
+    cfg = RedditConfig(username="ALICE")
+    with caplog.at_level("WARNING", logger="test"):
+        conn._verify_login(_FakeRequester([_me("alice")]), cfg, _ctx(cfg))
+    assert not any("does not match" in r.message for r in caplog.records)
+
+
+# -- _walk_saved_json ----------------------------------------------------------
+
+
+def _walk(requester, cfg=None):
+    conn = RedditConnector()
+    return list(conn._walk_saved_json(requester, "alice", cfg or RedditConfig(delay=0), _ctx()))
+
+
+def test_walk_saved_json_paginates_until_after_is_none():
+    req = _FakeRequester([
+        _listing([_t3(1), _t1(2)], after="cur1"),
+        _listing([_t3(3)], after=None),
+    ])
+    recs = _walk(req)
+    assert [r["id"] for r in recs] == ["t3_1", "t1_2", "t3_3"]
+    assert "after=cur1" in req.urls[1]
+    assert "raw_json=1" in req.urls[0]
+
+
+def test_walk_saved_json_dedupes_repeated_fullnames():
+    req = _FakeRequester([
+        _listing([_t3(1)], after="cur1"),
+        _listing([_t3(1), _t3(2)], after=None),  # t3_1 repeats across pages
+    ])
+    recs = _walk(req)
+    assert [r["id"] for r in recs] == ["t3_1", "t3_2"]
+
+
+def test_walk_saved_json_respects_max_pages():
+    pages = [_listing([_t3(i)], after=f"cur{i}") for i in range(10)]
+    req = _FakeRequester(pages)
+    recs = _walk(req, RedditConfig(delay=0, max_pages=3))
+    assert len(recs) == 3
+    assert len(req.urls) == 3
+
+
+def test_walk_saved_json_zero_items_warns_but_yields_nothing(caplog):
+    req = _FakeRequester([_listing([], after=None)])
+    with caplog.at_level("WARNING", logger="test"):
+        recs = _walk(req)
+    assert recs == []
+    assert any("returned 0 items" in r.message for r in caplog.records)
+
+
+def test_walk_saved_json_auth_failure_mid_walk_raises():
+    req = _FakeRequester([
+        _listing([_t3(1)], after="cur1"),
+        _FakeResponse(403),
+    ])
+    with pytest.raises(ConnectorAuthError):
+        _walk(req)
+
+
+# -- config / engine visibility ------------------------------------------------
+
+
+def test_config_username_now_optional():
+    cfg = RedditConfig()
+    assert cfg.username is None
+
+
+def test_engine_warns_on_zero_item_run(storage, caplog):
+    with caplog.at_level("WARNING", logger="test"):
+        _src, result = _run(storage, _connector([]))
+    assert result.fetched == 0
+    assert any("enumerated 0 items" in r.message for r in caplog.records)
