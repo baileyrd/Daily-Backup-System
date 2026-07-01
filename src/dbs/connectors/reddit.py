@@ -54,6 +54,7 @@ from ..core import (
     RunContext,
     parse_iso,
 )
+from ._util import ext_for_mime
 
 _TYPES = ("post", "comment")
 
@@ -70,6 +71,14 @@ class RedditConfig(BaseModel):
     # Name of the env var holding the path to the Playwright persistent-context
     # directory (your logged-in session). Mirrors raindrop's ``token_env``.
     session_dir_env: str = "REDDIT_SESSION_DIR"
+    # Opt-in: best-effort fetch of the outbound link a saved *post* points to
+    # (never attempted for comments, which have no separate outbound URL in
+    # this scraper). Every backup run re-attempts this for every post that
+    # has a link -- Reddit has no incremental/reconcile split (every run is
+    # full), so there's no cheaper mode to defer to. Acceptable because
+    # "saved" lists are typically small and human-curated, unlike Raindrop
+    # collections. See _maybe_fetch_outbound_link.
+    archive_outbound_link: bool = False
 
 
 class RedditConnector(Connector):
@@ -83,7 +92,12 @@ class RedditConnector(Connector):
     )
     config_model = RedditConfig
     secret_keys = ("REDDIT_SESSION_DIR",)
-    wants_managed_http = False
+    # The primary acquisition step is Playwright-driven (see _acquire below)
+    # and never touches ctx.http. This is only for the opt-in
+    # archive_outbound_link feature, which fetches an arbitrary external URL
+    # that needs no session cookies -- the browser session and ctx.http are
+    # independent and coexist fine.
+    wants_managed_http = True
     schema_version = 1
     # Optional runtime deps (the `[reddit]` extra) — declared so the UI/CLI can
     # report readiness and offer a one-click install.
@@ -126,13 +140,19 @@ class RedditConnector(Connector):
                 f"secret_keys {self.secret_keys}; set REDDIT_SESSION_DIR in your .env "
                 f"to the path of your logged-in Playwright session directory."
             )
+        if cfg.archive_outbound_link and not ctx.store_media:
+            ctx.logger.warning(
+                "archive_outbound_link is set but store_media is off for this "
+                "source; no outbound links will be fetched (set store_media = "
+                "true in dbs.toml to actually persist them)."
+            )
 
         live_ids: set[str] = set()
         cursor: dict[str, Any] = {}
         seen = 0
 
         for raw in self._acquire(ctx):
-            item = self._to_item(raw)
+            item = self._to_item(ctx, raw)
             if item is None:
                 continue
             if cfg.include_types and item.item_kind not in cfg.include_types:
@@ -318,7 +338,7 @@ class RedditConnector(Connector):
 
     # -- mapping (pure; the part tests assert on) ---------------------------
 
-    def _to_item(self, raw: dict[str, Any]) -> BackupItem | None:
+    def _to_item(self, ctx: RunContext, raw: dict[str, Any]) -> BackupItem | None:
         ext_id = str(raw.get("id") or "").strip()
         if not ext_id:
             return None
@@ -326,6 +346,21 @@ class RedditConnector(Connector):
         tags = [t for t in (raw.get("subreddit"), raw.get("flair")) if t]
         thumb = raw.get("thumbnail")
         media = [MediaRef(url=thumb, kind="image")] if thumb else []
+
+        cfg: RedditConfig = ctx.config  # type: ignore[assignment]
+        outbound_url = raw.get("url") or ""
+        permalink = raw.get("permalink") or ""
+        if (
+            cfg.archive_outbound_link
+            and ctx.store_media
+            and kind == "post"
+            and outbound_url
+            and outbound_url != permalink
+        ):
+            link_media = self._maybe_fetch_outbound_link(ctx, ext_id, outbound_url)
+            if link_media is not None:
+                media.append(link_media)
+
         return BackupItem(
             external_id=ext_id,
             item_kind=kind,
@@ -336,6 +371,38 @@ class RedditConnector(Connector):
             tags=tags,
             created_at=parse_iso(raw.get("created_utc") or None),
             media=media,
+        )
+
+    def _maybe_fetch_outbound_link(
+        self, ctx: RunContext, ext_id: str, url: str
+    ) -> MediaRef | None:
+        """Best-effort: fetch the outbound link a saved post points to.
+        Returns a MediaRef with prefetched bytes, or None on any failure --
+        this must never raise, since it's opportunistic enrichment and a dead
+        link / timeout / non-2xx must never fail the run.
+
+        Unlike Raindrop's permanent-copy fetch (a deliberate two-hop dance
+        that drops the redirect's Authorization header before following it to
+        S3), this is a single hop with no header to protect -- ctx.http.get()
+        is called with no ``headers=`` at all (an arbitrary external site,
+        not Reddit's own API), so it's safe -- and often necessary, given
+        shorteners and http->https upgrades -- to pass follow_redirects=True.
+        """
+        assert ctx.http is not None
+        try:
+            resp = ctx.http.get(url, follow_redirects=True)
+        except Exception as exc:  # noqa: BLE001 - best-effort, never raise
+            ctx.logger.debug("outbound-link fetch failed for %s: %s", url, exc)
+            return None
+        if resp.is_error or not resp.content:
+            return None
+        mime = resp.headers.get("content-type")
+        return MediaRef(
+            url=url,
+            kind="archive",
+            mime=mime,
+            filename=f"{ext_id}{ext_for_mime(mime)}",
+            data=resp.content,
         )
 
 

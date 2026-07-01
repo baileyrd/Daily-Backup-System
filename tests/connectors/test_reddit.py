@@ -7,7 +7,10 @@ engine) dedup/deletion/change-detection code paths offline.
 
 from __future__ import annotations
 
+import httpx
+
 from dbs.core.engine import Engine
+from dbs.core.http import ManagedHTTPClient
 from dbs.core.models import BackupItem, Checkpoint, ReconcileMarker
 from dbs.core.secrets import Secrets
 from dbs.connectors.reddit import RedditConfig, RedditConnector
@@ -57,11 +60,20 @@ def _connector(records):
     return FakeReddit()
 
 
-def _ctx(cfg=None, mode="full"):
+def _ctx(cfg=None, mode="full", http=None):
     return make_ctx(
         source_id=1, run_id=1, mode=mode,
-        config=cfg or RedditConfig(username="alice"), secrets=SECRETS,
+        config=cfg or RedditConfig(username="alice"), secrets=SECRETS, http=http,
     )
+
+
+def _http_ctx(handler, cfg=None, mode="full"):
+    http = ManagedHTTPClient(
+        httpx.Client(transport=httpx.MockTransport(handler)), sleep=lambda *_: None
+    )
+    ctx = _ctx(cfg, mode=mode, http=http)
+    ctx.store_media = True
+    return ctx
 
 
 def test_maps_posts_comments_and_one_reconcile_marker():
@@ -152,3 +164,117 @@ def test_volatile_extracted_at_does_not_spawn_revisions(storage):
     assert r2.updated == 0
     revs = storage.conn.execute("SELECT COUNT(*) FROM item_revisions").fetchone()[0]
     assert revs == 1
+
+
+# -- outbound-link archiving (archive_outbound_link) -------------------------
+
+
+def test_archive_outbound_link_fetches_bytes():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://example.com/article"
+        return httpx.Response(200, content=b"<html>hi</html>", headers={"content-type": "text/html"})
+
+    cfg = RedditConfig(username="alice", archive_outbound_link=True)
+    conn = _connector([_post(1, url="https://example.com/article")])
+    events = list(conn.fetch(_http_ctx(handler, cfg)))
+    items = [e for e in events if isinstance(e, BackupItem)]
+    post1 = next(i for i in items if i.external_id == "t3_1")
+    archived = [m for m in post1.media if m.kind == "archive"]
+    assert len(archived) == 1
+    assert archived[0].data == b"<html>hi</html>"
+    assert archived[0].mime == "text/html"
+
+
+def test_archive_outbound_link_follows_redirects():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.path == "/short":
+            return httpx.Response(307, headers={"Location": "https://example.com/final"})
+        return httpx.Response(200, content=b"final-body", headers={"content-type": "text/plain"})
+
+    cfg = RedditConfig(username="alice", archive_outbound_link=True)
+    conn = _connector([_post(1, url="https://example.com/short")])
+    events = list(conn.fetch(_http_ctx(handler, cfg)))
+    items = [e for e in events if isinstance(e, BackupItem)]
+    post1 = next(i for i in items if i.external_id == "t3_1")
+    archived = [m for m in post1.media if m.kind == "archive"]
+    assert len(archived) == 1
+    assert archived[0].data == b"final-body"
+    assert len(calls) == 2  # proves the redirect actually got followed
+
+
+def test_archive_outbound_link_best_effort_on_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    cfg = RedditConfig(username="alice", archive_outbound_link=True)
+    conn = _connector([_post(1, url="https://example.com/dead")])
+    events = list(conn.fetch(_http_ctx(handler, cfg)))  # must not raise
+    items = [e for e in events if isinstance(e, BackupItem)]
+    post1 = next(i for i in items if i.external_id == "t3_1")
+    assert not [m for m in post1.media if m.kind == "archive"]
+
+
+def test_archive_outbound_link_best_effort_on_connection_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom")
+
+    cfg = RedditConfig(username="alice", archive_outbound_link=True)
+    conn = _connector([_post(1, url="https://example.com/unreachable")])
+    events = list(conn.fetch(_http_ctx(handler, cfg)))  # must not raise
+    items = [e for e in events if isinstance(e, BackupItem)]
+    post1 = next(i for i in items if i.external_id == "t3_1")
+    assert not [m for m in post1.media if m.kind == "archive"]
+
+
+def test_archive_outbound_link_off_by_default():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("should never be called when the flag is off")
+
+    cfg = RedditConfig(username="alice")  # archive_outbound_link=False (default)
+    conn = _connector([_post(1, url="https://example.com/article")])
+    events = list(conn.fetch(_http_ctx(handler, cfg)))
+    items = [e for e in events if isinstance(e, BackupItem)]
+    post1 = next(i for i in items if i.external_id == "t3_1")
+    assert not [m for m in post1.media if m.kind == "archive"]
+
+
+def test_archive_outbound_link_skipped_when_store_media_off():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, content=b"x")
+
+    cfg = RedditConfig(username="alice", archive_outbound_link=True)
+    conn = _connector([_post(1, url="https://example.com/article")])
+    http = ManagedHTTPClient(
+        httpx.Client(transport=httpx.MockTransport(handler)), sleep=lambda *_: None
+    )
+    ctx = _ctx(cfg, http=http)  # store_media left False (default)
+    events = list(conn.fetch(ctx))
+    items = [e for e in events if isinstance(e, BackupItem)]
+    post1 = next(i for i in items if i.external_id == "t3_1")
+    assert not [m for m in post1.media if m.kind == "archive"]
+    assert calls["n"] == 0  # no wasted round trip
+
+
+def test_archive_outbound_link_never_attempted_for_comments():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, content=b"x")
+
+    cfg = RedditConfig(username="alice", archive_outbound_link=True)
+    # Comments always have url="" per _parse_comment, so this is belt-and-
+    # suspenders: even if a future scraper change populated a comment's url,
+    # _to_item's explicit `kind == "post"` guard must still block the fetch.
+    conn = _connector([_comment(1, url="https://example.com/should-not-fetch")])
+    events = list(conn.fetch(_http_ctx(handler, cfg)))
+    items = [e for e in events if isinstance(e, BackupItem)]
+    comment = next(i for i in items if i.external_id == "t1_1")
+    assert not [m for m in comment.media if m.kind == "archive"]
+    assert calls["n"] == 0

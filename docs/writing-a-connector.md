@@ -138,8 +138,23 @@ browser session (Reddit's saved feed, your YouTube lists, …). The built-in
 `reddit` (Playwright) and `youtube` (yt-dlp) connectors show the pattern; copy it
 when you wrap a browser/SDK source rather than a REST endpoint:
 
-- **Don't use the managed HTTP client.** Set `wants_managed_http = False`
-  (`ctx.http` will be `None`); you drive the SDK yourself.
+- **Don't use the managed HTTP client for the browser-authenticated session
+  itself.** Set `wants_managed_http = False` (`ctx.http` will be `None`) if the
+  connector has no other reason to make plain HTTP calls; you drive the
+  SDK/browser yourself for anything that needs the logged-in session.
+
+  A browser-session connector *can* still set `wants_managed_http = True` if
+  it separately needs a plain HTTP client for something that does **not**
+  require the browser's session cookies — e.g. fetching an external link a
+  saved item points to, which is exactly what the `reddit` connector does for
+  its opt-in outbound-link archiving (see "Archiving extra content per item"
+  below). The browser session and `ctx.http` are independent and coexist fine;
+  just keep them separate:
+
+  - never send authenticated-session traffic through `ctx.http` (it has no
+    access to your browser's cookies and wasn't meant to carry them), and
+  - never route `ctx.http`-fetched bytes through the browser (there's no
+    reason to; you already have the bytes).
 - **Import heavy deps lazily, inside `fetch()`/`open()`** — never at module top
   level. A top-level `import playwright` that fails turns the whole connector
   into a silent *load failure* (it vanishes from the registry, so even
@@ -173,6 +188,90 @@ by `skool-downloader` (no network, no auth — `requires_auth=False`,
 `secret_keys=()`), walks the tree in an overridable `_acquire()`, and emits one
 full-enumeration `ReconcileMarker` so stale catalog entries are swept. Its tests
 exercise both the injected mapping and a real temp-dir tree.
+
+## Archiving extra content per item
+
+Sometimes an item references content worth fetching and storing alongside it —
+Raindrop's Pro "permanent copy" of a bookmarked page, or the article a saved
+Reddit post links to. `MediaRef.data: bytes | None` exists for exactly this: a
+connector that already has the bytes (because it just fetched them over HTTP)
+hands them to the engine directly, bypassing the local-file-only resolution
+that `url` alone would get. No core or storage changes are needed to add this
+to a new connector — the storage layer persists `data` when present, subject to
+the same `store_media` / `max_media_mb` per-source gates as everything else:
+
+```python
+resp = ctx.http.get(some_url)
+media = MediaRef(
+    url=some_url,       # kept as the reference of record either way
+    kind="archive",
+    mime=resp.headers.get("content-type"),
+    data=resp.content,  # engine persists this directly; no local file involved
+)
+```
+
+Two built-in connectors do this, and contrasting them shows the shape of the
+decisions you'll make for your own source:
+
+**Raindrop** (`archive_permanent_copy` config flag) fetches Raindrop's Pro
+"cache" endpoint, which 307-redirects to an S3 URL holding a snapshot of the
+page. It follows that redirect as a **second, manual** request that
+deliberately omits the Raindrop `Authorization` header — the bearer token must
+never reach a third-party host. Whenever a redirect hop might carry a header
+you don't want on the far side, don't use `follow_redirects`; issue the second
+request yourself with a clean header set, exactly like `raindrop.py`'s
+`_maybe_fetch_permanent_copy`.
+
+**Reddit** (`archive_outbound_link` config flag) fetches the external link a
+saved post points to. There's no auth header at risk here — the request
+carries no `headers=` at all, since it's an arbitrary external site — so it
+passes `follow_redirects=True` on a single call. Many outbound links go
+through a redirect (URL shorteners, http→https upgrades), so auto-following is
+both safe and useful in this case. Decide per fetch, not per connector: the
+rule is "does this hop carry something sensitive," not "is this connector like
+Raindrop or like Reddit."
+
+Both follow the same error-handling shape, and yours should too: **always
+best-effort**. Wrap the fetch in `try/except Exception: return None` (or,
+narrower, catch what you expect and let a truly unexpected exception surface
+only if you're confident it should abort the run — the built-ins don't).
+A dead link, a timeout, a non-Pro account, a 404 — none of these should ever
+fail the backup run. This is opportunistic enrichment, not a required field.
+
+**Gate the cost, and pick the gate based on what your connector can afford.**
+Both built-ins require an explicit opt-in config flag (default `False`) plus
+`ctx.store_media` (log a one-time warning and skip the attempt entirely if
+`store_media` is off — there's no point fetching bytes nobody will persist).
+Beyond that, the right gate depends on whether your connector has a *cheaper
+mode* to prefer:
+
+- Raindrop has an incremental/reconcile/full split (see "Modes" above) and
+  skips the permanent-copy fetch during `reconcile`: reconcile re-walks the
+  *entire* collection purely to re-hash items for edit detection, and since
+  media never affects `content_hash`, re-fetching a cache copy there buys
+  nothing but costs two HTTP round-trips per bookmark, every reconcile, on
+  items that (in steady state) already have their permanent copy. Incremental
+  mode's early-stop cursor naturally bounds the fetch to genuinely new items;
+  `full` is a one-time rebuild where paying the cost once is expected.
+- Reddit has no incremental/reconcile split at all — `supports_incremental =
+  False` means every run is `full` (see "Browser-session connectors" above).
+  There is no cheaper mode to defer to, so its gate is *just* the opt-in flag
+  plus `store_media`: enabling it means every run re-fetches the outbound link
+  for every saved post that has one, with no way to skip posts already
+  archived (the connector has no read access to storage — see "The contract").
+  This is an intentional, accepted tradeoff, not a gap to fix: Reddit "saved"
+  lists are typically small and human-curated, so the per-run cost stays
+  bounded in practice. Don't invent a fake incremental mode or a local
+  skip-cache to work around a connector's lack of a cheap path — if your
+  source genuinely has no delta signal, say so plainly in the config field's
+  docstring and let the operator decide whether the per-run cost is worth it.
+
+A small mechanical note: if you need a MIME-to-extension guess for a
+prefetched blob's filename, `dbs.connectors._util.ext_for_mime` (used by both
+Raindrop and Reddit) is a shared stdlib-only helper — it's a private
+implementation detail of the built-in connectors, not part of the `dbs.core`
+contract, so feel free to copy the few lines rather than import it if you're
+shipping a separate connector package.
 
 ## Shipping it
 
