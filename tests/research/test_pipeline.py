@@ -48,7 +48,8 @@ class FakeClient:
         self.added: list[str] = []
         self.asked: list[str] = []
 
-    def client_context(self):
+    def client_context(self, auth_state_path=None):
+        self.auth_state_path = auth_state_path
         return self  # doubles as the async context manager
 
     async def __aenter__(self):
@@ -167,6 +168,21 @@ def test_run_pipeline_for_videos_tracks_per_video_failures():
     )
     assert result.failed_count == 1
     assert len(result.indexed_videos) == 2
+
+
+def test_run_pipeline_for_videos_emits_progress_and_forwards_auth_state():
+    videos = _videos(2)
+    fake = FakeClient()
+    lines: list[str] = []
+    pl.run_pipeline_for_videos(
+        "topic", videos, source_label="backup:x",
+        auth_state_path="/tmp/state.json", on_progress=lines.append,
+        client_module=fake,
+    )
+    assert fake.auth_state_path == "/tmp/state.json"
+    assert any("Indexing" in line for line in lines)
+    assert any("Asking" in line for line in lines)
+    assert "Synthesis complete." in lines
 
 
 def test_run_pipeline_wraps_notebooklm_auth_error(monkeypatch):

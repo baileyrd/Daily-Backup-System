@@ -19,6 +19,7 @@
     <button data-tab="secrets">API keys</button>
     <button data-tab="add">Add source</button>
     <button data-tab="export">Export</button>
+    <button data-tab="research">Research</button>
     <button data-tab="verify">Verify</button>
   </nav>
 
@@ -151,6 +152,68 @@
         <label class="check"><input type="checkbox" id="export-noraw" /> Omit raw payloads</label>
         <button type="submit" class="primary">Download export</button>
       </form>
+    </section>
+
+    <!-- Research (YouTube -> NotebookLM -> markdown report) -->
+    <section id="tab-research" class="tab hidden">
+      <div class="row between">
+        <h2>Research</h2>
+        <button id="refresh-research">Refresh</button>
+      </div>
+      <p class="muted">Feed YouTube videos — from a live search or from your backups — through a
+        NotebookLM notebook and get a markdown research report. Runs take a few minutes.</p>
+
+      <div id="research-setup" class="card hidden"></div>
+
+      <form id="research-form" class="card">
+        <label>Topic <input id="research-topic" required placeholder="claude code skills" /></label>
+        <label>Videos
+          <select id="research-mode">
+            <option value="search">Search YouTube</option>
+            <option value="backup">From my backups</option>
+          </select>
+        </label>
+        <div id="research-search-fields">
+          <label>Search queries (one per line; blank = the topic itself)
+            <textarea id="research-queries" rows="2"></textarea>
+          </label>
+          <label>Results per query <input id="research-per-query" type="number" value="10" min="1" max="50" /></label>
+          <label>Recency (months, 0 = no filter) <input id="research-months" type="number" value="6" min="0" /></label>
+        </div>
+        <div id="research-backup-fields" class="hidden">
+          <label>Source
+            <select id="research-source"><option value="">(all youtube sources)</option></select>
+          </label>
+          <label>Lists (comma separated, e.g. watch-later, liked — blank = all)
+            <input id="research-lists" placeholder="watch-later, liked" />
+          </label>
+        </div>
+        <label>Video count <input id="research-count" type="number" value="10" min="1" max="50" /></label>
+        <details>
+          <summary>Analysis questions (blank = the default 5-question set)</summary>
+          <textarea id="research-questions" rows="6" placeholder="one question per line"></textarea>
+        </details>
+        <label class="check"><input type="checkbox" id="research-infographic" /> Also generate an infographic (saved on the server host)</label>
+        <label>Notebook name (optional) <input id="research-notebook" placeholder="Research: &lt;topic&gt;" /></label>
+        <button type="submit" class="primary" id="research-run">Run research</button>
+        <span id="research-auth-note" class="tag"></span>
+      </form>
+
+      <section id="research-progress" class="card hidden">
+        <div class="row between">
+          <strong id="research-progress-title">Research</strong>
+          <button id="research-log-hide" class="small">Hide</button>
+        </div>
+        <pre id="research-log" class="log"></pre>
+      </section>
+
+      <section id="research-result" class="card hidden">
+        <div class="row between">
+          <strong>Report</strong>
+          <a id="research-download" class="small" href="#" download>Download .md</a>
+        </div>
+        <pre id="research-report" class="log" style="max-height:32rem;"></pre>
+      </section>
     </section>
 
     <!-- Verify -->

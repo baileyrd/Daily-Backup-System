@@ -268,13 +268,16 @@ def browser_capture_runner(
 @dataclass
 class SetupJob:
     id: int
-    kind: str           # "install" | "login"
-    connector: str
+    kind: str           # "install" | "capture" | "research"
+    connector: str      # connector type, or a free-form label (e.g. research topic)
     status: str = "running"  # running | done | error
     error: str | None = None
     started_at: str = field(default_factory=_now_iso)
     finished_at: str | None = None
     log: list[str] = field(default_factory=list)
+    # Whatever the runner returned (None for install/capture; the research
+    # runner returns its rendered report payload).
+    result: Any = None
     _queues: list[Queue] = field(default_factory=list, repr=False)
 
     def snapshot(self) -> dict[str, Any]:
@@ -282,7 +285,7 @@ class SetupJob:
             "id": self.id, "kind": self.kind, "connector": self.connector,
             "status": self.status, "error": self.error,
             "started_at": self.started_at, "finished_at": self.finished_at,
-            "log": list(self.log),
+            "log": list(self.log), "result": self.result,
         }
 
 
@@ -314,7 +317,7 @@ class SetupManager:
 
     def _run(self, job: SetupJob, runner: Callable[[Callable[[str], None]], None]) -> None:
         try:
-            runner(lambda line: self._emit(job, line))
+            job.result = runner(lambda line: self._emit(job, line))
             job.status = "done"
         except Exception as exc:  # never crash the server
             job.status = "error"

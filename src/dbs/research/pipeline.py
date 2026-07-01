@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from . import notebooklm_client
 from .models import (
@@ -64,10 +64,17 @@ def run_pipeline(
     infographic: bool = False,
     infographic_orientation: str = "landscape",
     infographic_path: str | None = None,
+    auth_state_path: str | None = None,
+    on_progress: Callable[[str], None] | None = None,
     client_module: Any = notebooklm_client,
 ) -> ResearchResult:
     """Search YouTube for ``queries``, feed the best ``count`` videos into a
     fresh NotebookLM notebook, ask the analysis questions, return the result.
+
+    ``auth_state_path`` points at a Playwright storageState JSON (e.g. one the
+    DBS web UI captured); ``None`` uses ``notebooklm login``'s default file.
+    ``on_progress`` receives human-readable status lines — the run takes
+    minutes, so both the CLI (stderr) and the web UI (SSE) surface them.
 
     ``client_module`` defaults to the real :mod:`dbs.research.notebooklm_client`
     and is overridable in tests with a fake exposing the same
@@ -75,12 +82,15 @@ def run_pipeline(
     ``generate_infographic`` surface, so the real ``asyncio.run()`` bridge and
     per-video failure handling below run against zero real network/auth.
     """
+    emit = on_progress or (lambda _line: None)
+    emit(f"Searching YouTube: {', '.join(queries)} ({per_query_count} per query)…")
     deduped, raw_count = search_videos_with_stats(queries, per_query_count, months)
     if not deduped:
         raise ResearchPipelineError(
             f"no YouTube videos found for {queries!r} (after the recency "
             "filter); try a different query or a larger --months window."
         )
+    emit(f"Found {raw_count} result(s), {len(deduped)} after dedup/recency filter.")
     videos = rank_and_truncate(deduped, count)
 
     result = _synthesize(
@@ -91,6 +101,8 @@ def run_pipeline(
         infographic=infographic,
         infographic_orientation=infographic_orientation,
         infographic_path=infographic_path,
+        auth_state_path=auth_state_path,
+        on_progress=emit,
         client_module=client_module,
     )
     result.queries = list(queries)
@@ -109,6 +121,8 @@ def run_pipeline_for_videos(
     infographic: bool = False,
     infographic_orientation: str = "landscape",
     infographic_path: str | None = None,
+    auth_state_path: str | None = None,
+    on_progress: Callable[[str], None] | None = None,
     client_module: Any = notebooklm_client,
 ) -> ResearchResult:
     """Feed an already-chosen video set (e.g. pulled from the backup DB by
@@ -127,6 +141,8 @@ def run_pipeline_for_videos(
         infographic=infographic,
         infographic_orientation=infographic_orientation,
         infographic_path=infographic_path,
+        auth_state_path=auth_state_path,
+        on_progress=on_progress or (lambda _line: None),
         client_module=client_module,
     )
     result.queries = [source_label]
@@ -144,6 +160,8 @@ def _synthesize(
     infographic: bool,
     infographic_orientation: str,
     infographic_path: str | None,
+    auth_state_path: str | None,
+    on_progress: Callable[[str], None],
     client_module: Any,
 ) -> ResearchResult:
     """The shared NotebookLM half: run ``_run_async`` under ``asyncio.run``,
@@ -161,6 +179,8 @@ def _synthesize(
                 infographic=infographic,
                 infographic_orientation=infographic_orientation,
                 infographic_path=infographic_path,
+                auth_state_path=auth_state_path,
+                on_progress=on_progress,
                 client_module=client_module,
             )
         )
@@ -181,17 +201,22 @@ async def _run_async(
     infographic: bool,
     infographic_orientation: str,
     infographic_path: str | None,
+    auth_state_path: str | None,
+    on_progress: Callable[[str], None],
     client_module: Any,
 ) -> ResearchResult:
-    async with client_module.client_context() as client:
+    async with client_module.client_context(auth_state_path) as client:
+        on_progress(f"Creating notebook {notebook_name!r}…")
         notebook = await client_module.create_notebook(client, notebook_name)
 
         outcomes: list[IndexOutcome] = []
-        for v in videos:
+        for i, v in enumerate(videos, 1):
+            on_progress(f"[{i}/{len(videos)}] Indexing: {v.title}")
             try:
                 await client_module.add_source(client, notebook.id, v.url)
                 outcomes.append(IndexOutcome(video=v, indexed=True))
             except SourceIndexError as exc:
+                on_progress(f"[{i}/{len(videos)}] Failed to index ({exc}); continuing.")
                 outcomes.append(IndexOutcome(video=v, indexed=False, error=str(exc)))
 
         if not any(o.indexed for o in outcomes):
@@ -200,23 +225,28 @@ async def _run_async(
                 "aborting before asking analysis questions against no real sources."
             )
 
+        total_q = len(questions) + 1
+        on_progress(f"[1/{total_q}] Asking synthesis question…")
         answers = [
             AnalysisAnswer(
                 question=SYNTHESIS_QUESTION,
                 answer=await client_module.ask(client, notebook.id, SYNTHESIS_QUESTION),
             )
         ]
-        for q in questions:
+        for i, q in enumerate(questions, 2):
+            on_progress(f"[{i}/{total_q}] Asking: {q[:70]}…")
             answers.append(
                 AnalysisAnswer(question=q, answer=await client_module.ask(client, notebook.id, q))
             )
 
         deliverable_path = None
         if infographic:
+            on_progress("Generating infographic (this can take a few minutes)…")
             path = infographic_path or "infographic.png"
             deliverable_path = await client_module.generate_infographic(
                 client, notebook.id, path, infographic_orientation
             )
+        on_progress("Synthesis complete.")
 
         return ResearchResult(
             topic=topic,
