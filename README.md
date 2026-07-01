@@ -115,7 +115,7 @@ on by default — `dbs serve`) can do the setup for you:
 |---|---|---|
 | **raindrop** | `RAINDROP_TOKEN` | set it in *API keys* |
 | **skool** | a `skool-downloader` checkout (`downloads_dir` + `downloader_cwd`) | set the paths; **Skool login** (on the Sources row) captures your session into its `.auth/`; optionally `downloader_cmd` to fetch first (below) |
-| **reddit** | `[reddit]` extra + `playwright install chromium`; a logged-in session dir | **Install**, then **Reddit login** — opens a browser on the host, you log in and close it; the session dir + `REDDIT_SESSION_DIR` are captured for you |
+| **reddit** | `[reddit]` extra + `playwright install chromium`; a logged-in session dir | **Install**, then **Reddit login** — opens a browser on the host, you log in and close it; the session dir + `REDDIT_SESSION_DIR` are captured for you. Make sure reddit.com shows you logged in before closing (with *Continue with Google*, finish the redirect back to reddit first). The account is auto-detected from the session — `username` in the source config is optional |
 | **youtube** | `[youtube]` extra; a `cookies.txt` *or* `cookies_from_browser` | **Install**, then **YouTube login** — captures a `cookies.txt` and sets `YOUTUBE_COOKIES_FILE`; or skip capture and set `cookies_from_browser` (e.g. `chrome`) in the source config |
 
 #### Capturing a login from the UI
@@ -126,7 +126,9 @@ you pick the type, on the **Sources** row, and on the **Connectors** card. Click
 and a real browser opens **on the machine running the server** — you log in, close
 the window, and the artifact is captured and recorded in `.env`:
 
-- **reddit** → a Playwright persistent-session directory → `REDDIT_SESSION_DIR`;
+- **reddit** → a Playwright persistent-session directory → `REDDIT_SESSION_DIR`
+  (each run verifies the session is really logged in via Reddit's `me.json` and
+  fails loudly with re-capture instructions if not);
 - **youtube** → a Netscape `cookies.txt` exported after login → `YOUTUBE_COOKIES_FILE`;
 - **skool** → a Playwright `storageState` written into your `skool-downloader`
   checkout's `.auth/` (per-source — needs `downloader_cwd`; use the **Skool login**

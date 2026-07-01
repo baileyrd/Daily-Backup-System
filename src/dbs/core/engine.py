@@ -154,6 +154,15 @@ class Engine:
             if buffer or not committed_any:
                 flush(last_cursor)
 
+            if items_seen == 0:
+                # Not an error (a source can be legitimately empty), but the
+                # historical failure mode here is a silent auth/scrape problem
+                # dressed up as success — make it visible.
+                ctx.logger.warning(
+                    "%s: run enumerated 0 items — if this source should not be "
+                    "empty, check its auth/config", ctx.source_name,
+                )
+
             if (
                 reconcile_live is not None
                 and ctx.mode in ("full", "reconcile")

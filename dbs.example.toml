@@ -28,7 +28,7 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # [sources.reddit]
 # type = "reddit"
 # enabled = true
-# username = "your-reddit-username"
+# username = "your-reddit-username"  # optional; auto-detected from the session, warns on mismatch
 # headless = true
 # session_dir_env = "REDDIT_SESSION_DIR"
 
