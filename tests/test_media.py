@@ -114,6 +114,43 @@ def test_archive_includes_media_blobs(storage, tmp_path):
         assert manifest["counts"]["media"] == 1
 
 
+def test_store_media_persists_connector_supplied_bytes(storage):
+    cls = _media_connector()
+    cls.script = [
+        BackupItem(
+            external_id="A1", item_kind="lesson", raw={"id": "A1"},
+            media=[MediaRef(url="https://s3/x", kind="archive",
+                             mime="text/html", data=b"already-fetched")],
+        ),
+        Checkpoint(Cursor({"p": 1})),
+    ]
+    run_fake(storage, cls, mode="full", store_media=True)
+    row = storage.conn.execute(
+        "SELECT data, byte_size, sha256, local_path FROM media WHERE url=?",
+        ("https://s3/x",),
+    ).fetchone()
+    assert bytes(row["data"]) == b"already-fetched"
+    assert row["local_path"] is None  # no local file -- supplied-bytes path
+    assert row["sha256"]
+
+
+def test_store_media_supplied_bytes_respects_size_cap(storage):
+    cls = _media_connector()
+    cls.script = [
+        BackupItem(
+            external_id="A2", item_kind="lesson", raw={"id": "A2"},
+            media=[MediaRef(url="https://s3/big", kind="archive", data=b"x" * 5000)],
+        ),
+        Checkpoint(Cursor({"p": 1})),
+    ]
+    run_fake(storage, cls, mode="full", store_media=True, max_media_bytes=1000)
+    row = storage.conn.execute(
+        "SELECT data, byte_size FROM media WHERE url=?", ("https://s3/big",)
+    ).fetchone()
+    assert row["data"] is None
+    assert row["byte_size"] == 5000
+
+
 def test_config_parses_store_media_keys(tmp_path):
     from dbs.config import load_config
     cfg = tmp_path / "dbs.toml"

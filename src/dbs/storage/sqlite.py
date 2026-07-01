@@ -389,10 +389,20 @@ class SqliteStorage(Storage):
         for m in it.media:
             url = m.get("url")
             data = byte_size = sha = local_path = fetched = None
+            supplied = m.get("data")  # connector-prefetched bytes, if any
             if self._store_media:
-                data, byte_size, sha, local_path = _resolve_local_media(
-                    url, self._max_media_bytes
-                )
+                if supplied is not None:
+                    # The connector already fetched this over HTTP (e.g. a
+                    # Raindrop permanent-copy download) -- persist it as-is,
+                    # size-capped identically to the local-file path. There is
+                    # no local file to point at, so local_path stays None.
+                    data, byte_size, sha = _resolve_supplied_media(
+                        supplied, self._max_media_bytes
+                    )
+                else:
+                    data, byte_size, sha, local_path = _resolve_local_media(
+                        url, self._max_media_bytes
+                    )
                 if data is not None:
                     fetched = self._now()
             # OR REPLACE (not OR IGNORE): if the same item lists the same URL
@@ -649,6 +659,20 @@ def _resolve_local_media(
     except OSError:
         return (None, size, None, local_path)
     return (data, len(data), hashlib.sha256(data).hexdigest(), local_path)
+
+
+def _resolve_supplied_media(
+    data: bytes, max_bytes: int
+) -> tuple[bytes | None, int | None, str | None]:
+    """Accept bytes a connector already fetched over HTTP (e.g. Raindrop's
+    permanent-copy archiving). Returns ``(data, byte_size, sha256)``,
+    size-capped identically to :func:`_resolve_local_media` -- over-cap bytes
+    are dropped but the size is still reported.
+    """
+    size = len(data)
+    if max_bytes and size > max_bytes:
+        return (None, size, None)
+    return (data, size, hashlib.sha256(data).hexdigest())
 
 
 def _build_filter(query: ExportQuery, *, table: str) -> tuple[str, list[Any]]:

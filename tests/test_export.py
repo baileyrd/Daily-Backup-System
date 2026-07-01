@@ -127,3 +127,102 @@ def test_unknown_format_raises(service, storage, tmp_path):
     _seed(storage)
     with pytest.raises(KeyError):
         service.export(ExportQuery(), "nope", tmp_path / "x")
+
+
+# -- obsidian exporter --------------------------------------------------
+
+
+def test_obsidian_frontmatter_shape(service, storage, tmp_path):
+    _seed(storage)
+    out = tmp_path / "vault.zip"
+    result = service.export(ExportQuery(), "obsidian", out)
+    assert result.item_count == 2  # deleted excluded by default, same as other formats
+    with zipfile.ZipFile(out) as zf:
+        names = [n for n in zf.namelist() if n.startswith("notes/")]
+        assert len(names) == 2
+        text = zf.read(names[0]).decode("utf-8")
+        assert text.startswith("---\n")
+        assert 'category: "[[Clippings]]"' in text
+        assert "dbs_source:" in text
+        assert "dbs_external_id:" in text
+        # url2obs's `source:` key must be the article URL, not the DBS source name.
+        assert 'source: "https://a"' in text or 'source: "https://b"' in text
+        assert 'dbs_source: "rd"' in text
+        manifest = json.loads(zf.read("manifest.json"))
+        assert manifest["counts"]["items"] == 2
+
+
+def test_obsidian_one_file_per_item(service, storage, tmp_path):
+    _seed(storage)
+    out = tmp_path / "vault.zip"
+    service.export(ExportQuery(), "obsidian", out)
+    with zipfile.ZipFile(out) as zf:
+        note_names = [n for n in zf.namelist() if n.startswith("notes/") and n.endswith(".md")]
+        assert len(note_names) == 2
+        assert len(note_names) == len(set(note_names))  # no duplicate paths
+
+
+def test_obsidian_yaml_escapes_special_characters(service, storage, tmp_path):
+    src = storage.upsert_source("rd2", "raindrop", "test:raindrop", "{}", 1)
+    run = storage.begin_run(src.id, "test:raindrop", "full", None)
+    storage.upsert_items(src.id, run, [
+        PreparedItem("9", "link", 'Title: "quoted" & tricky', "https://x", None, [],
+                     "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", "h9",
+                     json.dumps({"_id": 9}), False),
+    ])
+    out = tmp_path / "vault2.zip"
+    service.export(ExportQuery(sources=["rd2"]), "obsidian", out)
+    with zipfile.ZipFile(out) as zf:
+        names = [n for n in zf.namelist() if n.startswith("notes/")]
+        text = zf.read(names[0]).decode("utf-8")
+        import re
+
+        m = re.search(r'^title: "(.*)"$', text, re.MULTILINE)
+        assert m is not None
+        assert m.group(1) == 'Title: \\"quoted\\" & tricky'
+
+
+def test_obsidian_filename_collision_handling(service, storage, tmp_path):
+    src = storage.upsert_source("rd3", "raindrop", "test:raindrop", "{}", 1)
+    run = storage.begin_run(src.id, "test:raindrop", "full", None)
+    storage.upsert_items(src.id, run, [
+        PreparedItem("10", "link", "Same Title", "https://x1", None, [],
+                     "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", "h10",
+                     json.dumps({"_id": 10}), False),
+        PreparedItem("11", "link", "Same Title", "https://x2", None, [],
+                     "2024-01-02T00:00:00Z", "2024-01-02T00:00:00Z", "h11",
+                     json.dumps({"_id": 11}), False),
+    ])
+    out = tmp_path / "vault3.zip"
+    service.export(ExportQuery(sources=["rd3"]), "obsidian", out)
+    with zipfile.ZipFile(out) as zf:
+        names = sorted(n for n in zf.namelist() if n.startswith("notes/"))
+        assert len(names) == 2
+        assert len(set(names)) == 2  # disambiguated, not overwritten
+
+
+def test_obsidian_links_archived_media(service, storage, tmp_path):
+    # Exercises Feature-1-shaped data (a media row with `data` bytes already
+    # stored) WITHOUT depending on the Raindrop connector's code -- proves the
+    # obsidian exporter works standalone against anything that populates
+    # media.data.
+    src = storage.upsert_source("rd4", "raindrop", "test:raindrop", "{}", 1)
+    run = storage.begin_run(src.id, "test:raindrop", "full", None)
+    storage.upsert_items(
+        src.id, run,
+        [PreparedItem("20", "link", "Has Archive", "https://y", None, [],
+                      "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", "h20",
+                      json.dumps({"_id": 20}), False,
+                      media=[{"url": "https://s3/x", "kind": "archive",
+                              "mime": "text/html", "data": b"<html>hi</html>"}])],
+        store_media=True,
+    )
+    out = tmp_path / "vault4.zip"
+    service.export(ExportQuery(sources=["rd4"]), "obsidian", out)
+    with zipfile.ZipFile(out) as zf:
+        media_names = [n for n in zf.namelist() if n.startswith("media/")]
+        assert len(media_names) == 1
+        note_name = next(n for n in zf.namelist() if n.startswith("notes/"))
+        text = zf.read(note_name).decode("utf-8")
+        assert "Archived copy" in text
+        assert media_names[0].split("/")[-1] in text
