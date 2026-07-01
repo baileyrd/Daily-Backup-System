@@ -519,3 +519,134 @@ def test_engine_warns_on_zero_item_run(storage, caplog):
         _src, result = _run(storage, _connector([]))
     assert result.fetched == 0
     assert any("enumerated 0 items" in r.message for r in caplog.records)
+
+
+# -- _PageRequester (in-page fetch transport) ---------------------------------
+
+
+class _FakePage:
+    """Scripted stand-in for a Playwright page: evaluate(js, arg) -> payload."""
+
+    def __init__(self, payloads):
+        self.payloads = list(payloads)  # dicts, or exceptions to raise
+        self.calls: list[tuple[str, str]] = []
+
+    def evaluate(self, js, arg=None):
+        self.calls.append((js, arg))
+        item = self.payloads.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _requester(payloads):
+    from dbs.connectors.reddit import _PageRequester
+    import logging
+
+    return _PageRequester(_FakePage(payloads), logging.getLogger("test"))
+
+
+def test_page_requester_returns_status_and_json():
+    req = _requester([{"status": 200, "text": '{"kind": "t2", "data": {"name": "alice"}}'}])
+    resp = req.get("https://www.reddit.com/api/me.json")
+    assert resp.status == 200
+    assert resp.json()["data"]["name"] == "alice"
+    # The URL is passed as the evaluate argument (the fetch JS receives it).
+    assert req._page.calls[0][1] == "https://www.reddit.com/api/me.json"
+
+
+def test_page_requester_html_block_page_json_raises_valueerror():
+    req = _requester([{"status": 200, "text": "<html>blocked</html>"}])
+    resp = req.get("https://www.reddit.com/api/me.json")
+    with pytest.raises(ValueError):
+        resp.json()  # feeds the existing non-JSON -> TransientFetchError path
+
+
+def test_page_requester_evaluate_failure_is_transient():
+    req = _requester([RuntimeError("Execution context was destroyed")])
+    with pytest.raises(TransientFetchError, match="in-page fetch"):
+        req.get("https://www.reddit.com/api/me.json")
+
+
+def test_page_requester_logs_body_snippet_on_error_status(caplog):
+    req = _requester([{"status": 403, "text": "<html>network security block</html>"}])
+    with caplog.at_level("DEBUG", logger="test"):
+        resp = req.get("https://www.reddit.com/api/me.json")
+    assert resp.status == 403
+    assert any("body starts" in r.message for r in caplog.records)
+
+
+def test_verify_login_through_page_requester():
+    # Composition: the real _verify_login through the real adapter over a fake
+    # page — proves the adapter satisfies the requester seam end to end.
+    req = _requester([{"status": 200, "text": '{"kind": "t2", "data": {"name": "alice"}}'}])
+    name = RedditConnector()._verify_login(req, RedditConfig(), _ctx())
+    assert name == "alice"
+
+
+def test_launch_context_scrubs_headless_ua():
+    from pathlib import Path
+
+    class _Page:
+        def __init__(self, ua):
+            self._ua = ua
+
+        def evaluate(self, js):
+            return self._ua
+
+    class _Ctx:
+        def __init__(self, ua):
+            self.pages = [_Page(ua)]
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class _Chromium:
+        def __init__(self):
+            self.calls = []
+
+        def launch_persistent_context(self, **kw):
+            self.calls.append(kw)
+            ua = kw.get("user_agent") or "Mozilla/5.0 (X11) HeadlessChrome/120.0 Safari/537.36"
+            return _Ctx(ua)
+
+    class _PW:
+        def __init__(self):
+            self.chromium = _Chromium()
+
+    pw = _PW()
+    ctx = RedditConnector._launch_context(pw, RedditConfig(), Path("/tmp/session"))
+    assert len(pw.chromium.calls) == 2  # probe detected HeadlessChrome -> relaunch
+    scrubbed = pw.chromium.calls[1]["user_agent"]
+    assert "HeadlessChrome" not in scrubbed
+    assert "Chrome/120.0" in scrubbed  # version preserved, token scrubbed
+    assert "--disable-blink-features=AutomationControlled" in pw.chromium.calls[1]["args"]
+    assert ctx.pages[0]._ua == scrubbed
+
+
+def test_launch_context_headed_ua_needs_no_relaunch():
+    from pathlib import Path
+
+    class _Page:
+        def evaluate(self, js):
+            return "Mozilla/5.0 (X11) Chrome/120.0 Safari/537.36"
+
+    class _Ctx:
+        pages = [_Page()]
+
+    class _Chromium:
+        def __init__(self):
+            self.calls = []
+
+        def launch_persistent_context(self, **kw):
+            self.calls.append(kw)
+            return _Ctx()
+
+    class _PW:
+        def __init__(self):
+            self.chromium = _Chromium()
+
+    pw = _PW()
+    RedditConnector._launch_context(pw, RedditConfig(headless=False), Path("/tmp/session"))
+    assert len(pw.chromium.calls) == 1  # regular Chrome UA -> no relaunch
