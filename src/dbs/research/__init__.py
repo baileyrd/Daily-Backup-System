@@ -17,11 +17,14 @@ from .models import (
     ResearchResult,
     VideoMeta,
 )
-from .pipeline import run_pipeline
+from .from_backup import videos_from_rows
+from .pipeline import run_pipeline, run_pipeline_for_videos
 from .report import render_report
 
 __all__ = [
     "run_pipeline",
+    "run_pipeline_for_videos",
+    "videos_from_rows",
     "render_report",
     "VideoMeta",
     "IndexOutcome",

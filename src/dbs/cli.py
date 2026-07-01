@@ -674,6 +674,97 @@ def research_youtube(
     )
 
 
+@research_app.command("youtube-backup")
+def research_youtube_backup(
+    topic: str = typer.Argument(..., help='Research topic, e.g. "claude code skills".'),
+    source: Optional[list[str]] = typer.Option(
+        None, "--source", "-s",
+        help="Configured YouTube source name (repeatable). Default: every youtube source.",
+    ),
+    list_label: Optional[list[str]] = typer.Option(
+        None, "--list", "-l",
+        help="Only videos from this list (watch-later, liked, playlist:<title>). Repeatable.",
+    ),
+    count: int = typer.Option(10, "--count", help="Max videos to send to NotebookLM."),
+    question: Optional[list[str]] = typer.Option(
+        None, "--question", help="Repeatable; replaces the default 5-question analysis set.",
+    ),
+    infographic: bool = typer.Option(False, "--infographic", help="Also generate a NotebookLM infographic."),
+    infographic_orientation: str = typer.Option("landscape", "--infographic-orientation"),
+    out: Optional[Path] = typer.Option(None, "--out", "-o", help="Output markdown path (default: ./<slug>.md)."),
+    notebook_name: Optional[str] = typer.Option(None, "--notebook-name"),
+) -> None:
+    """Send already backed-up YouTube videos through NotebookLM and write a markdown research report.
+
+    Reads videos from the backup database (a `youtube` source you've already
+    run `dbs backup` on) instead of searching YouTube live — the backup run
+    itself never touches NotebookLM. Auth is managed out-of-band; run
+    `notebooklm login` once before using this command.
+    """
+    from .research import (
+        NotebookLMAuthError,
+        ResearchPipelineError,
+        render_report,
+        run_pipeline_for_videos,
+        videos_from_rows,
+    )
+
+    svc = _service()
+    try:
+        rows = list(
+            svc.storage.iter_items(
+                ExportQuery(sources=list(source) if source else None, item_types=["video"])
+            )
+        )
+    finally:
+        svc.close()
+
+    videos = videos_from_rows(rows, lists=list(list_label) if list_label else None, limit=count)
+    if not videos:
+        scope = f"source(s) {', '.join(source)}" if source else "any youtube source"
+        typer.secho(
+            f"No backed-up YouTube videos matched ({scope}"
+            + (f", list(s) {', '.join(list_label)}" if list_label else "")
+            + "). Run `dbs backup` on a youtube source first.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(4)
+
+    slug = _slugify(topic)
+    out_path = out or Path(f"{slug}.md")
+    infographic_path = str(out_path.with_name(f"{slug}-infographic.png")) if infographic else None
+    source_label = "backup:" + (",".join(source) if source else "youtube")
+
+    try:
+        result = run_pipeline_for_videos(
+            topic,
+            videos,
+            source_label=source_label,
+            questions=list(question) if question else None,
+            notebook_name=notebook_name,
+            infographic=infographic,
+            infographic_orientation=infographic_orientation,
+            infographic_path=infographic_path,
+        )
+    except NotebookLMAuthError:
+        typer.secho(
+            "NotebookLM authentication is missing or expired. Run `notebooklm login` "
+            "once (opens a browser for Google sign-in), then re-run this command.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(4)
+    except ResearchPipelineError as exc:
+        typer.secho(f"Research pipeline error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+
+    out_path.write_text(render_report(result), encoding="utf-8")
+    typer.secho(
+        f"Wrote research report to {out_path} "
+        f"({len(result.indexed_videos)} of {len(result.outcomes)} videos indexed)",
+        fg=typer.colors.GREEN,
+    )
+
+
 def _coerce(value: str):
     """Best-effort coerce a --set string into bool/int/list/str for config."""
     low = value.lower()

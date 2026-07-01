@@ -106,6 +106,87 @@ def test_research_youtube_command_registered():
     assert "--infographic" in result.stdout
 
 
+def test_research_youtube_backup_command_registered():
+    result = runner.invoke(app, ["research", "youtube-backup", "--help"])
+    assert result.exit_code == 0
+    assert "--source" in result.stdout
+    assert "--list" in result.stdout
+    assert "--count" in result.stdout
+
+
+def test_research_youtube_backup_empty_db_exit_4(tmp_path):
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    result = runner.invoke(app, ["--config", str(cfg), "research", "youtube-backup", "topic"])
+    assert result.exit_code == 4
+    assert "No backed-up YouTube videos" in result.output
+
+
+def test_research_youtube_backup_reads_videos_from_db(tmp_path, monkeypatch):
+    # End to end minus NotebookLM: back up fabricated videos through the real
+    # engine into the real SQLite file, then check the command pulls exactly
+    # those videos out of the DB and writes render_report's output to --out.
+    from conftest import make_ctx, registered
+
+    from dbs.core.engine import Engine
+    from dbs.core.secrets import Secrets
+    from dbs.connectors.youtube import YouTubeConfig, YouTubeConnector
+    from dbs.storage.sqlite import SqliteStorage
+    import dbs.research as research
+
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+
+    class FakeYouTube(YouTubeConnector):
+        def _acquire(self, ctx):
+            for vid in ("aaa", "bbb"):
+                yield "watch-later", {
+                    "position": 1, "id": vid, "title": f"Video {vid}",
+                    "url": f"https://www.youtube.com/watch?v={vid}",
+                    "duration_seconds": 60, "channel": "Chan", "channel_id": "UC1",
+                    "uploader": "Chan", "view_count": 10, "live_status": None,
+                    "list_label": "watch-later", "list_title": "Watch Later",
+                    "captured_at": "2024-05-01T00:00:00Z",
+                }
+
+    storage = SqliteStorage(tmp_path / "dbs.sqlite3")
+    source = storage.upsert_source("my-youtube", "youtube", "test:youtube", "{}", 1)
+    run_id = storage.begin_run(source.id, "test:youtube", "full", None)
+    ctx = make_ctx(
+        source_id=source.id, run_id=run_id, mode="full",
+        config=YouTubeConfig(),
+        secrets=Secrets({"YOUTUBE_COOKIES_FILE": "/tmp/c.txt"}, ("YOUTUBE_COOKIES_FILE",)),
+    )
+    Engine(storage).run_source(registered(FakeYouTube), ctx)
+    storage.close()
+
+    captured = {}
+
+    def fake_run(topic, videos, **kw):
+        captured["videos"] = videos
+        captured["source_label"] = kw["source_label"]
+        return research.ResearchResult(
+            topic=topic, queries=[kw["source_label"]], videos_found_raw=len(videos),
+            videos_deduped=len(videos),
+            outcomes=[research.IndexOutcome(video=v, indexed=True) for v in videos],
+            answers=[research.AnalysisAnswer(question="Q", answer="A")],
+            notebook_name="nb", notebook_id="nb-1",
+            generated_at="2026-07-01T00:00:00+00:00",
+        )
+
+    monkeypatch.setattr(research, "run_pipeline_for_videos", fake_run)
+    out = tmp_path / "report.md"
+    result = runner.invoke(
+        app, ["--config", str(cfg), "research", "youtube-backup", "my topic",
+              "--source", "my-youtube", "--out", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    assert {v.id for v in captured["videos"]} == {"aaa", "bbb"}
+    assert captured["source_label"] == "backup:my-youtube"
+    assert out.exists()
+    assert "# Research: my topic" in out.read_text(encoding="utf-8")
+
+
 def test_research_youtube_writes_report_from_fake_pipeline(tmp_path, monkeypatch):
     # Full CLI invocation with the pipeline itself faked out (no yt-dlp, no
     # NotebookLM) -- exercises the CLI's own wiring: option parsing, calling

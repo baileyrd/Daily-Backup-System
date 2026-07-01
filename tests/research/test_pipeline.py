@@ -138,6 +138,37 @@ def test_run_pipeline_generates_infographic_when_requested(monkeypatch):
     assert result.infographic_orientation == "portrait"
 
 
+def test_run_pipeline_for_videos_happy_path():
+    videos = _videos(2)
+    fake = FakeClient()
+    result = pl.run_pipeline_for_videos(
+        "topic", videos, source_label="backup:my-youtube", client_module=fake
+    )
+    assert result.queries == ["backup:my-youtube"]
+    assert result.videos_found_raw == 2
+    assert result.videos_deduped == 2
+    assert len(result.indexed_videos) == 2
+    assert fake.added == [v.url for v in videos]  # no search, no rank: caller's set as-is
+    assert result.generated_at
+
+
+def test_run_pipeline_for_videos_raises_on_empty_set():
+    with pytest.raises(ResearchPipelineError):
+        pl.run_pipeline_for_videos(
+            "topic", [], source_label="backup:my-youtube", client_module=FakeClient()
+        )
+
+
+def test_run_pipeline_for_videos_tracks_per_video_failures():
+    videos = _videos(3)
+    fake = FakeClient(fail_urls={videos[0].url})
+    result = pl.run_pipeline_for_videos(
+        "topic", videos, source_label="backup:x", client_module=fake
+    )
+    assert result.failed_count == 1
+    assert len(result.indexed_videos) == 2
+
+
 def test_run_pipeline_wraps_notebooklm_auth_error(monkeypatch):
     videos = _videos(1)
     monkeypatch.setattr(pl, "search_videos_with_stats", lambda q, p, m: (videos, 1))
