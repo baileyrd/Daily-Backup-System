@@ -1,9 +1,16 @@
-"""Sync orchestrator for ``dbs research youtube``: search -> NotebookLM
+"""Sync orchestrator for the research commands: videos -> NotebookLM
 synthesis -> :class:`~dbs.research.models.ResearchResult`.
 
+Two entry points share the NotebookLM half:
+
+* :func:`run_pipeline` — ``dbs research youtube``: live YouTube search,
+  dedup/rank, then synthesize.
+* :func:`run_pipeline_for_videos` — ``dbs research youtube-backup``: the
+  caller already has the videos (pulled from the backup DB); synthesize only.
+
 This is the first use of ``asyncio`` in this repo — ``notebooklm-py``'s client
-is async-only, but every other command in this CLI is synchronous, so
-``run_pipeline`` is the sync boundary the CLI calls, bridging in with a single
+is async-only, but every other command in this CLI is synchronous, so these
+functions are the sync boundary the CLI calls, bridging in with a single
 ``asyncio.run()``.
 """
 
@@ -75,8 +82,75 @@ def run_pipeline(
             "filter); try a different query or a larger --months window."
         )
     videos = rank_and_truncate(deduped, count)
-    resolved_questions = list(questions) if questions else list(DEFAULT_QUESTIONS)
 
+    result = _synthesize(
+        topic=topic,
+        videos=videos,
+        questions=questions,
+        notebook_name=notebook_name,
+        infographic=infographic,
+        infographic_orientation=infographic_orientation,
+        infographic_path=infographic_path,
+        client_module=client_module,
+    )
+    result.queries = list(queries)
+    result.videos_found_raw = raw_count
+    result.videos_deduped = len(deduped)
+    return result
+
+
+def run_pipeline_for_videos(
+    topic: str,
+    videos: list[VideoMeta],
+    *,
+    source_label: str,
+    questions: list[str] | None = None,
+    notebook_name: str | None = None,
+    infographic: bool = False,
+    infographic_orientation: str = "landscape",
+    infographic_path: str | None = None,
+    client_module: Any = notebooklm_client,
+) -> ResearchResult:
+    """Feed an already-chosen video set (e.g. pulled from the backup DB by
+    ``dbs research youtube-backup``) into NotebookLM — no search, no
+    dedup/rank; the caller owns the selection. ``source_label`` stands in for
+    the search queries in the report's Pipeline Metadata (provenance)."""
+    if not videos:
+        raise ResearchPipelineError(
+            f"no videos to research from {source_label}; nothing to send to NotebookLM."
+        )
+    result = _synthesize(
+        topic=topic,
+        videos=videos,
+        questions=questions,
+        notebook_name=notebook_name,
+        infographic=infographic,
+        infographic_orientation=infographic_orientation,
+        infographic_path=infographic_path,
+        client_module=client_module,
+    )
+    result.queries = [source_label]
+    result.videos_found_raw = len(videos)
+    result.videos_deduped = len(videos)
+    return result
+
+
+def _synthesize(
+    *,
+    topic: str,
+    videos: list[VideoMeta],
+    questions: list[str] | None,
+    notebook_name: str | None,
+    infographic: bool,
+    infographic_orientation: str,
+    infographic_path: str | None,
+    client_module: Any,
+) -> ResearchResult:
+    """The shared NotebookLM half: run ``_run_async`` under ``asyncio.run``,
+    re-wrapping a real ``notebooklm.AuthError`` as the ``dbs``-owned
+    :class:`NotebookLMAuthError` so ``cli.py`` never imports ``notebooklm``.
+    The caller fills in the provenance fields (``queries``/counts)."""
+    resolved_questions = list(questions) if questions else list(DEFAULT_QUESTIONS)
     try:
         result = asyncio.run(
             _run_async(
@@ -91,15 +165,9 @@ def run_pipeline(
             )
         )
     except Exception as exc:
-        # notebooklm.AuthError means the whole session is unusable -- re-wrap
-        # as a dbs-owned exception so cli.py can catch it without importing
-        # notebooklm directly (see notebooklm_client.is_auth_error).
         if notebooklm_client.is_auth_error(exc):
             raise NotebookLMAuthError(str(exc)) from exc
         raise
-    result.queries = list(queries)
-    result.videos_found_raw = raw_count
-    result.videos_deduped = len(deduped)
     result.generated_at = datetime.now(timezone.utc).isoformat()
     return result
 
@@ -152,8 +220,8 @@ async def _run_async(
 
         return ResearchResult(
             topic=topic,
-            queries=[],  # filled in by run_pipeline once this coroutine returns
-            videos_found_raw=0,  # filled in by run_pipeline
+            queries=[],  # provenance filled in by the public entry points
+            videos_found_raw=0,  # likewise
             videos_deduped=len(videos),
             outcomes=outcomes,
             answers=answers,
@@ -164,4 +232,9 @@ async def _run_async(
         )
 
 
-__all__ = ["run_pipeline", "DEFAULT_QUESTIONS", "SYNTHESIS_QUESTION"]
+__all__ = [
+    "run_pipeline",
+    "run_pipeline_for_videos",
+    "DEFAULT_QUESTIONS",
+    "SYNTHESIS_QUESTION",
+]
