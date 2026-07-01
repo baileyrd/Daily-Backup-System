@@ -14,6 +14,7 @@ Exit codes (cron-friendly):
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -43,8 +44,10 @@ app = typer.Typer(
 )
 sources_app = typer.Typer(no_args_is_help=True, help="Manage configured sources.")
 connectors_app = typer.Typer(no_args_is_help=True, help="Inspect available connectors.")
+research_app = typer.Typer(no_args_is_help=True, help="Ad-hoc research pipelines (not backups).")
 app.add_typer(sources_app, name="sources")
 app.add_typer(connectors_app, name="connectors")
+app.add_typer(research_app, name="research")
 
 _state: dict[str, str] = {"config": "dbs.toml"}
 
@@ -599,6 +602,76 @@ def connectors_describe(type: str = typer.Argument(...)) -> None:
         typer.echo(json.dumps(cls.config_model.model_json_schema(), indent=2))
     finally:
         svc.close()
+
+
+# -- research sub-app -------------------------------------------------------
+
+
+def _slugify(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug or "research"
+
+
+@research_app.command("youtube")
+def research_youtube(
+    topic: str = typer.Argument(..., help='Research topic, e.g. "claude code skills".'),
+    query: Optional[list[str]] = typer.Option(
+        None, "--query", "-q",
+        help="Search query variant (repeatable). Default: one query derived from TOPIC.",
+    ),
+    per_query_count: int = typer.Option(10, "--per-query-count", help="Results to fetch per search query."),
+    count: int = typer.Option(10, "--count", help="Final video count after dedup/rank."),
+    months: Optional[int] = typer.Option(6, "--months", help="Recency filter in months; 0 disables it."),
+    question: Optional[list[str]] = typer.Option(
+        None, "--question", help="Repeatable; replaces the default 5-question analysis set.",
+    ),
+    infographic: bool = typer.Option(False, "--infographic", help="Also generate a NotebookLM infographic."),
+    infographic_orientation: str = typer.Option("landscape", "--infographic-orientation"),
+    out: Optional[Path] = typer.Option(None, "--out", "-o", help="Output markdown path (default: ./<slug>.md)."),
+    notebook_name: Optional[str] = typer.Option(None, "--notebook-name"),
+) -> None:
+    """Search YouTube, feed videos into a NotebookLM notebook, write a markdown research report.
+
+    Not a backup: this is a one-shot pipeline with nothing persisted between
+    invocations. NotebookLM auth is managed out-of-band; run `notebooklm
+    login` once before using this command.
+    """
+    from .research import NotebookLMAuthError, ResearchPipelineError, render_report, run_pipeline
+
+    slug = _slugify(topic)
+    out_path = out or Path(f"{slug}.md")
+    infographic_path = str(out_path.with_name(f"{slug}-infographic.png")) if infographic else None
+
+    try:
+        result = run_pipeline(
+            topic,
+            list(query) if query else [topic],
+            per_query_count=per_query_count,
+            count=count,
+            months=months,
+            questions=list(question) if question else None,
+            notebook_name=notebook_name,
+            infographic=infographic,
+            infographic_orientation=infographic_orientation,
+            infographic_path=infographic_path,
+        )
+    except NotebookLMAuthError:
+        typer.secho(
+            "NotebookLM authentication is missing or expired. Run `notebooklm login` "
+            "once (opens a browser for Google sign-in), then re-run this command.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(4)
+    except ResearchPipelineError as exc:
+        typer.secho(f"Research pipeline error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+
+    out_path.write_text(render_report(result), encoding="utf-8")
+    typer.secho(
+        f"Wrote research report to {out_path} "
+        f"({len(result.indexed_videos)} of {len(result.outcomes)} videos indexed)",
+        fg=typer.colors.GREEN,
+    )
 
 
 def _coerce(value: str):

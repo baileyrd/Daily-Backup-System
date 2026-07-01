@@ -94,3 +94,48 @@ def test_serve_command_registered():
     assert result.exit_code == 0
     assert "--host" in result.stdout
     assert "--port" in result.stdout
+
+
+def test_research_youtube_command_registered():
+    # The research pipeline command exists and documents its options (no
+    # search/NotebookLM call made).
+    result = runner.invoke(app, ["research", "youtube", "--help"])
+    assert result.exit_code == 0
+    assert "--query" in result.stdout
+    assert "--question" in result.stdout
+    assert "--infographic" in result.stdout
+
+
+def test_research_youtube_writes_report_from_fake_pipeline(tmp_path, monkeypatch):
+    # Full CLI invocation with the pipeline itself faked out (no yt-dlp, no
+    # NotebookLM) -- exercises the CLI's own wiring: option parsing, calling
+    # run_pipeline, and writing render_report's output to --out.
+    import dbs.research as research
+
+    fake_result = research.ResearchResult(
+        topic="test topic",
+        queries=["test topic"],
+        videos_found_raw=1,
+        videos_deduped=1,
+        outcomes=[
+            research.IndexOutcome(
+                video=research.VideoMeta(
+                    id="a", title="Video a", url="https://youtu.be/a", channel="Chan",
+                    subscriber_count=100, view_count=1000, duration_seconds=60,
+                    upload_date="20240101",
+                ),
+                indexed=True,
+            )
+        ],
+        answers=[research.AnalysisAnswer(question="Q", answer="A")],
+        notebook_name="Research: test topic",
+        notebook_id="nb-1",
+        generated_at="2026-07-01T00:00:00+00:00",
+    )
+    monkeypatch.setattr(research, "run_pipeline", lambda *a, **kw: fake_result)
+
+    out = tmp_path / "report.md"
+    result = runner.invoke(app, ["research", "youtube", "test topic", "--out", str(out)])
+    assert result.exit_code == 0, result.stdout
+    assert out.exists()
+    assert out.read_text(encoding="utf-8") == research.render_report(fake_result)
