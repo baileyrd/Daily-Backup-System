@@ -9,6 +9,13 @@ questions, and render a markdown research report. See
 
 from __future__ import annotations
 
+# Runtime deps of the `[research]` extra, declared here (like a connector's
+# `pip_requirements`) so the web UI's install button derives its pip command
+# from trusted package metadata, never from client input. Keep in sync with
+# pyproject.toml's `research` extra.
+PIP_REQUIREMENTS = ("yt-dlp>=2024.1", "notebooklm-py[browser]")
+RUNTIME_IMPORTS = ("yt_dlp", "notebooklm")
+
 from .models import (
     AnalysisAnswer,
     IndexOutcome,
@@ -22,6 +29,8 @@ from .pipeline import run_pipeline, run_pipeline_for_videos
 from .report import render_report
 
 __all__ = [
+    "PIP_REQUIREMENTS",
+    "RUNTIME_IMPORTS",
     "run_pipeline",
     "run_pipeline_for_videos",
     "videos_from_rows",

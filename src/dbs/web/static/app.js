@@ -528,6 +528,152 @@ $("#export-form").addEventListener("submit", (e) => {
   window.location.assign("/api/export?" + qs.toString());
 });
 
+// --- research (YouTube -> NotebookLM -> report) ------------------------------
+
+let researchES = null;
+let RESEARCH_META = null;
+
+async function loadResearch() {
+  const setup = $("#research-setup");
+  setup.innerHTML = "";
+  setup.classList.add("hidden");
+  try {
+    RESEARCH_META = await api("/api/research/meta");
+  } catch (e) { toast(e.message, "err"); return; }
+  const m = RESEARCH_META;
+
+  // Missing deps → install strip.
+  if (!m.ready) {
+    setup.classList.remove("hidden");
+    setup.append(el("div", { className: "muted",
+      textContent: `The research pipeline needs: ${m.pip_requirements.join(", ")} (missing: ${m.missing.join(", ")}).` }));
+    if (META.setup_enabled) {
+      const btn = el("button", { className: "primary small", textContent: "Install research deps" });
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          const job = await api("/api/research/install", { method: "POST" });
+          streamSetup(job.id, "Installing research dependencies…");
+        } catch (e) { toast(e.message, "err"); btn.disabled = false; }
+      });
+      setup.append(btn);
+    } else {
+      setup.append(el("code", { textContent: "pip install 'daily-backup-system[research]'" }));
+    }
+  }
+
+  // Auth status + login capture. Same Google account the YouTube connector
+  // uses; the capture writes the storageState file notebooklm-py reads.
+  const note = $("#research-auth-note");
+  if (m.auth.configured) {
+    note.textContent = "NotebookLM: logged in";
+    note.className = "tag st-success";
+  } else {
+    note.textContent = "NotebookLM: not logged in";
+    note.className = "tag st-partial";
+    setup.classList.remove("hidden");
+    setup.append(el("div", { className: "muted",
+      textContent: "NotebookLM needs a Google login (the same account as YouTube). Capture it once — the session is saved server-side and reused." }));
+    if (META.setup_enabled) {
+      const btn = el("button", { className: "primary small", textContent: "NotebookLM login (open browser)" });
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          const job = await api("/api/research/login", { method: "POST" });
+          streamSetup(job.id, "NotebookLM login — check the server host for a browser window");
+        } catch (e) { toast(e.message, "err"); btn.disabled = false; }
+      });
+      setup.append(btn);
+      setup.append(el("div", { className: "tag",
+        textContent: "If Google blocks sign-in in the automated browser, run `notebooklm login` on the host instead — it produces the same file." }));
+    } else {
+      setup.append(el("div", { className: "tag st-partial",
+        textContent: "Login capture is disabled — restart with: dbs serve --allow-setup, or run `notebooklm login` on the host." }));
+    }
+  }
+
+  // Backup-mode source picker.
+  const sel = $("#research-source");
+  sel.innerHTML = "";
+  sel.append(el("option", { value: "", textContent: "(all youtube sources)" }));
+  m.youtube_sources.forEach((s) => sel.append(el("option", { value: s, textContent: s })));
+  $("#research-questions").placeholder = m.default_questions.join("\n");
+}
+LOADERS.research = loadResearch;
+$("#refresh-research").addEventListener("click", loadResearch);
+
+$("#research-mode").addEventListener("change", (e) => {
+  const backup = e.target.value === "backup";
+  $("#research-search-fields").classList.toggle("hidden", backup);
+  $("#research-backup-fields").classList.toggle("hidden", !backup);
+});
+
+const lines = (v) => v.split("\n").map((s) => s.trim()).filter(Boolean);
+const csvList = (v) => v.split(",").map((s) => s.trim()).filter(Boolean);
+
+$("#research-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (researchES) { toast("A research run is already in progress.", "err"); return; }
+  const mode = $("#research-mode").value;
+  const body = {
+    mode,
+    topic: $("#research-topic").value.trim(),
+    queries: mode === "search" ? lines($("#research-queries").value) : [],
+    sources: mode === "backup" && $("#research-source").value ? [$("#research-source").value] : [],
+    lists: mode === "backup" ? csvList($("#research-lists").value) : [],
+    questions: lines($("#research-questions").value),
+    count: parseInt($("#research-count").value || "10", 10),
+    per_query_count: parseInt($("#research-per-query").value || "10", 10),
+    months: parseInt($("#research-months").value || "6", 10),
+    infographic: $("#research-infographic").checked,
+    notebook_name: $("#research-notebook").value.trim(),
+  };
+  try {
+    const job = await api("/api/research", { method: "POST", body: JSON.stringify(body) });
+    openResearchProgress(job);
+  } catch (err) { toast(err.message, "err"); }
+});
+
+function openResearchProgress(job) {
+  $("#research-run").disabled = true;
+  $("#research-result").classList.add("hidden");
+  const panel = $("#research-progress");
+  const log = $("#research-log");
+  $("#research-progress-title").textContent = `Researching: ${job.connector}`;
+  log.textContent = "";
+  panel.classList.remove("hidden");
+
+  researchES = new EventSource(`/api/research/${job.id}/stream`);
+  researchES.onmessage = (m) => {
+    const { line } = JSON.parse(m.data);
+    log.textContent += line + "\n";
+    log.scrollTop = log.scrollHeight;
+  };
+  researchES.addEventListener("end", (m) => {
+    if (researchES) { researchES.close(); researchES = null; }
+    $("#research-run").disabled = false;
+    const snap = JSON.parse(m.data);
+    if (snap.status === "done" && snap.result) {
+      $("#research-report").textContent = snap.result.report;
+      $("#research-download").href = `/api/research/${snap.id}/report`;
+      $("#research-result").classList.remove("hidden");
+      toast(`Research complete — ${snap.result.indexed}/${snap.result.total} videos indexed.`, "ok");
+    } else {
+      toast(`Research failed: ${snap.error || "error"}`, "err");
+    }
+  });
+  researchES.onerror = () => { /* 'end' handles teardown */ };
+}
+$("#research-log-hide").addEventListener("click", () => $("#research-progress").classList.add("hidden"));
+
+// On load, if a research run is already going (e.g. page refresh), reattach.
+async function resumeResearchIfRunning() {
+  try {
+    const cur = await api("/api/research/current");
+    if (cur && cur.status === "running") { switchTab("research"); openResearchProgress(cur); }
+  } catch (_) {}
+}
+
 // --- verify ----------------------------------------------------------------
 
 async function runVerify() {
@@ -635,3 +781,4 @@ async function resumeIfRunning() {
 loadMeta();
 loadSources();
 resumeIfRunning();
+resumeResearchIfRunning();

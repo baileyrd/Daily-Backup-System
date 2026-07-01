@@ -592,3 +592,107 @@ def test_job_manager_rejects_concurrent_jobs():
             break
         time.sleep(0.02)
     assert mgr.get(job1.id)["status"] == "done"
+
+
+# --------------------------------------------------------------------------- #
+# research (YouTube -> NotebookLM -> report)                                    #
+# --------------------------------------------------------------------------- #
+
+
+def _wait_research_done(client, job_id, timeout=10.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        snap = client.get(f"/api/research/{job_id}").json()
+        if snap["status"] != "running":
+            return snap
+        time.sleep(0.05)
+    raise AssertionError("research job did not finish in time")
+
+
+def test_research_meta_shape(client):
+    m = client.get("/api/research/meta").json()
+    assert set(m) >= {"ready", "missing", "pip_requirements", "auth",
+                      "default_questions", "youtube_sources"}
+    assert len(m["default_questions"]) == 5
+    assert m["youtube_sources"] == []  # the test config only has a skool source
+    assert set(m["auth"]) >= {"configured", "captured_path", "capture_target"}
+
+
+def test_research_requires_topic(client):
+    assert client.post("/api/research", json={}).status_code == 400
+    assert client.post("/api/research", json={"topic": "  "}).status_code == 400
+
+
+def test_research_rejects_bad_mode(client):
+    r = client.post("/api/research", json={"topic": "x", "mode": "nope"})
+    assert r.status_code == 400
+
+
+def test_research_current_idle(client):
+    assert client.get("/api/research/current").json() == {"status": "idle"}
+
+
+def test_research_login_and_install_disabled_403(client):
+    assert client.post("/api/research/login").status_code == 403
+    assert client.post("/api/research/install").status_code == 403
+
+
+def test_research_job_runs_with_fake_pipeline(client, monkeypatch):
+    import dbs.research as research
+
+    def fake_run_pipeline(topic, queries, **kw):
+        kw["on_progress"]("fake progress line")
+        return research.ResearchResult(
+            topic=topic, queries=queries, videos_found_raw=1, videos_deduped=1,
+            outcomes=[research.IndexOutcome(
+                video=research.VideoMeta(
+                    id="a", title="Video a", url="https://youtu.be/a", channel="Chan",
+                    subscriber_count=10, view_count=100, duration_seconds=60,
+                    upload_date="20240101"),
+                indexed=True)],
+            answers=[research.AnalysisAnswer(question="Q", answer="A")],
+            notebook_name="nb", notebook_id="nb-1",
+            generated_at="2026-07-01T00:00:00+00:00",
+        )
+
+    monkeypatch.setattr(research, "run_pipeline", fake_run_pipeline)
+    r = client.post("/api/research", json={"topic": "my topic"})
+    assert r.status_code == 200, r.text
+    job = r.json()
+    assert job["kind"] == "research"
+    assert job["connector"] == "my topic"
+
+    snap = _wait_research_done(client, job["id"])
+    assert snap["status"] == "done", snap.get("error")
+    assert snap["result"]["indexed"] == 1
+    assert "# Research: my topic" in snap["result"]["report"]
+    assert "fake progress line" in snap["log"]
+
+    # The rendered markdown downloads once done.
+    dl = client.get(f"/api/research/{job['id']}/report")
+    assert dl.status_code == 200
+    assert dl.headers["content-type"].startswith("text/markdown")
+    assert "# Research: my topic" in dl.text
+
+    # The stream replays the buffered log for a finished job.
+    with client.stream("GET", f"/api/research/{job['id']}/stream") as resp:
+        body = "".join(resp.iter_text())
+    assert "fake progress line" in body
+    assert "event: end" in body
+
+
+def test_research_backup_mode_with_no_videos_errors(client):
+    # The test DB has no youtube items — the job must fail with a clear error,
+    # and the report endpoint must refuse until there is a result.
+    r = client.post("/api/research", json={"topic": "t", "mode": "backup"})
+    assert r.status_code == 200
+    snap = _wait_research_done(client, r.json()["id"])
+    assert snap["status"] == "error"
+    assert "no backed-up YouTube videos" in snap["error"]
+    assert client.get(f"/api/research/{snap['id']}/report").status_code == 409
+
+
+def test_research_unknown_job_404(client):
+    assert client.get("/api/research/999").status_code == 404
+    assert client.get("/api/research/999/report").status_code == 404
+    assert client.get("/api/research/999/stream").status_code == 404

@@ -20,6 +20,7 @@ here since a single bad source shouldn't abort an otherwise-successful run.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from .models import ResearchPipelineError
@@ -44,11 +45,46 @@ def _import_notebooklm() -> Any:
     return notebooklm
 
 
-def client_context():
-    """Return the ``async with`` context manager for a fresh client bound to
-    the locally stored (``notebooklm login``) browser session."""
+# Where the DBS web UI's "NotebookLM login" capture writes the Playwright
+# storageState, relative to the config dir. Same file format `notebooklm
+# login` produces — either source of the file works.
+DBS_STATE_SUBPATH = Path(".notebooklm") / "storage_state.json"
+
+
+def resolve_auth_state(base_dir: str | Path) -> str | None:
+    """The DBS-captured storage-state path if it exists, else ``None``.
+
+    ``None`` means "let notebooklm-py use its own default" — the file that
+    ``notebooklm login`` writes (``~/.notebooklm/…/storage_state.json``). The
+    same Google session powers both; DBS's capture is just the in-UI way to
+    produce it.
+    """
+    candidate = Path(base_dir) / DBS_STATE_SUBPATH
+    return str(candidate) if candidate.exists() else None
+
+
+def default_state_present() -> bool:
+    """Whether ``notebooklm login``'s own storage state exists (best-effort;
+    ``False`` when the package isn't installed)."""
+    try:
+        from notebooklm.paths import get_storage_path
+    except ImportError:
+        return False
+    try:
+        return Path(get_storage_path()).exists()
+    except Exception:
+        return False
+
+
+def client_context(auth_state_path: str | None = None):
+    """Return the ``async with`` context manager for a fresh client.
+
+    ``auth_state_path`` points at a Playwright storageState JSON (e.g. the one
+    the DBS web UI captured); ``None`` falls back to the file ``notebooklm
+    login`` wrote at its default location.
+    """
     notebooklm = _import_notebooklm()
-    return notebooklm.NotebookLMClient.from_storage()
+    return notebooklm.NotebookLMClient.from_storage(path=auth_state_path)
 
 
 async def create_notebook(client: Any, title: str) -> Any:
@@ -121,6 +157,9 @@ def is_auth_error(exc: BaseException) -> bool:
 
 __all__ = [
     "SourceIndexError",
+    "DBS_STATE_SUBPATH",
+    "resolve_auth_state",
+    "default_state_present",
     "client_context",
     "create_notebook",
     "add_source",

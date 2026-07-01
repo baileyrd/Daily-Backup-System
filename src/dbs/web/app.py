@@ -93,13 +93,19 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
     """
     try:
         from fastapi import Body, FastAPI, HTTPException, Query
-        from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+        from fastapi.responses import (
+            FileResponse,
+            HTMLResponse,
+            Response,
+            StreamingResponse,
+        )
         from fastapi.staticfiles import StaticFiles
         from starlette.background import BackgroundTask
     except ModuleNotFoundError as exc:  # pragma: no cover - import guard
         raise _missing_deps(exc)
 
     from .. import CORE_API_VERSION, __version__
+    from .. import research as researchmod
     from ..core.errors import (
         BackupRunError,
         ConfigError,
@@ -109,6 +115,12 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
     from ..core.service import BackupService
     from ..export import EXPORTERS
     from ..export.base import ExportQuery
+    from ..research.notebooklm_client import (
+        DBS_STATE_SUBPATH,
+        default_state_present,
+        resolve_auth_state,
+    )
+    from ..research.pipeline import DEFAULT_QUESTIONS
     from . import envfile
     from . import setup as setupmod
     from .jobs import JobAlreadyRunning, JobManager
@@ -122,6 +134,9 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
 
     jobs = JobManager(lambda: BackupService.from_config_file(config_path))
     setup_mgr = SetupManager()
+    # Research runs are long (minutes of NotebookLM calls) and independent of
+    # setup tasks — a separate manager so one doesn't block the other.
+    research_mgr = SetupManager()
 
     app = FastAPI(title="Daily Backup System", version=__version__)
 
@@ -602,6 +617,235 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
             media_type=media,
             filename=f"dbs-export.{ext}",
             background=BackgroundTask(lambda: shutil.rmtree(tmp_dir, ignore_errors=True)),
+        )
+
+    # -- research (topic -> NotebookLM -> markdown report) -------------------
+    # Long-running jobs on their own SetupManager-style log stream; the
+    # rendered report rides along as the job's `result`.
+
+    def _config_base() -> Path:
+        svc = open_service()
+        try:
+            return svc.config.base_dir
+        finally:
+            svc.close()
+
+    @app.get("/api/research/meta")
+    def research_meta() -> dict[str, Any]:
+        """Readiness + auth status + form defaults for the Research tab."""
+        import importlib.util
+
+        missing = [m for m in researchmod.RUNTIME_IMPORTS if importlib.util.find_spec(m) is None]
+        svc = open_service()
+        try:
+            base = svc.config.base_dir
+            yt_sources = sorted(
+                name for name, sc in svc.config.sources.items() if sc.type == "youtube"
+            )
+        finally:
+            svc.close()
+        captured = resolve_auth_state(base)
+        return {
+            "ready": not missing,
+            "missing": missing,
+            "pip_requirements": list(researchmod.PIP_REQUIREMENTS),
+            "auth": {
+                # A DBS-captured login OR notebooklm login's own file works.
+                "configured": bool(captured) or default_state_present(),
+                "captured_path": captured,
+                "capture_target": str(base / DBS_STATE_SUBPATH),
+            },
+            "default_questions": list(DEFAULT_QUESTIONS),
+            "youtube_sources": yt_sources,
+        }
+
+    @app.post("/api/research/install")
+    def research_install() -> dict[str, Any]:
+        """Install the [research] extra's deps (server-derived commands)."""
+        _require_setup()
+        import sys as _sys
+
+        reqs = list(researchmod.PIP_REQUIREMENTS)
+        steps = [("pip install " + " ".join(reqs),
+                  [_sys.executable, "-m", "pip", "install", *reqs])]
+        try:
+            job = setup_mgr.start("install", "research", setupmod.run_commands(steps))
+        except JobAlreadyRunning as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return job.snapshot()
+
+    @app.post("/api/research/login")
+    def research_login() -> dict[str, Any]:
+        """Capture a Google login for NotebookLM (browser opens on the host).
+
+        Same storageState file `notebooklm login` produces — and the same
+        Google account the YouTube connector logs into. Google may block
+        sign-in inside the automated browser (the same caveat as every Google
+        capture); `notebooklm login` on the host is the fallback.
+        """
+        _require_setup()
+        target = str((_config_base() / DBS_STATE_SUBPATH).resolve())
+        capture = setupmod.browser_capture_runner(
+            "browser_storage_state", target, "https://notebooklm.google.com/", lambda: None
+        )
+        if not setupmod.playwright_present():
+            capture = setupmod.chain_runners(
+                setupmod.run_commands(setupmod.playwright_install_commands()), capture
+            )
+        try:
+            job = setup_mgr.start("capture", "notebooklm", capture)
+        except JobAlreadyRunning as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return {**job.snapshot(), "target": target}
+
+    def _research_runner(spec: dict[str, Any], base_dir: Path):
+        """Build the background runner for one research job.
+
+        Runs in a worker thread: any BackupService it needs is opened there
+        (fresh SQLite connection), never shared from the request thread.
+        """
+
+        def runner(emit) -> dict[str, Any]:
+            auth_path = resolve_auth_state(base_dir)
+            common: dict[str, Any] = dict(
+                questions=spec["questions"] or None,
+                notebook_name=spec["notebook_name"] or None,
+                infographic=spec["infographic"],
+                infographic_orientation=spec["infographic_orientation"],
+                infographic_path=spec["infographic_path"],
+                auth_state_path=auth_path,
+                on_progress=emit,
+            )
+            try:
+                if spec["mode"] == "backup":
+                    svc = BackupService.from_config_file(config_path)
+                    try:
+                        rows = list(svc.storage.iter_items(ExportQuery(
+                            sources=spec["sources"] or None, item_types=["video"],
+                        )))
+                    finally:
+                        svc.close()
+                    videos = researchmod.videos_from_rows(
+                        rows, lists=spec["lists"] or None, limit=spec["count"]
+                    )
+                    if not videos:
+                        raise RuntimeError(
+                            "no backed-up YouTube videos matched — run a backup on a "
+                            "youtube source first"
+                        )
+                    emit(f"Using {len(videos)} video(s) from the backup database.")
+                    label = "backup:" + (",".join(spec["sources"]) if spec["sources"] else "youtube")
+                    result = researchmod.run_pipeline_for_videos(
+                        spec["topic"], videos, source_label=label, **common
+                    )
+                else:
+                    result = researchmod.run_pipeline(
+                        spec["topic"], spec["queries"] or [spec["topic"]],
+                        per_query_count=spec["per_query_count"],
+                        count=spec["count"], months=spec["months"], **common,
+                    )
+            except researchmod.NotebookLMAuthError as exc:
+                raise RuntimeError(
+                    "NotebookLM login required or expired — use the “NotebookLM login” "
+                    "button (or run `notebooklm login` on the host), then retry."
+                ) from exc
+            return {
+                "topic": spec["topic"],
+                "report": researchmod.render_report(result),
+                "indexed": len(result.indexed_videos),
+                "total": len(result.outcomes),
+                "notebook_id": result.notebook_id,
+                "infographic_path": result.infographic_path,
+            }
+
+        return runner
+
+    @app.post("/api/research")
+    def start_research(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        topic = (payload.get("topic") or "").strip()
+        if not topic:
+            raise HTTPException(status_code=400, detail="'topic' is required")
+        mode = payload.get("mode") or "search"
+        if mode not in ("search", "backup"):
+            raise HTTPException(status_code=400, detail="'mode' must be 'search' or 'backup'")
+
+        def _strlist(key: str) -> list[str]:
+            v = payload.get(key) or []
+            if not isinstance(v, list):
+                raise HTTPException(status_code=400, detail=f"'{key}' must be a list of strings")
+            return [str(x).strip() for x in v if str(x).strip()]
+
+        def _int(key: str, default: int) -> int:
+            try:
+                return int(payload.get(key, default) or default)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"'{key}' must be an integer")
+
+        base = _config_base()
+        infographic = bool(payload.get("infographic"))
+        spec = {
+            "mode": mode,
+            "topic": topic,
+            "queries": _strlist("queries"),
+            "sources": _strlist("sources"),
+            "lists": _strlist("lists"),
+            "questions": _strlist("questions"),
+            "count": _int("count", 10),
+            "per_query_count": _int("per_query_count", 10),
+            "months": _int("months", 6),
+            "notebook_name": (payload.get("notebook_name") or "").strip(),
+            "infographic": infographic,
+            "infographic_orientation": payload.get("infographic_orientation") or "landscape",
+            # Written on the server host; the report's Pipeline Metadata shows it.
+            "infographic_path": str(base / "research" / "infographic.png") if infographic else None,
+        }
+        if infographic:
+            (base / "research").mkdir(parents=True, exist_ok=True)
+        try:
+            job = research_mgr.start("research", topic, _research_runner(spec, base))
+        except JobAlreadyRunning as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return job.snapshot()
+
+    @app.get("/api/research/current")
+    def research_current() -> dict[str, Any]:
+        return research_mgr.current() or {"status": "idle"}
+
+    @app.get("/api/research/{job_id}")
+    def research_get(job_id: int) -> dict[str, Any]:
+        snap = research_mgr.get(job_id)
+        if snap is None:
+            raise HTTPException(status_code=404, detail=f"no such research job {job_id}")
+        return snap
+
+    @app.get("/api/research/{job_id}/stream")
+    def research_stream(job_id: int):
+        if research_mgr.get(job_id) is None:
+            raise HTTPException(status_code=404, detail=f"no such research job {job_id}")
+
+        def gen():
+            for line in research_mgr.stream(job_id):
+                if line is None:
+                    yield ": keep-alive\n\n"
+                else:
+                    yield f"data: {json.dumps({'line': line})}\n\n"
+            snap = research_mgr.get(job_id) or {}
+            yield f"event: end\ndata: {json.dumps(snap)}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @app.get("/api/research/{job_id}/report")
+    def research_report(job_id: int):
+        snap = research_mgr.get(job_id)
+        if snap is None:
+            raise HTTPException(status_code=404, detail=f"no such research job {job_id}")
+        result = snap.get("result") or {}
+        if snap["status"] != "done" or not result.get("report"):
+            raise HTTPException(status_code=409, detail="report not ready")
+        return Response(
+            content=result["report"],
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="research-{job_id}.md"'},
         )
 
     # -- static frontend ----------------------------------------------------

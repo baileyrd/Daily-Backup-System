@@ -612,6 +612,17 @@ def _slugify(text: str) -> str:
     return slug or "research"
 
 
+def _resolve_auth_state(auth_state: Optional[Path]) -> Optional[str]:
+    """The NotebookLM storage-state to use: an explicit --auth-state wins, then
+    the file the web UI's "NotebookLM login" captured next to the config, then
+    None (notebooklm-py falls back to its own `notebooklm login` file)."""
+    if auth_state is not None:
+        return str(auth_state)
+    from .research.notebooklm_client import resolve_auth_state
+
+    return resolve_auth_state(Path(_state["config"]).resolve().parent)
+
+
 @research_app.command("youtube")
 def research_youtube(
     topic: str = typer.Argument(..., help='Research topic, e.g. "claude code skills".'),
@@ -629,12 +640,17 @@ def research_youtube(
     infographic_orientation: str = typer.Option("landscape", "--infographic-orientation"),
     out: Optional[Path] = typer.Option(None, "--out", "-o", help="Output markdown path (default: ./<slug>.md)."),
     notebook_name: Optional[str] = typer.Option(None, "--notebook-name"),
+    auth_state: Optional[Path] = typer.Option(
+        None, "--auth-state",
+        help="NotebookLM storageState JSON (default: the web UI's captured login, "
+             "else `notebooklm login`'s own file).",
+    ),
 ) -> None:
     """Search YouTube, feed videos into a NotebookLM notebook, write a markdown research report.
 
     Not a backup: this is a one-shot pipeline with nothing persisted between
-    invocations. NotebookLM auth is managed out-of-band; run `notebooklm
-    login` once before using this command.
+    invocations. NotebookLM needs a Google login captured once — via the web
+    UI's "NotebookLM login" button or `notebooklm login`.
     """
     from .research import NotebookLMAuthError, ResearchPipelineError, render_report, run_pipeline
 
@@ -654,11 +670,14 @@ def research_youtube(
             infographic=infographic,
             infographic_orientation=infographic_orientation,
             infographic_path=infographic_path,
+            auth_state_path=_resolve_auth_state(auth_state),
+            on_progress=lambda line: typer.secho(line, err=True, dim=True),
         )
     except NotebookLMAuthError:
         typer.secho(
-            "NotebookLM authentication is missing or expired. Run `notebooklm login` "
-            "once (opens a browser for Google sign-in), then re-run this command.",
+            "NotebookLM authentication is missing or expired. Capture a Google login "
+            "via the web UI's \"NotebookLM login\" button (dbs serve --allow-setup) or "
+            "run `notebooklm login`, then re-run this command.",
             fg=typer.colors.RED, err=True,
         )
         raise typer.Exit(4)
@@ -693,13 +712,18 @@ def research_youtube_backup(
     infographic_orientation: str = typer.Option("landscape", "--infographic-orientation"),
     out: Optional[Path] = typer.Option(None, "--out", "-o", help="Output markdown path (default: ./<slug>.md)."),
     notebook_name: Optional[str] = typer.Option(None, "--notebook-name"),
+    auth_state: Optional[Path] = typer.Option(
+        None, "--auth-state",
+        help="NotebookLM storageState JSON (default: the web UI's captured login, "
+             "else `notebooklm login`'s own file).",
+    ),
 ) -> None:
     """Send already backed-up YouTube videos through NotebookLM and write a markdown research report.
 
     Reads videos from the backup database (a `youtube` source you've already
     run `dbs backup` on) instead of searching YouTube live — the backup run
-    itself never touches NotebookLM. Auth is managed out-of-band; run
-    `notebooklm login` once before using this command.
+    itself never touches NotebookLM. NotebookLM needs a Google login captured
+    once — via the web UI's "NotebookLM login" button or `notebooklm login`.
     """
     from .research import (
         NotebookLMAuthError,
@@ -745,11 +769,14 @@ def research_youtube_backup(
             infographic=infographic,
             infographic_orientation=infographic_orientation,
             infographic_path=infographic_path,
+            auth_state_path=_resolve_auth_state(auth_state),
+            on_progress=lambda line: typer.secho(line, err=True, dim=True),
         )
     except NotebookLMAuthError:
         typer.secho(
-            "NotebookLM authentication is missing or expired. Run `notebooklm login` "
-            "once (opens a browser for Google sign-in), then re-run this command.",
+            "NotebookLM authentication is missing or expired. Capture a Google login "
+            "via the web UI's \"NotebookLM login\" button (dbs serve --allow-setup) or "
+            "run `notebooklm login`, then re-run this command.",
             fg=typer.colors.RED, err=True,
         )
         raise typer.Exit(4)
