@@ -115,7 +115,7 @@ on by default — `dbs serve`) can do the setup for you:
 |---|---|---|
 | **raindrop** | `RAINDROP_TOKEN` | set it in *API keys* |
 | **skool** | a `skool-downloader` checkout (`downloads_dir` + `downloader_cwd`) | set the paths; **Skool login** (on the Sources row) captures your session into its `.auth/`; optionally `downloader_cmd` to fetch first (below) |
-| **reddit** | `[reddit]` extra + `playwright install chromium`; a logged-in session dir | **Install**, then **Reddit login** — opens a browser on the host, you log in and close it; the session dir + `REDDIT_SESSION_DIR` are captured for you. Make sure reddit.com shows you logged in before closing (with *Continue with Google*, finish the redirect back to reddit first). The account is auto-detected from the session — `username` in the source config is optional |
+| **reddit** | `[reddit]` extra + `playwright install chromium`; a logged-in session dir | **Install**, then **Reddit login** — opens a browser on the host, you log in and close it; the session dir + `REDDIT_SESSION_DIR` are captured for you. Make sure reddit.com shows you logged in before closing (with *Continue with Google*, finish the redirect back to reddit first). The account is auto-detected from the session — `username` in the source config is optional. If runs fail with HTTP 403 even after re-capturing, set `headless = false` for the source |
 | **youtube** | `[youtube]` extra; a `cookies.txt` *or* `cookies_from_browser` | **Install**, then **YouTube login** — captures a `cookies.txt` and sets `YOUTUBE_COOKIES_FILE`; or skip capture and set `cookies_from_browser` (e.g. `chrome`) in the source config |
 
 #### Capturing a login from the UI

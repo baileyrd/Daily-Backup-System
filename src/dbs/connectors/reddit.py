@@ -5,8 +5,18 @@ but its **cookie-authenticated JSON listings** work with a logged-in browser
 session: ``GET /user/<name>/saved.json`` pages through the exact same data the
 site renders, with real HTTP statuses instead of scrape-able markup. So this
 connector loads your captured **persistent browser session** (Playwright) and
-uses its request context (which shares the profile's cookies) to page the JSON
-feed — no DOM scraping, no dependence on Reddit's ``shreddit`` web components.
+pages the JSON feed with a same-origin ``fetch`` evaluated **inside a real
+browser page** on reddit.com — no DOM scraping, no dependence on Reddit's
+``shreddit`` web components.
+
+Why in-page fetch and not Playwright's request context: Reddit's edge
+fingerprints HTTP clients. ``context.request`` shares the profile's cookies but
+is a separate network stack with a non-Chrome TLS/HTTP2 fingerprint, and Reddit
+403s it even with perfectly valid cookies. A fetch evaluated in the page IS
+Chrome — genuine fingerprint, client hints, and cookies. For the same reason,
+headless runs scrub the ``HeadlessChrome`` token from the user agent (see
+``_launch_context``); if Reddit still blocks your network, ``headless = false``
+in the source config is the escape hatch.
 
 Login is verified up front via ``GET /api/me.json``: logged-out sessions return
 an empty body, which raises a clear :class:`ConnectorAuthError` instead of the
@@ -41,6 +51,7 @@ surfaces as a clear :class:`ConnectorConfigError` at run time.
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,6 +80,51 @@ from ..core import (
 from ._util import ext_for_mime
 
 _TYPES = ("post", "comment")
+
+# Evaluated inside a real reddit.com page: same-origin fetch with the page's
+# cookies, returning {status, text}. Text-then-parse (not r.json()) so a 200
+# HTML block page surfaces as a ValueError from _EvalResponse.json(), which the
+# callers already convert to TransientFetchError.
+_FETCH_JS = (
+    "(u) => fetch(u, {credentials: 'same-origin', headers: {accept: 'application/json'}})"
+    ".then(r => r.text().then(t => ({status: r.status, text: t})))"
+)
+
+
+class _EvalResponse:
+    """Duck-types the slice of Playwright's APIResponse the connector uses."""
+
+    def __init__(self, status: int, text: str) -> None:
+        self.status = status
+        self.text = text
+
+    def json(self) -> Any:
+        return json.loads(self.text)
+
+
+class _PageRequester:
+    """In-page-fetch transport with the same ``.get(url)`` surface as
+    Playwright's APIRequestContext (``.status``/``.json()``).
+
+    The request is a same-origin ``fetch`` evaluated inside a real Chromium
+    page on reddit.com — genuine TLS/HTTP2 fingerprint, client hints, and
+    cookies. Playwright's separate request context gets 403'd by Reddit's bot
+    protection even with valid cookies; this does not.
+    """
+
+    def __init__(self, page: Any, logger: Any) -> None:
+        self._page = page
+        self._logger = logger
+
+    def get(self, url: str) -> _EvalResponse:
+        try:
+            payload = self._page.evaluate(_FETCH_JS, url)
+        except Exception as exc:  # fetch rejection, page/context destroyed
+            raise TransientFetchError(f"reddit: in-page fetch of {url} failed: {exc}") from exc
+        status, text = int(payload["status"]), payload["text"]
+        if not 200 <= status < 300:
+            self._logger.debug("reddit: HTTP %s from %s; body starts: %.200s", status, url, text)
+        return _EvalResponse(status, text)
 
 
 class RedditConfig(BaseModel):
@@ -106,7 +162,9 @@ class RedditConnector(Connector):
         "and you CLOSE the window to finish. Make sure you end up logged-in ON "
         "reddit.com before closing — with ‘Continue with Google’, finish the "
         "redirect back to reddit first. The account is auto-detected from the "
-        "session; the username option is just an optional cross-check."
+        "session; the username option is just an optional cross-check. If "
+        "backups fail with HTTP 403 even after re-capturing, set headless = "
+        "false for the source in dbs.toml."
     )
     config_model = RedditConfig
     secret_keys = ("REDDIT_SESSION_DIR",)
@@ -196,11 +254,11 @@ class RedditConnector(Connector):
 
         Playwright is imported lazily here so the module imports without the
         optional ``dbs[reddit]`` extra. Raises :class:`ConnectorConfigError` if
-        the dependency is missing or the session directory is invalid. This is
-        the only Playwright-touching method: the persistent context is launched
-        purely to load the captured cookies from disk, and its request context
-        (``context.request``, which shares those cookies) does all the HTTP —
-        no page is ever opened.
+        the dependency is missing or the session directory is invalid. This
+        (with :meth:`_launch_context`) is the only Playwright-touching code:
+        the persistent context loads the captured cookies from disk, one page
+        opens reddit.com to establish the origin, and every request is a
+        same-origin fetch evaluated in that page (see :class:`_PageRequester`).
         """
         cfg: RedditConfig = ctx.config  # type: ignore[assignment]
         try:
@@ -220,15 +278,43 @@ class RedditConnector(Connector):
             )
 
         with sync_playwright() as pw:
-            context = pw.chromium.launch_persistent_context(
-                user_data_dir=str(session_dir), headless=cfg.headless
-            )
+            context = self._launch_context(pw, cfg, session_dir)
             try:
-                req = context.request
+                page = context.new_page()
+                # Establish a real www.reddit.com document for the same-origin
+                # fetches. Deliberately not checking the navigation status: a
+                # blocked page still sets the origin, and the me.json fetch
+                # below produces the real, actionable error.
+                page.goto("https://www.reddit.com/", wait_until="domcontentloaded")
+                req = _PageRequester(page, ctx.logger)
                 name = self._verify_login(req, cfg, ctx)
                 yield from self._walk_saved_json(req, name, cfg, ctx)
             finally:
                 context.close()
+
+    @staticmethod
+    def _launch_context(pw: Any, cfg: RedditConfig, session_dir: Path) -> Any:
+        """Launch the captured persistent profile, dressed as a regular Chrome.
+
+        Headless Chromium advertises ``HeadlessChrome/<ver>`` in its user
+        agent — an instant bot signal to Reddit's edge. Probe the launched
+        browser's own UA and, if needed, relaunch once with the token scrubbed
+        (version-exact by construction; Playwright derives the client-hint
+        metadata from the supplied UA, so brands stay consistent).
+        """
+        kwargs: dict[str, Any] = dict(
+            user_data_dir=str(session_dir),
+            headless=cfg.headless,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        context = pw.chromium.launch_persistent_context(**kwargs)
+        probe = context.pages[0] if context.pages else context.new_page()
+        ua = probe.evaluate("() => navigator.userAgent")
+        if "HeadlessChrome" in ua:
+            context.close()
+            kwargs["user_agent"] = ua.replace("HeadlessChrome", "Chrome")
+            context = pw.chromium.launch_persistent_context(**kwargs)
+        return context
 
     # -- authenticated JSON feed (fake-injectable: needs only req.get()) -----
 
@@ -311,8 +397,12 @@ class RedditConnector(Connector):
             return
         if status in (401, 403):
             raise ConnectorAuthError(
-                f"reddit: {url} returned HTTP {status} — the session cookies were "
-                f"rejected; re-run the ‘Reddit login’ capture."
+                f"reddit: {url} returned HTTP {status} — Reddit refused the "
+                f"authenticated request. Either the session cookies were rejected "
+                f"(re-run the ‘Reddit login’ capture) or Reddit's bot protection "
+                f"is blocking the automated browser; if a fresh capture still "
+                f"fails, set `headless = false` for this source in dbs.toml and "
+                f"retry."
             )
         if status == 429:
             raise RateLimitedError(f"reddit: rate-limited (HTTP 429) at {url}")
