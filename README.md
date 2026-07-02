@@ -232,6 +232,7 @@ files — set `store_media` on the source:
 type = "skool"
 enabled = true
 # communities = ["your-community"]   # optional; omit to auto-detect every community you've joined
+# courses = ["your-community/Course Title"]  # optional; back up only these courses (title or slug)
 downloads_dir = "~/skool-backup"
 store_media = true              # archive media bytes into the DB
 max_media_mb = 200             # per-file cap; 0 = no limit (files over the cap
@@ -258,6 +259,7 @@ the DB too:
 [sources.courses]
 type = "skool"
 # communities = ["your-community"]   # optional; omit to auto-detect every community you've joined
+# courses = ["your-community/Course Title"]  # optional; back up only these courses (title or slug)
 downloads_dir = "~/skool-backup"
 store_media = true              # ...and pull the downloaded files into the DB
 ```

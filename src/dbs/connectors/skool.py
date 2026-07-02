@@ -135,6 +135,11 @@ class SkoolConfig(BaseModel):
     # Community slugs (or full classroom URLs) to back up. Empty = auto-discover
     # the communities the logged-in account has joined.
     communities: list[str] = []
+    # Only back up these courses (titles or Skool URL slugs, case-insensitive).
+    # Prefix with a community slug to scope: "chase-ai/Claude Code Masterclass".
+    # Empty = all courses. While set, enumeration is partial, so the deletion
+    # sweep is skipped — nothing already backed up gets marked deleted.
+    courses: list[str] = []
     include_kinds: list[str] = list(_KINDS)
     checkpoint_every: int = Field(default=200, ge=1)
     headless: bool = True
@@ -220,7 +225,16 @@ class SkoolConnector(Connector):
 
         cursor["items_seen"] = seen
         yield Checkpoint(Cursor(dict(cursor)), note="final")
-        yield ReconcileMarker(live_ids=live_ids)
+        if cfg.courses:
+            # A course filter makes the walk a partial enumeration: anything
+            # outside it never shows up in live_ids, so a reconcile sweep would
+            # soft-delete every unselected course/lesson. Skip it instead.
+            ctx.logger.info(
+                "skool: `courses` filter active — deletion detection skipped "
+                "(partial enumeration)"
+            )
+        else:
+            yield ReconcileMarker(live_ids=live_ids)
 
     # -- acquisition (the only Playwright-touching part; overridden in tests) --
 
@@ -326,8 +340,12 @@ class SkoolConnector(Connector):
                 )
             community_dir = downloads / _safe(slug)
             used_course_dirs: set[str] = set()
+            skipped_courses = 0
             for course in courses:
                 course_slug = course.get("slug") or course.get("id")
+                if not _course_selected(cfg.courses, slug, course):
+                    skipped_courses += 1
+                    continue
                 yield {
                     "_kind": "course",
                     "courseName": course.get("title") or course_slug,
@@ -357,11 +375,19 @@ class SkoolConnector(Connector):
                     )] += 1
                     yield lesson
 
+            if courses and skipped_courses == len(courses):
+                ctx.logger.warning(
+                    "skool: %s — the `courses` filter matched none of the %d "
+                    "course(s). Available titles: %s",
+                    slug, len(courses),
+                    ", ".join(repr(c.get("title") or c.get("slug")) for c in courses),
+                )
             # A silent zero must never hide again: say what happened per community.
             ctx.logger.info(
                 "skool: %s lessons — %d video(s) downloaded, %d cached, "
-                "%d without native video, %d failed",
-                slug, stats["downloaded"], stats["cached"], stats["none"], stats["failed"],
+                "%d without native video, %d failed (%d course(s) filtered out)",
+                slug, stats["downloaded"], stats["cached"], stats["none"],
+                stats["failed"], skipped_courses,
             )
 
     # -- browser helpers (thin; not unit-tested) ----------------------------
@@ -947,6 +973,31 @@ def _find_lesson_node(next_data: dict[str, Any], lesson_id: Any) -> dict[str, An
         if isinstance(fallback, dict) and fallback.get("id"):
             return fallback
     return bfs(next_data)
+
+
+def _course_selected(
+    selectors: list[str], community_slug: str, course: dict[str, Any]
+) -> bool:
+    """Whether a course passes the config's ``courses`` filter.
+
+    Each selector is a course title or Skool URL slug, compared
+    case-insensitively; a "community/course" form scopes the selector to one
+    community. An empty filter selects everything.
+    """
+    if not selectors:
+        return True
+    title = str(course.get("title") or "").strip().lower()
+    slug = str(course.get("slug") or "").strip().lower()
+    for sel in selectors:
+        want = str(sel).strip().lower()
+        if "/" in want:
+            comm, _, want = want.partition("/")
+            if comm.strip() != community_slug.strip().lower():
+                continue
+            want = want.strip()
+        if want and want in (title, slug):
+            return True
+    return False
 
 
 def _course_dir_name(course: dict[str, Any], course_slug: str, used: set[str]) -> str:

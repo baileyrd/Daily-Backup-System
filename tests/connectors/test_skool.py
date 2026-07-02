@@ -120,6 +120,35 @@ def test_unavailable_video_is_not_linked():
     assert [m for m in item.media if m.kind == "video"] == []
 
 
+def test_course_selected_matching():
+    from dbs.connectors.skool import _course_selected
+
+    course = {"title": "Claude Code Masterclass", "slug": "b787b647"}
+    assert _course_selected([], "chase-ai", course) is True  # no filter = all
+    # Title or slug, case-insensitive.
+    assert _course_selected(["claude code masterclass"], "chase-ai", course) is True
+    assert _course_selected(["B787B647"], "chase-ai", course) is True
+    assert _course_selected(["Other Course"], "chase-ai", course) is False
+    # "community/course" scopes the selector to one community.
+    assert _course_selected(
+        ["chase-ai/Claude Code Masterclass"], "chase-ai", course) is True
+    assert _course_selected(
+        ["other-comm/Claude Code Masterclass"], "chase-ai", course) is False
+    # Any selector matching is enough.
+    assert _course_selected(
+        ["Nope", "chase-ai/claude code masterclass"], "chase-ai", course) is True
+
+
+def test_courses_filter_suppresses_reconcile_marker():
+    # A course filter is a partial enumeration: emitting a ReconcileMarker
+    # would soft-delete everything outside the filter. It must be withheld.
+    cfg = SkoolConfig(downloads_dir="/dl", courses=["Course X"])
+    conn = _connector([_community(), _course(), _lesson("les1")])
+    events = list(conn.fetch(_ctx(cfg)))
+    assert [e for e in events if isinstance(e, ReconcileMarker)] == []
+    assert any(isinstance(e, BackupItem) for e in events)  # items still flow
+
+
 def test_include_kinds_filter_keeps_excluded_ids_live():
     cfg = SkoolConfig(downloads_dir="/dl", include_kinds=["lesson"])
     conn = _connector([_community(), _course(), _lesson("les1")])
