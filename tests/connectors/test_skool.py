@@ -605,3 +605,70 @@ def test_lesson_item_prefers_local_video_over_external_link():
     assert len(vids) == 1
     assert vids[0].url == "/dl/comm/course/les1/video.mp4"
     assert vids[0].filename == "video.mp4"
+
+
+# -- string-encoded metadata normalization -------------------------------------
+
+
+def test_lesson_fields_decodes_json_string_metadata():
+    from dbs.connectors.skool import _lesson_fields
+
+    node = {"id": "l1", "metadata": {
+        "title": "L",
+        "videoId": "mux1",
+        # Skool's metadata map is string-valued: structured fields arrive
+        # JSON-encoded. This crashed with "'str' object has no attribute 'get'".
+        "resources": '[{"downloadUrl": "https://x/f.pdf", "file_name": "f.pdf"}]',
+        "video": '{"url": "https://vimeo.com/1"}',
+    }}
+    fields = _lesson_fields(node)
+    assert fields["resources"] == [{"downloadUrl": "https://x/f.pdf", "file_name": "f.pdf"}]
+    assert fields["videoLink"] == "https://vimeo.com/1"
+    assert fields["videoId"] == "mux1"
+
+
+def test_lesson_fields_tolerates_plain_and_garbage_values():
+    from dbs.connectors.skool import _lesson_fields
+
+    # video as a bare URL string; resources as undecodable garbage.
+    node = {"metadata": {"video": "https://loom.com/v/1", "resources": "not-json"}}
+    fields = _lesson_fields(node)
+    assert fields["videoLink"] == "https://loom.com/v/1"
+    assert fields["resources"] == []
+    # dict-shaped values still work unchanged; non-dict resource entries dropped.
+    node = {"metadata": {"video": {"url": "https://v/2"},
+                         "resources": ["junk", {"downloadUrl": "https://x/a"}]}}
+    fields = _lesson_fields(node)
+    assert fields["videoLink"] == "https://v/2"
+    assert fields["resources"] == [{"downloadUrl": "https://x/a"}]
+    assert _lesson_fields({}) == {"videoLink": None, "videoId": None, "resources": []}
+
+
+def test_parse_lessons_with_string_encoded_fields():
+    cd = {"props": {"pageProps": {"course": {"children": [
+        {"course": {"id": "l1", "metadata": {
+            "title": "L", "resources": '[{"file_name": "a.pdf", "downloadUrl": "https://x/a"}]'}},
+         "children": []},
+    ]}}}}
+    out = _parse_lessons(cd)
+    assert out[0]["resources"][0]["file_name"] == "a.pdf"
+    assert out[0]["hasVideo"] is False
+
+
+def test_download_resources_skips_non_dict_entries(tmp_path):
+    conn = SkoolConnector()
+    page = _FakePage(fetch={})
+    lesson = {"lessonId": "l1", "resources": ["oops-a-string"]}
+    out = conn._download_resources(page, lesson, tmp_path, "c", "c", _ctx())
+    assert out == []  # no crash, nothing written
+
+
+def test_process_lesson_unexpected_error_never_kills_the_run(tmp_path, caplog):
+    class _Exploding(_LessonConn):
+        def _enrich_lesson(self, page, lesson, slug, course_slug, ctx):
+            raise AttributeError("'str' object has no attribute 'get'")
+
+    with caplog.at_level("WARNING", logger="test"):
+        status, _ = _process(_Exploding(), tmp_path)
+    assert status == "failed"  # degraded to a summary count, not a crash
+    assert any("processing lesson" in r.message for r in caplog.records)
