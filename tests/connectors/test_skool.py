@@ -745,6 +745,67 @@ def test_process_lesson_resource_failure_withholds_sidecar(tmp_path):
     assert conn2.enriched == 1  # no fast path: really revisited
 
 
+# -- url2obs markdown lesson notes ------------------------------------------------
+
+
+def test_process_lesson_writes_url2obs_note(tmp_path):
+    import json as _json
+
+    desc = "[v2]" + _json.dumps({"type": "doc", "content": [
+        {"type": "paragraph", "content": [{"type": "text", "text": "Welcome!"}]},
+        {"type": "codeBlock", "attrs": {"language": "bash"},
+         "content": [{"type": "text", "text": "echo hi"}]},
+    ]})
+    conn = _LessonConn(fields={"videoId": "mux1", "videoLink": None,
+                               "resources": [], "desc": desc})
+    lesson = _video_lesson(_group_name="Chase AI+", _course_name="Claude Code Masterclass")
+    _process(conn, tmp_path, lesson=lesson)
+    note = (tmp_path / "comm" / "course" / "l1" / "l1.md").read_text()
+    # url2obs frontmatter convention (matching the Obsidian exporter).
+    assert note.startswith("---\ncategory: \"[[Clippings]]\"\n")
+    assert 'title: "Lesson 1"' in note
+    assert 'source: "https://www.skool.com/comm/classroom/course?md=l1"' in note
+    assert 'tags: ["Chase AI+", "Claude Code Masterclass", "Module 1"]' in note
+    # Body converted from the TipTap desc; downloaded video embedded.
+    assert "Welcome!" in note and "```bash\necho hi\n```" in note
+    assert "![[video.mp4]]" in note
+    # The sidecar records the note -> fast path holds while it exists.
+    sidecar = _json.loads((tmp_path / "comm" / "course" / "l1" / ".meta.json").read_text())
+    assert sidecar["note"] == "l1.md"
+    conn2 = _LessonConn()
+    assert _process(conn2, tmp_path)[0] == "cached" and conn2.enriched == 0
+
+
+def test_note_links_external_video_and_resources(tmp_path):
+    conn = _LessonConn(fields={
+        "videoId": None, "videoLink": "https://youtu.be/x", "resources": [
+            {"downloadUrl": "https://ext/page", "isExternal": True, "title": "Slides"}],
+        "desc": None}, download_ok=False)
+    _process(conn, tmp_path)  # video download fails -> note still written
+    note = (tmp_path / "comm" / "course" / "l1" / "l1.md").read_text()
+    assert "[Video](https://youtu.be/x)" in note
+    assert "- [Slides](https://ext/page)" in note
+
+
+def test_missing_note_reprocesses_cached_lesson(tmp_path):
+    conn = _LessonConn()
+    _process(conn, tmp_path)
+    (tmp_path / "comm" / "course" / "l1" / "l1.md").unlink()  # note lost
+    conn2 = _LessonConn()
+    status, _ = _process(conn2, tmp_path)
+    assert status == "cached" and conn2.enriched == 1  # re-visited, note rewritten
+    assert (tmp_path / "comm" / "course" / "l1" / "l1.md").exists()
+
+
+def test_write_markdown_off_writes_no_note(tmp_path):
+    cfg = SkoolConfig(downloads_dir=str(tmp_path), write_markdown=False)
+    conn = _LessonConn()
+    _process(conn, tmp_path, cfg=cfg)
+    assert not (tmp_path / "comm" / "course" / "l1" / "l1.md").exists()
+    conn2 = _LessonConn()
+    assert _process(conn2, tmp_path, cfg=cfg)[0] == "cached"  # gate not required
+
+
 # -- dir naming migration (rename in place, never re-download) -------------------
 
 
@@ -763,6 +824,9 @@ def test_process_lesson_adopts_legacy_id_named_dir(tmp_path):
     assert status == "cached" and conn2.enriched == 0  # nothing re-downloaded
     assert not legacy.exists()
     assert (new_dir / "video.mp4").read_bytes() == b"video-bytes"
+    # The lesson note follows the folder's new name.
+    assert (new_dir / "01 - Lesson 1.md").exists()
+    assert not (new_dir / "l1.md").exists()
 
 
 def test_process_lesson_renumbers_on_index_shift(tmp_path):
@@ -954,11 +1018,17 @@ def test_find_lesson_node_pageprops_lesson_and_course_course_fallbacks():
     assert node["metadata"]["title"] == "Course payload"
 
 
-def test_lesson_body_maps_from_desc():
-    conn = _connector([_lesson("les1", desc='[v2]{"type": "doc"}')])
+def test_lesson_body_maps_from_desc_as_markdown():
+    tiptap = ('[v2]{"type": "doc", "content": [{"type": "paragraph", '
+              '"content": [{"type": "text", "text": "Hi"}]}]}')
+    conn = _connector([_lesson("les1", desc=tiptap)])
     item = next(e for e in conn.fetch(_ctx()) if isinstance(e, BackupItem))
-    assert item.body == '[v2]{"type": "doc"}'
-    conn = _connector([_lesson("les2")])  # no desc -> no body
+    assert item.body == "Hi"  # converted; raw keeps the verbatim editor JSON
+    assert item.raw["desc"] == tiptap
+    conn = _connector([_lesson("les2", desc="plain notes")])
+    item = next(e for e in conn.fetch(_ctx()) if isinstance(e, BackupItem))
+    assert item.body == "plain notes"
+    conn = _connector([_lesson("les3")])  # no desc -> no body
     item = next(e for e in conn.fetch(_ctx()) if isinstance(e, BackupItem))
     assert item.body is None
 

@@ -44,10 +44,13 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from ._tiptap import tiptap_markdown
 
 from ..core import (
     AuthCapture,
@@ -150,6 +153,10 @@ class SkoolConfig(BaseModel):
     download_videos: bool = True
     # Cap the selected HLS variant's height (e.g. 1080, 720). 0 = best available.
     video_quality: int = Field(default=1080, ge=0)
+    # Write a markdown note of each lesson page (url2obs-convention frontmatter,
+    # body converted from Skool's editor JSON, links to the downloaded media)
+    # into the lesson's folder, next to its video and resources.
+    write_markdown: bool = True
     # Name of the env var holding the path to the Playwright persistent-context
     # directory (your logged-in Skool session). Mirrors reddit's session_dir_env.
     session_dir_env: str = "SKOOL_SESSION_DIR"
@@ -630,15 +637,22 @@ class SkoolConnector(Connector):
             if video_downloaded:
                 lesson["_video_path"] = str(video_dest)
 
-        # A failed video OR failed resources retries next run: no sidecar
-        # (mirrors skool-downloader's videoFailed/resourceFailures gate).
-        if not video_failed and not resource_failures:
+        note_ok = True
+        if cfg.write_markdown:
+            note_ok = _write_lesson_note(
+                lesson_dir, lesson, fields, slug, course_slug, video_downloaded, ctx
+            )
+
+        # A failed video, failed resources, OR a failed note retries next run:
+        # no sidecar (mirrors skool-downloader's videoFailed/resourceFailures gate).
+        if not video_failed and not resource_failures and note_ok:
             _write_sidecar(lesson_dir / ".meta.json", {
                 "lessonId": lesson.get("lessonId"),  # anchors dir-rename migration
                 "videoId": fields.get("videoId"),
                 "videoLink": fields.get("videoLink"),
                 "video_downloaded": video_downloaded,
                 "no_native_video": not fields.get("videoId"),
+                "note": f"{lesson_dir.name}.md" if cfg.write_markdown else None,
                 "resources": [
                     {"filename": r["filename"], "mime": r.get("mime")}
                     for r in lesson["_resources"]
@@ -656,6 +670,12 @@ class SkoolConnector(Connector):
         do sidecars written before external videoLink downloads existed."""
         for r in sidecar.get("resources") or []:
             if not (lesson_dir / (r.get("filename") or "")).exists():
+                return False
+        if cfg.write_markdown:
+            note = sidecar.get("note")
+            # No note recorded (pre-feature sidecar) or gone: one re-visit
+            # writes the lesson's markdown page.
+            if not note or not (lesson_dir / note).exists():
                 return False
         if not cfg.download_videos:
             return True
@@ -875,7 +895,8 @@ class SkoolConnector(Connector):
             item_kind="lesson",
             raw=raw,
             title=raw.get("title") or None,
-            body=raw.get("desc") or None,
+            # Readable markdown (raw keeps the verbatim editor JSON).
+            body=tiptap_markdown(raw.get("desc")) or None,
             tags=tags,
             media=media,
             updated_at=parse_iso(raw.get("updatedAt")),
@@ -1062,7 +1083,9 @@ def _adopt_lesson_dir(lesson_dir: Path, lesson_id: Any, ctx: RunContext) -> None
     Skool inserted/removed a lesson mid-course, renumbering "NN - Title")."""
     if lesson_dir.exists():
         return
-    if _adopt_dir(lesson_dir, lesson_dir.parent / _safe(str(lesson_id)), ctx):
+    legacy = lesson_dir.parent / _safe(str(lesson_id))
+    if _adopt_dir(lesson_dir, legacy, ctx):
+        _rename_note(lesson_dir, legacy.name)
         return
     try:
         siblings = [d for d in lesson_dir.parent.iterdir() if d.is_dir()]
@@ -1071,8 +1094,94 @@ def _adopt_lesson_dir(lesson_dir: Path, lesson_id: Any, ctx: RunContext) -> None
     for sib in siblings:
         sidecar = _load_sidecar(sib / ".meta.json")
         if sidecar and str(sidecar.get("lessonId")) == str(lesson_id):
-            _adopt_dir(lesson_dir, sib, ctx)
+            if _adopt_dir(lesson_dir, sib, ctx):
+                _rename_note(lesson_dir, sib.name)
             return
+
+
+def _rename_note(lesson_dir: Path, old_dir_name: str) -> None:
+    """After a lesson dir rename, keep its note named after the dir
+    (best-effort — a stale name only costs one cosmetic mismatch)."""
+    old = lesson_dir / f"{old_dir_name}.md"
+    new = lesson_dir / f"{lesson_dir.name}.md"
+    if not old.is_file() or old == new or new.exists():
+        return
+    try:
+        old.rename(new)
+        sidecar_path = lesson_dir / ".meta.json"
+        sidecar = _load_sidecar(sidecar_path)
+        if sidecar and sidecar.get("note") == old.name:
+            sidecar["note"] = new.name
+            sidecar_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _write_lesson_note(
+    lesson_dir: Path, lesson: dict[str, Any], fields: dict[str, Any],
+    slug: str, course_slug: str, video_downloaded: bool, ctx: RunContext,
+) -> bool:
+    """Write a markdown note of the lesson page into its folder.
+
+    Follows the url2obs clipper convention the Obsidian exporter mirrors
+    (``category``/``author``/``title``/``description``/``source``/``clipped``/
+    ``published``/``tags``, ``source`` = the original page URL); the body is
+    the lesson's editor content converted to markdown, followed by wiki-links
+    to the downloaded media. Returns False on a write failure so the caller
+    withholds the sidecar and the lesson retries.
+    """
+    from ..export.obsidian import _yaml_list, _yaml_scalar
+
+    title = lesson.get("title") or str(lesson.get("lessonId"))
+    url = f"{_BASE}/{slug}/classroom/{course_slug}?md={lesson.get('lessonId')}"
+    tags = [t for t in (lesson.get("_group_name"), lesson.get("_course_name"),
+                        lesson.get("moduleTitle")) if t]
+    clipped = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    lines = [
+        "---",
+        'category: "[[Clippings]]"',
+        f"author: {_yaml_scalar(None)}",
+        f"title: {_yaml_scalar(title)}",
+        f"description: {_yaml_scalar(None)}",
+        f"source: {_yaml_scalar(url)}",
+        f"clipped: {_yaml_scalar(clipped)}",
+        f"published: {_yaml_scalar(None)}",
+        f"tags: {_yaml_list(tags)}",
+        "---",
+        "",
+    ]
+    body = tiptap_markdown(fields.get("desc"))
+    if body:
+        lines += [body, ""]
+    if video_downloaded:
+        lines += ["![[video.mp4]]", ""]
+    elif fields.get("videoLink"):
+        lines += [f"[Video]({fields['videoLink']})", ""]
+    local = [r for r in lesson.get("_resources") or [] if r.get("filename")]
+    external = [
+        r for r in fields.get("resources") or []
+        if isinstance(r, dict)
+        and (r.get("isExternal") or r.get("is_external"))
+        and r.get("downloadUrl")
+    ]
+    if local or external:
+        lines.append("## Resources")
+        lines += [f"- [[{r['filename']}]]" for r in local]
+        lines += [
+            f"- [{r.get('title') or r['downloadUrl']}]({r['downloadUrl']})"
+            for r in external
+        ]
+        lines.append("")
+    try:
+        lesson_dir.mkdir(parents=True, exist_ok=True)
+        (lesson_dir / f"{lesson_dir.name}.md").write_text(
+            "\n".join(lines), encoding="utf-8"
+        )
+    except OSError as exc:
+        ctx.logger.warning("skool: could not write the lesson note in %s: %s",
+                           lesson_dir, exc)
+        return False
+    return True
 
 
 def _load_sidecar(path: Path) -> dict[str, Any] | None:
