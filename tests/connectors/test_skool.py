@@ -265,10 +265,12 @@ def test_safe_path_segment():
 class _FakePage:
     """Scripted Playwright page: url + evaluate(js, arg) -> payload/raise."""
 
-    def __init__(self, url="https://www.skool.com/c/classroom", next_data=None, fetch=None):
+    def __init__(self, url="https://www.skool.com/c/classroom", next_data=None, fetch=None,
+                 download_urls=None):
         self.url = url
         self._next_data = next_data
         self._fetch = fetch or {}
+        self._download_urls = download_urls or {}
         self.goto_calls: list[str] = []
 
     def goto(self, url, **kw):
@@ -277,6 +279,8 @@ class _FakePage:
     def evaluate(self, js, arg=None):
         if "getElementById" in js:
             return self._next_data
+        if "download-url" in js:  # files-API seam: payload per file_id
+            return self._download_urls.get(arg)
         # resource fetch: return the scripted payload for the URL
         return self._fetch.get(arg)
 
@@ -305,8 +309,8 @@ def test_download_resources_writes_files_and_records_paths(tmp_path):
          "file_content_type": "application/pdf"},
         {"downloadUrl": "https://x/ext", "isExternal": True},  # skipped
     ]}
-    out = conn._download_resources(page, lesson, tmp_path, "comm", "course", _ctx())
-    assert len(out) == 1
+    out, failures = conn._download_resources(page, lesson, tmp_path, "comm", "course", _ctx())
+    assert len(out) == 1 and failures == 0
     dest = tmp_path / "comm" / "course" / "l1" / "f.pdf"
     assert dest.read_bytes() == body
     assert out[0]["path"] == str(dest) and out[0]["mime"] == "application/pdf"
@@ -320,9 +324,49 @@ def test_download_resources_skips_existing_file(tmp_path):
     page = _FakePage(fetch={})  # evaluate would return None -> would fail if called
     lesson = {"lessonId": "l1", "resources": [
         {"downloadUrl": "https://x/f.pdf", "file_name": "f.pdf"}]}
-    out = conn._download_resources(page, lesson, tmp_path, "comm", "course", _ctx())
+    out, failures = conn._download_resources(page, lesson, tmp_path, "comm", "course", _ctx())
     assert dest.read_bytes() == b"already here"  # not overwritten
-    assert out[0]["filename"] == "f.pdf"
+    assert out[0]["filename"] == "f.pdf" and failures == 0
+
+
+def test_download_resources_resolves_file_id_via_files_api(tmp_path):
+    import base64
+
+    # Native resources carry only file_id: the signed URL comes from Skool's
+    # files API (in-page POST), THEN the bytes are fetched.
+    conn = SkoolConnector()
+    body = b"%PDF-1.4 native"
+    page = _FakePage(
+        download_urls={"f1": {"success": True, "url": "https://signed/f1"}},
+        fetch={"https://signed/f1": {"status": 200, "b64": base64.b64encode(body).decode()}})
+    lesson = {"lessonId": "l1", "resources": [{"file_id": "f1", "file_name": "notes.pdf"}]}
+    out, failures = conn._download_resources(page, lesson, tmp_path, "c", "x", _ctx())
+    assert failures == 0
+    assert (tmp_path / "c" / "x" / "l1" / "notes.pdf").read_bytes() == body
+    assert out[0]["filename"] == "notes.pdf"
+
+
+def test_download_resources_counts_failures_for_retry(tmp_path, caplog):
+    conn = SkoolConnector()
+    page = _FakePage(download_urls={"f1": {"success": False, "error": "HTTP 403"}})
+    lesson = {"lessonId": "l1", "resources": [
+        {"file_id": "f1", "file_name": "notes.pdf"},
+        {"title": "no handle at all"},  # no url, no file_id: skipped, not a failure
+    ]}
+    with caplog.at_level("WARNING", logger="test"):
+        out, failures = conn._download_resources(page, lesson, tmp_path, "c", "x", _ctx())
+    assert out == [] and failures == 1
+    assert any("download URL" in r.message for r in caplog.records)
+
+
+def test_resolve_download_url_success_and_refusal():
+    conn = SkoolConnector()
+    ok = _FakePage(download_urls={"f1": {"success": True, "url": "https://signed/f1"}})
+    assert conn._resolve_download_url(ok, "f1", _ctx()) == "https://signed/f1"
+    refused = _FakePage(download_urls={"f1": {"success": False, "error": "HTTP 403"}})
+    assert conn._resolve_download_url(refused, "f1", _ctx()) is None
+    assert conn._resolve_download_url(_FakePage(), "unknown", _ctx()) is None
+    assert conn._resolve_download_url(object(), "f1", _ctx()) is None  # evaluate blows up
 
 
 # --- end-to-end through the engine ----------------------------------------
@@ -369,35 +413,46 @@ def test_volatile_updatedat_does_not_spawn_revisions(storage):
 # -- native (Mux) video download ----------------------------------------------
 
 
-def test_mux_hls_url_from_pageprops_video():
+def test_mux_hls_url_requires_id_match_and_uses_skool_host():
     from dbs.connectors.skool import _mux_hls_url
 
-    nd = {"props": {"pageProps": {"video": {"playbackId": "pb1", "playbackToken": "tok1"}}}}
-    assert _mux_hls_url(nd) == "https://stream.mux.com/pb1.m3u8?token=tok1"
+    nd = {"props": {"pageProps": {"video": {
+        "id": "mux1", "playbackId": "pb1", "playbackToken": "tok1"}}}}
+    assert _mux_hls_url(nd, "mux1") == "https://stream.video.skool.com/pb1.m3u8?token=tok1"
+    # The embedded object can belong to ANOTHER lesson's video: never trust
+    # a mismatched id (skool-downloader parity).
+    assert _mux_hls_url(nd, "other") is None
 
 
-def test_mux_hls_url_deep_search_and_missing():
+def test_mux_hls_url_course_video_fallback_and_missing():
     from dbs.connectors.skool import _mux_hls_url
 
-    nested = {"props": {"pageProps": {"lessonData": {
-        "playbackId": "pb2", "playbackToken": "tok2"}}}}
-    assert _mux_hls_url(nested) == "https://stream.mux.com/pb2.m3u8?token=tok2"
-    assert _mux_hls_url({}) is None
-    assert _mux_hls_url({"props": {"pageProps": {"video": {"playbackId": "pb"}}}}) is None
+    nested = {"props": {"pageProps": {"course": {"video": {
+        "id": "mux2", "playbackId": "pb2", "playbackToken": "tok2"}}}}}
+    assert _mux_hls_url(nested, "mux2") == "https://stream.video.skool.com/pb2.m3u8?token=tok2"
+    assert _mux_hls_url({}, "mux2") is None
+    assert _mux_hls_url(nested, None) is None
+    no_token = {"props": {"pageProps": {"video": {"id": "mux3", "playbackId": "pb"}}}}
+    assert _mux_hls_url(no_token, "mux3") is None
 
 
-def test_ydl_opts_quality_cap_and_ffmpeg_location(tmp_path):
+def test_ydl_opts_matches_skool_downloader_invocation(tmp_path):
     from dbs.connectors.skool import _ydl_opts
 
     dest = tmp_path / "video.mp4"
     opts = _ydl_opts(dest, 1080, "/opt/ffmpeg")
     assert opts["outtmpl"] == str(dest)
-    assert opts["format"] == "best[height<=?1080]"
-    assert opts["ffmpeg_location"] == "/opt/ffmpeg"
+    assert "format" not in opts  # format SORT, never a selector
+    assert opts["format_sort"] == ["res:1080", "vcodec:h264", "acodec:m4a"]
+    assert opts["http_headers"]["Referer"] == "https://www.skool.com/"  # CDN 403s without it
+    assert "User-Agent" in opts["http_headers"]
     assert opts["merge_output_format"] == "mp4"
-    # quality 0 = best available; no ffmpeg_location key when auto-manage is absent
+    assert opts["concurrent_fragment_downloads"] == 8
+    assert opts["postprocessor_args"]["ffmpeg"] == ["-movflags", "+faststart"]
+    assert opts["ffmpeg_location"] == "/opt/ffmpeg"
+    # quality 0 = yt-dlp's default pick; no ffmpeg_location when auto-manage is absent
     opts = _ydl_opts(dest, 0, None)
-    assert opts["format"] == "best"
+    assert "format_sort" not in opts and "format" not in opts
     assert "ffmpeg_location" not in opts
 
 
@@ -410,7 +465,8 @@ def _video_lesson(**kw):
 class _LessonConn(SkoolConnector):
     """Overridable enrich/sniff/download seams for _process_lesson tests."""
 
-    def __init__(self, fields=None, sniff_url="https://stream.mux.com/pb.m3u8?token=t",
+    def __init__(self, fields=None,
+                 sniff_url="https://stream.video.skool.com/pb.m3u8?token=t",
                  download_ok=True, enrich_fail=False):
         self._fields = fields if fields is not None else {
             "videoId": "mux1", "videoLink": None, "resources": []}
@@ -427,7 +483,7 @@ class _LessonConn(SkoolConnector):
             return None
         return dict(self._fields), {"props": {"pageProps": {}}}
 
-    def _sniff_hls_url(self, page, next_data, ctx):
+    def _sniff_hls_url(self, page, next_data, video_id, ctx):
         self.sniffed += 1
         return self._sniff_url
 
@@ -565,6 +621,131 @@ def test_process_lesson_downloads_resources_from_enrichment(tmp_path):
     assert conn3.enriched == 1
 
 
+def test_process_lesson_resource_failure_withholds_sidecar(tmp_path):
+    # A resource that can't be resolved must NOT be recorded as done: no
+    # sidecar -> the lesson page is revisited (and the download retried) next run.
+    fields = {"videoId": None, "videoLink": None, "resources": [
+        {"file_id": "f1", "file_name": "notes.pdf"}]}
+    conn = _LessonConn(fields=fields)
+    page = _FakePage(download_urls={"f1": {"success": False, "error": "HTTP 403"}})
+    cfg = SkoolConfig(downloads_dir=str(tmp_path))
+    status = conn._process_lesson(page, _video_lesson(), tmp_path, "comm", "course",
+                                  cfg, _ctx(cfg))
+    assert status == "none"  # lesson stays indexed with tree-level data
+    assert not (tmp_path / "comm" / "course" / "l1" / ".meta.json").exists()
+    conn2 = _LessonConn(fields=fields)
+    page2 = _FakePage(download_urls={"f1": {"success": False, "error": "HTTP 403"}})
+    conn2._process_lesson(page2, _video_lesson(), tmp_path, "comm", "course", cfg, _ctx(cfg))
+    assert conn2.enriched == 1  # no fast path: really revisited
+
+
+# -- _sniff_hls_url ladder (fake page) ------------------------------------------
+
+
+class _SniffPage:
+    """Scripted player page: thumbnail presence + a queue of poll results."""
+
+    def __init__(self, has_player=True, stream_urls=()):
+        self._has_player = has_player
+        self._stream_urls = list(stream_urls)
+        self.clicked: list[str] = []
+        self.paused = 0
+        self.waited = 0
+
+    def evaluate(self, js, arg=None):
+        if arg is not None and "querySelector(sel)" in js:
+            return self._has_player
+        if "pause()" in js:
+            self.paused += 1
+            return None
+        return self._stream_urls.pop(0) if self._stream_urls else None
+
+    def click(self, sel):
+        self.clicked.append(sel)
+
+    def wait_for_timeout(self, ms):
+        self.waited += 1
+
+
+def test_sniff_hls_url_click_capture_polls_then_pauses():
+    conn = SkoolConnector()
+    url = "https://stream.video.skool.com/pb.m3u8?token=t"
+    page = _SniffPage(stream_urls=[None, url])  # captured on the second poll tick
+    assert conn._sniff_hls_url(page, {}, "mux1", _ctx()) == url
+    assert page.clicked == ['div[class*="MuxThumbnailWrapper"]']
+    assert page.paused == 1  # playback stopped once captured
+    assert page.waited == 1
+
+
+def test_sniff_hls_url_reconstructs_when_player_absent():
+    conn = SkoolConnector()
+    page = _SniffPage(has_player=False)
+    nd = {"props": {"pageProps": {"video": {
+        "id": "mux1", "playbackId": "pb", "playbackToken": "t"}}}}
+    assert (conn._sniff_hls_url(page, nd, "mux1", _ctx())
+            == "https://stream.video.skool.com/pb.m3u8?token=t")
+    assert page.clicked == []  # thumbnail absent -> no click attempted
+    # Capture dry AND no embedded playback data -> nothing to download.
+    assert conn._sniff_hls_url(_SniffPage(), {}, "mux1", _ctx()) is None
+
+
+# -- _load_next_data retry ladder ------------------------------------------------
+
+
+class _RetryPage:
+    """goto raises `failures` times, then navigation succeeds."""
+
+    def __init__(self, failures, exc=None, next_data=None):
+        self._failures = failures
+        self._exc = exc if exc is not None else TimeoutError("nav timed out")
+        self._next_data = next_data or {"props": {"pageProps": {}}}
+        self.goto_calls = 0
+        self.waits: list[int] = []
+
+    def goto(self, url, **kw):
+        self.goto_calls += 1
+        if self.goto_calls <= self._failures:
+            raise self._exc
+
+    def wait_for_selector(self, sel, **kw):
+        assert sel == "#__NEXT_DATA__"
+
+    def wait_for_timeout(self, ms):
+        self.waits.append(ms)
+
+    def evaluate(self, js, arg=None):
+        return self._next_data
+
+
+def test_load_next_data_retries_timeouts_with_linear_backoff():
+    conn = SkoolConnector()
+    page = _RetryPage(failures=2)
+    assert conn._load_next_data(page, "https://www.skool.com/x", _ctx()) == {
+        "props": {"pageProps": {}}}
+    assert page.goto_calls == 3
+    assert page.waits == [2000, 4000]
+
+
+def test_load_next_data_gives_up_after_three_timeouts():
+    from dbs.core.errors import TransientFetchError
+
+    conn = SkoolConnector()
+    page = _RetryPage(failures=99)
+    with pytest.raises(TransientFetchError):
+        conn._load_next_data(page, "https://www.skool.com/x", _ctx())
+    assert page.goto_calls == 3
+
+
+def test_load_next_data_non_timeout_error_raises_immediately():
+    from dbs.core.errors import TransientFetchError
+
+    conn = SkoolConnector()
+    page = _RetryPage(failures=99, exc=ValueError("boom"))
+    with pytest.raises(TransientFetchError):
+        conn._load_next_data(page, "https://www.skool.com/x", _ctx())
+    assert page.goto_calls == 1 and page.waits == []
+
+
 # -- _find_lesson_node ---------------------------------------------------------
 
 
@@ -595,6 +776,48 @@ def test_find_lesson_node_fallback_and_missing():
     assert _find_lesson_node(elsewhere, "l9")["metadata"]["title"] == "Elsewhere"
     assert _find_lesson_node(elsewhere, "nope") is None
     assert _find_lesson_node({}, None) is None
+
+
+def test_find_lesson_node_pageprops_lesson_and_course_course_fallbacks():
+    from dbs.connectors.skool import _find_lesson_node
+
+    # skool-downloader's explicit ladder when the tree misses:
+    # pageProps.lesson first (used even without an id match)...
+    with_lesson = {"props": {"pageProps": {
+        "course": {"id": "root", "children": []},
+        "lesson": {"id": "whatever", "metadata": {"title": "From pageProps.lesson"}},
+    }}}
+    node = _find_lesson_node(with_lesson, "l-not-in-tree")
+    assert node["metadata"]["title"] == "From pageProps.lesson"
+    # ...then the course page's own payload node (pageProps.course.course).
+    with_course = {"props": {"pageProps": {"course": {
+        "id": "wrapper",
+        "course": {"id": "other-id", "metadata": {"title": "Course payload"}},
+        "children": [],
+    }}}}
+    node = _find_lesson_node(with_course, "l-not-in-tree")
+    assert node["metadata"]["title"] == "Course payload"
+
+
+def test_lesson_body_maps_from_desc():
+    conn = _connector([_lesson("les1", desc='[v2]{"type": "doc"}')])
+    item = next(e for e in conn.fetch(_ctx()) if isinstance(e, BackupItem))
+    assert item.body == '[v2]{"type": "doc"}'
+    conn = _connector([_lesson("les2")])  # no desc -> no body
+    item = next(e for e in conn.fetch(_ctx()) if isinstance(e, BackupItem))
+    assert item.body is None
+
+
+def test_parse_courses_carries_access_privacy_and_modules():
+    def nd(meta):
+        return {"props": {"pageProps": {"allCourses": [
+            {"id": "c1", "name": "intro", "metadata": {"title": "I", **meta}}]}}}
+
+    assert _parse_courses(nd({"hasAccess": 1}))[0]["hasAccess"] is True
+    assert _parse_courses(nd({"hasAccess": 0}))[0]["hasAccess"] is False
+    out = _parse_courses(nd({"privacy": 2, "numModules": 3}))[0]
+    assert out["hasAccess"] is None  # unknown, not assumed
+    assert out["privacy"] == 2 and out["numModules"] == 3
 
 
 def test_lesson_item_prefers_local_video_over_external_link():
@@ -641,7 +864,27 @@ def test_lesson_fields_tolerates_plain_and_garbage_values():
     fields = _lesson_fields(node)
     assert fields["videoLink"] == "https://v/2"
     assert fields["resources"] == [{"downloadUrl": "https://x/a"}]
-    assert _lesson_fields({}) == {"videoLink": None, "videoId": None, "resources": []}
+    assert _lesson_fields({}) == {
+        "videoLink": None, "videoId": None, "resources": [], "desc": None}
+
+
+def test_lesson_fields_link_normalization_desc_and_node_fallback():
+    from dbs.connectors.skool import _lesson_fields
+
+    # Link-style resources ({link} without downloadUrl) become external
+    # references; desc passes through raw (may be [v2]-prefixed TipTap JSON).
+    node = {"id": "l1", "metadata": {
+        "title": "L", "desc": '[v2]{"type": "doc"}',
+        "resources": '[{"link": "https://ext/page", "title": "Ext"}]'}}
+    fields = _lesson_fields(node)
+    assert fields["desc"] == '[v2]{"type": "doc"}'
+    res = fields["resources"][0]
+    assert res["downloadUrl"] == "https://ext/page" and res["isExternal"] is True
+    # metadata.resources absent -> the node's own resources list is used.
+    node = {"id": "l1", "metadata": {"title": "L"},
+            "resources": [{"downloadUrl": "https://x/f.pdf", "file_name": "f.pdf"}]}
+    assert _lesson_fields(node)["resources"] == [
+        {"downloadUrl": "https://x/f.pdf", "file_name": "f.pdf"}]
 
 
 def test_parse_lessons_with_string_encoded_fields():
@@ -659,8 +902,8 @@ def test_download_resources_skips_non_dict_entries(tmp_path):
     conn = SkoolConnector()
     page = _FakePage(fetch={})
     lesson = {"lessonId": "l1", "resources": ["oops-a-string"]}
-    out = conn._download_resources(page, lesson, tmp_path, "c", "c", _ctx())
-    assert out == []  # no crash, nothing written
+    out, failures = conn._download_resources(page, lesson, tmp_path, "c", "c", _ctx())
+    assert out == [] and failures == 0  # no crash, nothing written
 
 
 def test_process_lesson_unexpected_error_never_kills_the_run(tmp_path, caplog):

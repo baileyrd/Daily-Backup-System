@@ -82,19 +82,48 @@ _FETCH_BYTES_JS = (
     "status: r.status, "
     "b64: btoa(Array.from(new Uint8Array(b), c => String.fromCharCode(c)).join('')) })))"
 )
-# Signed Mux HLS manifests the player has fetched so far (they carry token=).
-_M3U8_PERF_JS = (
-    "() => performance.getEntriesByType('resource').map(e => e.name)"
-    ".filter(n => n.includes('m3u8') && n.includes('token='))"
+# One poll tick after clicking the Mux player, mirroring skool-downloader:
+# (1) the LAST tokened m3u8 in the performance resource timeline, else
+# (2) a <video src=...m3u8...> found via shadow-DOM BFS.
+_STREAM_URL_JS = (
+    "() => {"
+    " const entries = performance.getEntriesByType('resource')"
+    "  .filter(e => e.name.includes('m3u8') && e.name.includes('token='));"
+    " if (entries.length > 0) return entries[entries.length - 1].name;"
+    " const stack = [document];"
+    " while (stack.length) { const root = stack.pop();"
+    "  const video = root.querySelector('video');"
+    "  if (video && video.src && video.src.includes('m3u8')) return video.src;"
+    "  for (const el of root.querySelectorAll('*')) {"
+    "   if (el.shadowRoot) stack.push(el.shadowRoot);"
+    "  } }"
+    " return null; }"
 )
-# Fallback: find a <video src=...m3u8...> anywhere, including inside shadow DOM.
-_SHADOW_VIDEO_JS = (
-    "() => { const walk = (root) => {"
-    " for (const el of root.querySelectorAll('*')) {"
-    "  if (el.tagName === 'VIDEO' && el.src && el.src.includes('m3u8')) return el.src;"
-    "  if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }"
-    " } return null; };"
-    " return walk(document); }"
+# Whether a selector currently matches (used to skip the player click when the
+# Mux thumbnail isn't on the page, mirroring skool-downloader's hasPlayButton).
+_HAS_SELECTOR_JS = "(sel) => !!document.querySelector(sel)"
+# Pause every <video> (including inside shadow DOM) once the signed URL is
+# captured — a video left playing keeps downloading for the rest of the walk.
+_PAUSE_VIDEOS_JS = (
+    "() => { const stack = [document];"
+    " while (stack.length) { const root = stack.pop();"
+    "  root.querySelectorAll('video').forEach(v => v.pause());"
+    "  for (const el of root.querySelectorAll('*')) {"
+    "   if (el.shadowRoot) stack.push(el.shadowRoot);"
+    "  } } }"
+)
+# Native resources carry only a file_id; the signed download URL comes from a
+# POST to Skool's files API (in-page, so the browser session authenticates it).
+# The response BODY is the URL as plain text. expire=28800 = 8h validity.
+_DOWNLOAD_URL_JS = (
+    "async (fileId) => {"
+    " const apiUrl = `https://api2.skool.com/files/${fileId}/download-url?expire=28800`;"
+    " try {"
+    "  const resp = await fetch(apiUrl, {method: 'POST', credentials: 'include'});"
+    "  if (!resp.ok) return {success: false, error: `HTTP ${resp.status}`};"
+    "  const text = await resp.text();"
+    "  return {success: true, url: text.trim()};"
+    " } catch (e) { return {success: false, error: String(e)}; } }"
 )
 
 
@@ -302,6 +331,9 @@ class SkoolConnector(Connector):
                     "courseName": course.get("title") or course_slug,
                     "courseImageUrl": course.get("coverImageUrl"),
                     "updatedAt": course.get("updatedAt"),
+                    "hasAccess": course.get("hasAccess"),
+                    "privacy": course.get("privacy"),
+                    "numModules": course.get("numModules"),
                     "_group_slug": slug,
                     "groupName": group_name,
                 }
@@ -332,9 +364,8 @@ class SkoolConnector(Connector):
         Reads ``__NEXT_DATA__`` → ``props.pageProps.self.allGroups`` on the home
         page — the same source skool-downloader's ``listMemberships`` uses.
         """
-        self._goto(page, f"{_BASE}/", ctx)
+        data = self._load_next_data(page, f"{_BASE}/", ctx)
         self._require_login(page, ctx)
-        data = page.evaluate(_NEXT_DATA_JS)
         members = _parse_memberships(data)
         if not members:
             props = ((data or {}).get("props") or {}).get("pageProps") or {}
@@ -359,9 +390,8 @@ class SkoolConnector(Connector):
         url = f"{_BASE}/{slug}/classroom"
         if course_slug:
             url = f"{url}/{course_slug}"
-        self._goto(page, url, ctx)
+        data = self._load_next_data(page, url, ctx)
         self._require_login(page, ctx)
-        data = page.evaluate(_NEXT_DATA_JS)
         if data is None:
             ctx.logger.warning("skool: no __NEXT_DATA__ on %s (layout change?)", url)
         return data
@@ -380,25 +410,67 @@ class SkoolConnector(Connector):
     def _download_resources(
         self, page: Any, lesson: dict[str, Any], downloads: Path,
         slug: str, course_slug: str, ctx: RunContext,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Download a lesson's native resource files; return ``(saved, failures)``.
+
+        Native resources carry only a ``file_id`` — the signed download URL
+        must be requested from Skool's files API per file (in-page POST, so
+        the browser session authenticates it). The API call is skipped when
+        the file is already on disk. External resources (``isExternal`` /
+        bare links) are never downloaded — they stay references in ``raw``.
+        A nonzero failure count makes the caller withhold the sidecar so the
+        missing files retry next run.
+        """
         out: list[dict[str, Any]] = []
+        failures = 0
         lesson_dir = downloads / _safe(slug) / _safe(course_slug) / _safe(str(lesson.get("lessonId")))
         for res in lesson.get("resources") or []:
             if not isinstance(res, dict):
                 continue
-            url = res.get("downloadUrl") or res.get("download_url")
-            if not url or res.get("isExternal") or res.get("is_external"):
+            if res.get("isExternal") or res.get("is_external"):
                 continue
             name = _safe(res.get("file_name") or res.get("title") or "resource")
             dest = lesson_dir / name
-            if not dest.exists():
-                data = self._fetch_bytes(page, url, ctx)
-                if data is None:
+            if dest.exists():  # on disk already: skip the API round-trip too
+                out.append({"path": str(dest), "filename": name,
+                            "mime": res.get("file_content_type")})
+                continue
+            url = res.get("downloadUrl") or res.get("download_url")
+            if not (url and str(url).startswith("http")):
+                file_id = res.get("file_id") or res.get("fileId")
+                if not file_id:
+                    continue  # nothing to fetch by
+                url = self._resolve_download_url(page, file_id, ctx)
+                if not url:
+                    ctx.logger.warning(
+                        "skool: could not get a download URL for resource %r "
+                        "(lesson %s)", res.get("title") or name, lesson.get("lessonId"),
+                    )
+                    failures += 1
                     continue
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(data)
+            data = self._fetch_bytes(page, url, ctx)
+            if data is None:
+                failures += 1
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
             out.append({"path": str(dest), "filename": name, "mime": res.get("file_content_type")})
-        return out
+        return out, failures
+
+    def _resolve_download_url(self, page: Any, file_id: str, ctx: RunContext) -> str | None:
+        """Signed download URL for a native resource, via Skool's files API."""
+        try:
+            payload = page.evaluate(_DOWNLOAD_URL_JS, str(file_id))
+        except Exception as exc:  # noqa: BLE001 - best-effort per resource
+            ctx.logger.debug("skool: download-url call failed for %s: %s", file_id, exc)
+            return None
+        if not payload or not payload.get("success"):
+            ctx.logger.debug(
+                "skool: download-url API refused %s: %s",
+                file_id, (payload or {}).get("error"),
+            )
+            return None
+        return payload.get("url") or None
 
     def _fetch_bytes(self, page: Any, url: str, ctx: RunContext) -> bytes | None:
         import base64
@@ -485,7 +557,9 @@ class SkoolConnector(Connector):
         lesson["videoId"] = fields.get("videoId")
         lesson["hasVideo"] = bool(fields.get("videoId") or fields.get("videoLink"))
         lesson["resources"] = fields.get("resources") or []
-        lesson["_resources"] = self._download_resources(
+        if fields.get("desc"):
+            lesson["desc"] = fields["desc"]
+        lesson["_resources"], resource_failures = self._download_resources(
             page, lesson, downloads, slug, course_slug, ctx
         )
 
@@ -497,7 +571,7 @@ class SkoolConnector(Connector):
                 video_downloaded = True
                 status = "cached"
             else:
-                url = self._sniff_hls_url(page, page_data, ctx)
+                url = self._sniff_hls_url(page, page_data, fields.get("videoId"), ctx)
                 if url:
                     video_dest.parent.mkdir(parents=True, exist_ok=True)
                     video_downloaded = self._download_hls(url, video_dest, cfg, ctx)
@@ -518,7 +592,9 @@ class SkoolConnector(Connector):
             if video_downloaded:
                 lesson["_video_path"] = str(video_dest)
 
-        if not video_failed:  # a failed video retries next run: no sidecar
+        # A failed video OR failed resources retries next run: no sidecar
+        # (mirrors skool-downloader's videoFailed/resourceFailures gate).
+        if not video_failed and not resource_failures:
             _write_sidecar(lesson_dir / ".meta.json", {
                 "videoId": fields.get("videoId"),
                 "videoLink": fields.get("videoLink"),
@@ -562,8 +638,7 @@ class SkoolConnector(Connector):
         lesson_id = lesson.get("lessonId")
         url = f"{_BASE}/{slug}/classroom/{course_slug}?md={lesson_id}"
         try:
-            self._goto(page, url, ctx)
-            data = page.evaluate(_NEXT_DATA_JS)
+            data = self._load_next_data(page, url, ctx)
         except Exception as exc:  # noqa: BLE001 - best-effort, retried next run
             ctx.logger.warning(
                 "skool: could not load lesson page for %s (%s): %s",
@@ -579,32 +654,34 @@ class SkoolConnector(Connector):
             return None
         return _lesson_fields(node), data
 
-    def _sniff_hls_url(self, page: Any, next_data: Any, ctx: RunContext) -> str | None:
+    def _sniff_hls_url(
+        self, page: Any, next_data: Any, video_id: Any, ctx: RunContext
+    ) -> str | None:
         """Signed ``.m3u8?token=`` URL for the CURRENT page's Mux video.
 
-        The ladder mirrors skool-downloader: (1) reconstruct from the page's
-        ``__NEXT_DATA__`` (``playbackId`` + ``playbackToken``); (2) click the
-        Mux player and watch the resource timeline for a tokened manifest;
-        (3) shadow-DOM ``<video>.src`` fallback. Assumes the lesson page is
-        already loaded (see ``_enrich_lesson``).
+        Mirrors skool-downloader's ladder and ORDER: (1) click the Mux player
+        (only if its thumbnail is present) and poll ~10s for a tokened manifest
+        in the resource timeline / a shadow-DOM ``<video>.src``, pausing all
+        players afterwards so playback doesn't keep downloading during the
+        walk; (2) reconstruct from the page's embedded playback id + token as
+        the fallback. Assumes the lesson page is already loaded.
         """
-        url = _mux_hls_url(next_data)
-        if url:
-            return url
+        stream_url: str | None = None
         try:
-            try:
-                page.click('div[class*="MuxThumbnailWrapper"]', timeout=5000)
-            except Exception:  # noqa: BLE001 - player may autoload without a poster
-                pass
-            for _ in range(20):  # ~10s: the player fetches the manifest on play
-                urls = page.evaluate(_M3U8_PERF_JS)
-                if urls:
-                    return urls[0]
-                page.wait_for_timeout(500)
-            return page.evaluate(_SHADOW_VIDEO_JS)
+            if page.evaluate(_HAS_SELECTOR_JS, 'div[class*="MuxThumbnailWrapper"]'):
+                page.click('div[class*="MuxThumbnailWrapper"]')
+                for _ in range(10):  # the player fetches the manifest on play
+                    stream_url = page.evaluate(_STREAM_URL_JS)
+                    if stream_url:
+                        break
+                    page.wait_for_timeout(1000)
+                try:
+                    page.evaluate(_PAUSE_VIDEOS_JS)
+                except Exception:  # noqa: BLE001 - stopping playback is best-effort
+                    pass
         except Exception as exc:  # noqa: BLE001 - best-effort, never fail the run
-            ctx.logger.debug("skool: video sniff failed: %s", exc)
-            return None
+            ctx.logger.debug("skool: player interaction failed: %s", exc)
+        return stream_url or _mux_hls_url(next_data, video_id)
 
     def _download_hls(self, url: str, dest: Path, cfg: SkoolConfig, ctx: RunContext) -> bool:
         """Download an HLS URL to ``dest`` via yt-dlp (yt-dlp seam)."""
@@ -630,6 +707,36 @@ class SkoolConnector(Connector):
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
         except Exception as exc:  # noqa: BLE001 - navigation is retried by the run, not here
             raise TransientFetchError(f"skool: could not load {url}: {exc}") from exc
+
+    def _load_next_data(self, page: Any, url: str, ctx: RunContext) -> Any:
+        """Navigate and return the page's parsed ``__NEXT_DATA__``.
+
+        Mirrors skool-downloader's ``loadNextData``: goto (domcontentloaded,
+        60s) → wait for the ``#__NEXT_DATA__`` script to attach (30s) → parse.
+        Up to 3 attempts, retrying ONLY timeout-class errors with linear
+        backoff (2s, 4s); anything else raises immediately as transient.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_selector("#__NEXT_DATA__", state="attached", timeout=30000)
+                return page.evaluate(_NEXT_DATA_JS)
+            except Exception as exc:  # noqa: BLE001 - classified below
+                last_exc = exc
+                is_timeout = "timeout" in type(exc).__name__.lower()
+                if not is_timeout or attempt == 3:
+                    break
+                backoff_ms = attempt * 2000
+                ctx.logger.warning(
+                    "skool: page load timed out (attempt %d/3), retrying in %ds: %s",
+                    attempt, backoff_ms // 1000, url,
+                )
+                try:
+                    page.wait_for_timeout(backoff_ms)
+                except Exception:  # noqa: BLE001 - a dead page can't wait; just retry
+                    pass
+        raise TransientFetchError(f"skool: could not load {url}: {last_exc}") from last_exc
 
     def _require_login(self, page: Any, ctx: RunContext) -> None:
         if "/login" in (page.url or ""):
@@ -720,6 +827,7 @@ class SkoolConnector(Connector):
             item_kind="lesson",
             raw=raw,
             title=raw.get("title") or None,
+            body=raw.get("desc") or None,
             tags=tags,
             media=media,
             updated_at=parse_iso(raw.get("updatedAt")),
@@ -764,8 +872,8 @@ def _json_field(value: Any) -> Any:
 
 
 def _lesson_fields(node: dict[str, Any]) -> dict[str, Any]:
-    """``videoLink``/``videoId``/``resources`` from a lesson payload node,
-    normalized so callers can rely on their types (the raw values may be
+    """``videoLink``/``videoId``/``resources``/``desc`` from a lesson payload
+    node, normalized so callers can rely on their types (the raw values may be
     JSON-encoded strings, plain strings, or missing)."""
     meta = node.get("metadata") or {}
     video = _json_field(meta.get("video") if meta.get("video") is not None else node.get("video"))
@@ -775,15 +883,30 @@ def _lesson_fields(node: dict[str, Any]) -> dict[str, Any]:
         video_url = video
     else:
         video_url = None
-    resources = _json_field(meta.get("resources"))
+    raw_resources = meta.get("resources")
+    if raw_resources in (None, ""):
+        raw_resources = node.get("resources")  # skool-downloader's fallback
+    resources = _json_field(raw_resources)
     if isinstance(resources, dict):
         resources = [resources]
     if not isinstance(resources, list):
         resources = []
+    normalized: list[dict[str, Any]] = []
+    for r in resources:
+        if not isinstance(r, dict):
+            continue
+        # Link-style resources carry `link` instead of `downloadUrl`; they are
+        # external references, never downloaded (skool-downloader parity).
+        if r.get("link") and not r.get("downloadUrl"):
+            r = {**r, "downloadUrl": r["link"], "isExternal": True}
+        normalized.append(r)
     return {
         "videoLink": meta.get("videoLink") or video_url,
         "videoId": meta.get("videoId"),
-        "resources": [r for r in resources if isinstance(r, dict)],
+        "resources": normalized,
+        # Lesson body: may be plain HTML or a "[v2]"-prefixed TipTap JSON
+        # string; stored as-is (the raw payload is the backup).
+        "desc": meta.get("desc"),
     }
 
 
@@ -811,7 +934,15 @@ def _find_lesson_node(next_data: dict[str, Any], lesson_id: Any) -> dict[str, An
                 queue.extend(cur)
         return None
 
-    return bfs(props.get("course") or {}) or bfs(next_data)
+    found = bfs(props.get("course") or {})
+    if found is not None:
+        return found
+    # skool-downloader's explicit misses-fallback: pageProps.lesson, then the
+    # course page's own payload node.
+    for fallback in (props.get("lesson"), (props.get("course") or {}).get("course")):
+        if isinstance(fallback, dict) and fallback.get("id"):
+            return fallback
+    return bfs(next_data)
 
 
 def _load_sidecar(path: Path) -> dict[str, Any] | None:
@@ -831,40 +962,51 @@ def _write_sidecar(path: Path, data: dict[str, Any], ctx: RunContext) -> None:
         ctx.logger.debug("skool: could not write sidecar %s: %s", path, exc)
 
 
-def _mux_hls_url(next_data: dict[str, Any]) -> str | None:
-    """Reconstruct the signed Mux manifest URL from a lesson page's
+def _mux_hls_url(next_data: dict[str, Any], video_id: Any) -> str | None:
+    """Reconstruct the signed HLS manifest URL from a lesson page's
     ``__NEXT_DATA__``, if the playback id + token are embedded.
 
-    Mirrors skool-downloader's fallback: ``pageProps.video`` →
-    ``https://stream.mux.com/{playbackId}.m3u8?token={playbackToken}``, with a
-    deep search for the two keys if the ``video`` object moves.
+    Mirrors skool-downloader's fallback exactly: ``videoData = pageProps.video
+    || pageProps.course.video``; trusted ONLY when ``videoData.id`` matches the
+    lesson's ``videoId`` (the embedded object can belong to another video);
+    URL host is ``stream.video.skool.com``.
     """
     props = ((next_data or {}).get("props") or {}).get("pageProps") or {}
-    video = props.get("video")
-    if isinstance(video, dict):
-        pid = video.get("playbackId")
-        token = video.get("playbackToken") or video.get("token")
-        if pid and token:
-            return f"https://stream.mux.com/{pid}.m3u8?token={token}"
-    pid = _deep_find(next_data, "playbackId")
-    token = _deep_find(next_data, "playbackToken")
-    if pid and token:
-        return f"https://stream.mux.com/{pid}.m3u8?token={token}"
+    video = props.get("video") or (props.get("course") or {}).get("video")
+    if not isinstance(video, dict) or not video_id:
+        return None
+    pid = video.get("playbackId")
+    token = video.get("playbackToken")
+    if video.get("id") == video_id and pid and token:
+        return f"https://stream.video.skool.com/{pid}.m3u8?token={token}"
     return None
 
 
 def _ydl_opts(dest: Path, quality: int, ffmpeg_location: str | None) -> dict[str, Any]:
-    """yt-dlp options for downloading one HLS video to an exact path."""
+    """yt-dlp options for downloading one HLS video to an exact path.
+
+    Mirrors skool-downloader's invocation: the Skool ``Referer`` (their CDN
+    rejects referer-less requests) + a plain Chrome UA, format SORT (never a
+    ``format`` selector — ``-S res:{q},vcodec:h264,acodec:m4a``; quality 0 =
+    yt-dlp default), mp4 merge with ``+faststart``, 8 concurrent fragments.
+    """
     opts: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
         "outtmpl": str(dest),
-        # Master playlists expose height variants; cap to the configured one.
-        "format": f"best[height<=?{quality}]" if quality else "best",
+        "http_headers": {
+            "Referer": "https://www.skool.com/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        },
         "merge_output_format": "mp4",
+        "concurrent_fragment_downloads": 8,
         "socket_timeout": 30,
-        "retries": 3,
+        "retries": 10,
+        "fragment_retries": 10,
+        "postprocessor_args": {"ffmpeg": ["-movflags", "+faststart"]},
     }
+    if quality:
+        opts["format_sort"] = [f"res:{quality}", "vcodec:h264", "acodec:m4a"]
     if ffmpeg_location:
         opts["ffmpeg_location"] = ffmpeg_location
     return opts
@@ -939,13 +1081,20 @@ def _parse_courses(next_data: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(c, dict):
             continue
         meta = c.get("metadata") or {}
+        has_access = meta.get("hasAccess")
         out.append(
             {
                 "id": c.get("id"),
                 "slug": c.get("name") or c.get("id"),  # Skool's URL segment is `name`
                 "title": meta.get("title") or c.get("name") or c.get("id"),
-                "coverImageUrl": meta.get("coverImage") or meta.get("coverSmallUrl"),
+                "coverImageUrl": meta.get("coverImage")
+                or meta.get("coverSmallUrl")
+                or meta.get("image"),
                 "updatedAt": meta.get("updatedAt") or c.get("updatedAt"),
+                # Tri-state, per skool-downloader: 1 -> True, 0 -> False, else unknown.
+                "hasAccess": True if has_access == 1 else False if has_access == 0 else None,
+                "privacy": meta.get("privacy"),
+                "numModules": meta.get("numModules"),
             }
         )
     return out
