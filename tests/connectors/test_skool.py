@@ -497,8 +497,17 @@ def test_ydl_opts_matches_skool_downloader_invocation(tmp_path):
     assert opts["outtmpl"] == str(dest)
     assert "format" not in opts  # format SORT, never a selector
     assert opts["format_sort"] == ["res:1080", "vcodec:h264", "acodec:m4a"]
-    assert opts["http_headers"]["Referer"] == "https://www.skool.com/"  # CDN 403s without it
-    assert "User-Agent" in opts["http_headers"]
+    # Referer + a FULL, real-browser-shaped UA — sent UNCONDITIONALLY, for
+    # native AND external downloads alike, verbatim-matching
+    # skool-downloader's buildVideoArgs (a truncated UA missing the
+    # AppleWebKit/Chrome/Safari tokens is a bot-detection giveaway; stripping
+    # the headers for external hosts previously broke YouTube's bot-check
+    # even with valid cookies attached).
+    assert opts["http_headers"]["Referer"] == "https://www.skool.com/"
+    assert opts["http_headers"]["User-Agent"] == (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    )
     assert opts["merge_output_format"] == "mp4"
     assert opts["concurrent_fragment_downloads"] == 8
     assert opts["postprocessor_args"]["ffmpeg"] == ["-movflags", "+faststart"]
@@ -507,11 +516,7 @@ def test_ydl_opts_matches_skool_downloader_invocation(tmp_path):
     opts = _ydl_opts(dest, 0, None)
     assert "format_sort" not in opts and "format" not in opts
     assert "ffmpeg_location" not in opts
-    # External hosts (YouTube/Vimeo/Loom videoLink): Skool headers would
-    # break their extractors — yt-dlp defaults are used instead.
-    opts = _ydl_opts(dest, 1080, None, external=True)
-    assert "http_headers" not in opts
-    assert opts["format_sort"] == ["res:1080", "vcodec:h264", "acodec:m4a"]
+    assert opts["http_headers"]["Referer"] == "https://www.skool.com/"  # still present
     # Cookies (external downloads only): a cookiefile path and/or a browser name.
     assert "cookiefile" not in opts and "cookiesfrombrowser" not in opts
     opts = _ydl_opts(dest, 0, None, cookiefile="/tmp/cookies.txt")
