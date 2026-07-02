@@ -68,14 +68,17 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 #   you're not a bot". video_cookies_from_browser = "chrome" is a fallback for
 #   when no cookie file is set — on Windows it often fails ("Failed to
 #   decrypt with DPAPI") against modern Chrome, so prefer the captured file.
-#   If "Sign in to confirm you're not a bot" persists even with valid, fresh
-#   cookies: YouTube now requires a "PO token" for its web/mweb/android/ios
-#   player clients, which plain cookies can't satisfy. web_embedded does NOT
-#   require one (see yt-dlp's PO Token Guide) and a Skool-embedded video is
-#   normally embed-enabled, so it's the best thing to try:
+#   "Sign in to confirm you're not a bot" with VALID cookies almost always
+#   means yt-dlp couldn't run its JS challenge solver — this needs the
+#   `skool` extra's nodejs-wheel dependency (auto-managed, no system install;
+#   re-run `pip install -e ".[skool]"` on existing installs to pick it up).
+#   Still failing on one SPECIFIC video after that? YouTube's web/mweb/
+#   android/ios player clients now require a "PO token" plain cookies can't
+#   satisfy; web_embedded does not (see yt-dlp's PO Token Guide), and a
+#   Skool-embedded video is normally embed-enabled:
 #   video_extractor_args = { youtube = { player_client = ["web_embedded"] } }
-#   Still failing (embedding disabled on that specific video)? A PO token
-#   provider plugin is the durable fix — see yt-dlp's PO Token Guide.
+#   Still failing (embedding disabled on that video)? A PO token provider
+#   plugin is the durable fix — see yt-dlp's PO Token Guide.
 # communities = ["your-community"]   # optional; OMIT to auto-detect every community you've joined
 # courses = ["your-community/Course Title"]  # optional; only these courses (title or slug;
 #                                    # "community/course" scopes it). While set, deletion

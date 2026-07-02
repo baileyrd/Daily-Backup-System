@@ -168,16 +168,14 @@ class SkoolConfig(BaseModel):
     # FILE (above) sidesteps that entirely, so it always wins when both are set.
     video_cookies_from_browser: str | None = None
     # Extra yt-dlp extractor-args for EXTERNAL videos, passed straight
-    # through. YouTube's bot-check ("Sign in to confirm you're not a bot")
-    # now requires a "PO token" for its web/mweb/android/ios player clients
-    # even with valid cookies — headers and cookies alone can't clear it.
-    # web_embedded does NOT require one (as of yt-dlp's PO Token Guide) and
-    # a Skool-embedded video is normally embed-enabled, so it's the best
-    # first thing to try:
-    # {"youtube": {"player_client": ["web_embedded"]}}
-    # If that specific video still fails (embedding disabled elsewhere), the
-    # durable fix is a PO token provider plugin (see yt-dlp's PO Token Guide)
-    # — out of scope here.
+    # through. Rarely needed: "Sign in to confirm you're not a bot" with
+    # valid cookies almost always means yt-dlp couldn't run its JS challenge
+    # solver (see _js_runtime_opts, auto-managed via the nodejs-wheel dep —
+    # reinstall the `skool` extra to pick it up). If a SPECIFIC video still
+    # fails after that, YouTube's web/mweb/android/ios player clients now
+    # require a "PO token" that plain cookies can't satisfy; web_embedded
+    # does not (see yt-dlp's PO Token Guide), and a Skool-embedded video is
+    # normally embed-enabled: {"youtube": {"player_client": ["web_embedded"]}}
     video_extractor_args: dict[str, dict[str, list[str]]] | None = None
     # Write a markdown note of each lesson page (url2obs-convention frontmatter,
     # body converted from Skool's editor JSON, links to the downloaded media)
@@ -215,7 +213,10 @@ class SkoolConnector(Connector):
     secret_keys = ("SKOOL_SESSION_DIR", "YOUTUBE_COOKIES_FILE")
     wants_managed_http = False
     schema_version = 1
-    pip_requirements = ("playwright>=1.40", "yt-dlp>=2025.6.30", "imageio-ffmpeg>=0.4")
+    pip_requirements = (
+        "playwright>=1.40", "yt-dlp[default]>=2026.1.29", "nodejs-wheel>=22",
+        "imageio-ffmpeg>=0.4",
+    )
     runtime_imports = ("playwright", "yt_dlp")
     needs_playwright_browser = True
     item_kinds = (
@@ -818,6 +819,7 @@ class SkoolConnector(Connector):
             dest, cfg.video_quality, _ffmpeg_location(),
             cookiefile=cookiefile, cookies_from_browser=cookies_from_browser,
             extractor_args=cfg.video_extractor_args if external else None,
+            js_runtimes=_js_runtime_opts(),
         )
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -1322,6 +1324,7 @@ def _ydl_opts(
     dest: Path, quality: int, ffmpeg_location: str | None,
     cookiefile: str | None = None, cookies_from_browser: str | None = None,
     extractor_args: dict[str, dict[str, list[str]]] | None = None,
+    js_runtimes: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """yt-dlp options for downloading one video to an exact path.
 
@@ -1332,13 +1335,16 @@ def _ydl_opts(
     code sent an incomplete UA (missing the AppleWebKit/Chrome/Safari tokens
     — a dead giveaway of a non-browser client to a fingerprint check) and
     stripped both headers entirely for external downloads; that divergence
-    is the likely cause of YouTube's bot-check rejecting a download the
-    reference tool completes fine with the exact same cookies. Also: format
-    SORT (never a ``format`` selector — ``-S res:{q},vcodec:h264,acodec:m4a``;
-    quality 0 = yt-dlp default), mp4 merge with ``+faststart``, 8 concurrent
-    fragments. ``cookiefile``/``cookies_from_browser``/``extractor_args`` are
-    only meaningful for external downloads; some hosts (YouTube) refuse a
-    download without a signed-in session or an emulated player client.
+    was A cause of YouTube's bot-check rejecting downloads, but not THE
+    root one — see ``js_runtimes``. Also: format SORT (never a ``format``
+    selector — ``-S res:{q},vcodec:h264,acodec:m4a``; quality 0 = yt-dlp
+    default), mp4 merge with ``+faststart``, 8 concurrent fragments.
+    ``cookiefile``/``cookies_from_browser``/``extractor_args`` are only
+    meaningful for external downloads. ``js_runtimes`` (see
+    ``_js_runtime_opts``) is the actual fix for a persistent "Sign in to
+    confirm you're not a bot" with valid cookies: yt-dlp needs an external
+    JS runtime to solve YouTube's obfuscation challenge, and without one
+    silently falls back to demanding sign-in.
     """
     opts: dict[str, Any] = {
         "quiet": True,
@@ -1368,6 +1374,8 @@ def _ydl_opts(
         opts["cookiesfrombrowser"] = (cookies_from_browser,)
     if extractor_args:
         opts["extractor_args"] = extractor_args
+    if js_runtimes:
+        opts["js_runtimes"] = js_runtimes
     return opts
 
 
@@ -1379,6 +1387,31 @@ def _ffmpeg_location() -> str | None:
 
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:  # noqa: BLE001 - not installed / no binary for this OS
+        return None
+
+
+def _js_runtime_opts() -> dict[str, dict[str, Any]] | None:
+    """``js_runtimes`` option for yt-dlp: the auto-managed Node.js binary
+    (nodejs-wheel), mirroring ``_ffmpeg_location``'s pattern.
+
+    yt-dlp needs an external JS runtime to solve YouTube's obfuscation
+    challenge; without one, extraction silently degrades to "Sign in to
+    confirm you're not a bot" regardless of cookies or headers (confirmed
+    live: the exact same video failed with valid cookies until a JS runtime
+    was available, then succeeded with the SAME cookies and no other
+    change). ``None`` lets yt-dlp fall back to its own detection (only
+    ``deno`` on PATH by default) when nodejs-wheel isn't installed.
+    """
+    try:
+        import os
+
+        from nodejs_wheel.executable import ROOT_DIR
+
+        suffix = ".exe" if os.name == "nt" else ""
+        bin_dir = ROOT_DIR if os.name == "nt" else os.path.join(ROOT_DIR, "bin")
+        path = os.path.join(bin_dir, "node" + suffix)
+        return {"node": {"path": path}} if os.path.exists(path) else None
+    except Exception:  # noqa: BLE001 - not installed; yt-dlp falls back to its own detection
         return None
 
 

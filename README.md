@@ -267,24 +267,35 @@ store_media = true              # ...and pull the downloaded files into the DB
 `dbs backup courses` then fetches from Skool, catalogs the classroom structure,
 downloads the attached resources **and each lesson's video** — native (Mux)
 ones via player capture, external ones (YouTube/Vimeo/Loom) straight through
-yt-dlp (`download_videos`, on by default, with an auto-managed ffmpeg;
-`video_quality` caps the variant, default 1080) — and (with `store_media`)
-archives those files, so Skool content lands in the DB in one step. External
-videos sometimes need auth (YouTube: *"Sign in to confirm you're not a
-bot"*) — `video_cookies_file_env` (defaults to the YouTube connector's own
-`YOUTUBE_COOKIES_FILE`, reused automatically if you've already captured it)
-or `video_cookies_from_browser` supplies cookies for those downloads only.
-The captured cookie *file* always wins when both are set — it needs no live
-browser read, so it isn't affected by Chrome's Windows "App-Bound
-Encryption", which otherwise makes `video_cookies_from_browser` fail with
-*"Failed to decrypt with DPAPI"*. If *"Sign in to confirm you're not a bot"*
-persists even with valid, current cookies, YouTube now requires a "PO
-token" for its web/mweb/android/ios player clients that plain cookies
-can't satisfy — `video_extractor_args` passes extra yt-dlp extractor-args
-straight through, e.g. `{ youtube = { player_client = ["web_embedded"] } }`,
-which does not require one (a Skool-embedded video is normally
-embed-enabled). A persistent block after that means a PO token provider
-plugin is the durable fix (see yt-dlp's PO Token Guide).
+yt-dlp (`download_videos`, on by default, with an auto-managed ffmpeg
+**and JS runtime** — see below; `video_quality` caps the variant, default
+1080) — and (with `store_media`) archives those files, so Skool content
+lands in the DB in one step. External videos sometimes need auth (YouTube:
+*"Sign in to confirm you're not a bot"*) — `video_cookies_file_env`
+(defaults to the YouTube connector's own `YOUTUBE_COOKIES_FILE`, reused
+automatically if you've already captured it) or `video_cookies_from_browser`
+supplies cookies for those downloads only. The captured cookie *file* always
+wins when both are set — it needs no live browser read, so it isn't
+affected by Chrome's Windows "App-Bound Encryption", which otherwise makes
+`video_cookies_from_browser` fail with *"Failed to decrypt with DPAPI"*.
+
+**If *"Sign in to confirm you're not a bot"* persists even with valid,
+current cookies**: this almost always means yt-dlp couldn't run its JS
+challenge solver, not an auth problem — YouTube's obfuscation now requires
+solving a JS challenge via an external runtime, and without one, extraction
+silently falls back to demanding sign-in. The `skool`/`youtube`/`research`
+extras pull in `yt-dlp[default]` (bundles the solver scripts) and
+`nodejs-wheel` (an auto-managed portable Node.js binary — no separate
+system install); re-run `pip install -e ".[skool]"` on an existing install
+to pick these up. Confirmed live: the exact same video with the exact same
+cookies failed until this was in place, then succeeded with no other change.
+If a *specific* video still fails after that, YouTube's web/mweb/android/ios
+player clients require a "PO token" plain cookies can't satisfy —
+`video_extractor_args` passes extra yt-dlp extractor-args straight through,
+e.g. `{ youtube = { player_client = ["web_embedded"] } }`, which does not
+require one (a Skool-embedded video is normally embed-enabled). A persistent
+block after that means a PO token provider plugin is the durable fix (see
+yt-dlp's PO Token Guide).
 
 ## Scheduling daily backups
 
