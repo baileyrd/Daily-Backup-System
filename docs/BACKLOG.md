@@ -39,17 +39,14 @@ render media bytes inline vs download-only (respect `max_media_bytes`);
 whether to add a CLI counterpart (`dbs items` / `dbs stats`) or keep it
 web-only.
 
-## 2. Skool phase 2 — native video download
+## 2. Skool phase 2 — native video download (SHIPPED)
 
-Phase 1 catalogs Skool communities/courses/lessons and downloads attached
-resource files; it records lesson **video metadata** and any external
-Vimeo/YouTube/Loom link as a reference, but does not download Skool's own
-(Mux) video.
-
-**To do:** drive the Mux player to capture the signed `.m3u8?token=` HLS URL
-(with the shadow-DOM `<video>.src` fallback), download via yt-dlp with an
-**auto-managed ffmpeg** binary (per-OS, matching skool-downloader's approach),
-write into `downloads_dir`, and record the local path as a `MediaRef`. The
-seam is marked `# TODO(phase 2)` in
-`src/dbs/connectors/skool.py:_lesson_item`. This path can only be verified
-against a real, authenticated Skool account (not CI).
+Implemented: lessons' native (Mux) videos are downloaded into `downloads_dir`
+(`download_videos = true` by default, `video_quality` caps the HLS variant).
+The signed `.m3u8?token=` URL is found via the `__NEXT_DATA__`
+playbackId/token reconstruct → player-click + resource-timeline sniff →
+shadow-DOM `<video>.src` ladder; yt-dlp downloads it with ffmpeg auto-managed
+via `imageio-ffmpeg` (system PATH fallback). External Vimeo/YouTube/Loom
+links remain references. Note: the sniff ladder can only be truly verified
+against a real, authenticated Skool account — if a Skool player change breaks
+it, lessons still index with a "could not capture a video URL" warning.

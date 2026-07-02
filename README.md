@@ -263,9 +263,11 @@ store_media = true              # ...and pull the downloaded files into the DB
 ```
 
 `dbs backup courses` then fetches from Skool, catalogs the classroom structure,
-downloads the attached resources, and (with `store_media`) archives those files —
-Skool content lands in the DB in one step. Native video download is not yet
-implemented; external video links are recorded as references.
+downloads the attached resources **and each lesson's native (Mux) video**
+(`download_videos`, on by default — yt-dlp with an auto-managed ffmpeg;
+`video_quality` caps the variant, default 1080), and (with `store_media`)
+archives those files — Skool content lands in the DB in one step. External
+video links (Vimeo/YouTube/Loom) are recorded as references, not downloaded.
 
 ## Scheduling daily backups
 

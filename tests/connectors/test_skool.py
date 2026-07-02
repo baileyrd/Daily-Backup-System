@@ -337,3 +337,132 @@ def test_volatile_updatedat_does_not_spawn_revisions(storage):
     assert r2.updated == 0
     revs = storage.conn.execute("SELECT COUNT(*) FROM item_revisions").fetchone()[0]
     assert revs == 1
+
+
+# -- native (Mux) video download ----------------------------------------------
+
+
+def test_mux_hls_url_from_pageprops_video():
+    from dbs.connectors.skool import _mux_hls_url
+
+    nd = {"props": {"pageProps": {"video": {"playbackId": "pb1", "playbackToken": "tok1"}}}}
+    assert _mux_hls_url(nd) == "https://stream.mux.com/pb1.m3u8?token=tok1"
+
+
+def test_mux_hls_url_deep_search_and_missing():
+    from dbs.connectors.skool import _mux_hls_url
+
+    nested = {"props": {"pageProps": {"lessonData": {
+        "playbackId": "pb2", "playbackToken": "tok2"}}}}
+    assert _mux_hls_url(nested) == "https://stream.mux.com/pb2.m3u8?token=tok2"
+    assert _mux_hls_url({}) is None
+    assert _mux_hls_url({"props": {"pageProps": {"video": {"playbackId": "pb"}}}}) is None
+
+
+def test_ydl_opts_quality_cap_and_ffmpeg_location(tmp_path):
+    from dbs.connectors.skool import _ydl_opts
+
+    dest = tmp_path / "video.mp4"
+    opts = _ydl_opts(dest, 1080, "/opt/ffmpeg")
+    assert opts["outtmpl"] == str(dest)
+    assert opts["format"] == "best[height<=?1080]"
+    assert opts["ffmpeg_location"] == "/opt/ffmpeg"
+    assert opts["merge_output_format"] == "mp4"
+    # quality 0 = best available; no ffmpeg_location key when auto-manage is absent
+    opts = _ydl_opts(dest, 0, None)
+    assert opts["format"] == "best"
+    assert "ffmpeg_location" not in opts
+
+
+def _video_lesson(**kw):
+    lesson = {"lessonId": "l1", "title": "Lesson 1", "videoId": "mux1",
+              "videoUnavailable": False}
+    lesson.update(kw)
+    return lesson
+
+
+class _VideoConn(SkoolConnector):
+    """Overridable sniff/download seams for orchestration tests."""
+
+    def __init__(self, sniff_url="https://stream.mux.com/pb.m3u8?token=t", download_ok=True):
+        self._sniff_url = sniff_url
+        self._download_ok = download_ok
+        self.sniffed = 0
+        self.downloaded: list[str] = []
+
+    def _sniff_hls_url(self, page, slug, course_slug, lesson, ctx):
+        self.sniffed += 1
+        return self._sniff_url
+
+    def _download_hls(self, url, dest, cfg, ctx):
+        self.downloaded.append(url)
+        if self._download_ok:
+            dest.write_bytes(b"video-bytes")
+        return self._download_ok
+
+
+def test_maybe_download_video_happy_path(tmp_path):
+    conn = _VideoConn()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path))
+    path = conn._maybe_download_video(
+        object(), _video_lesson(), tmp_path, "comm", "course", cfg, _ctx(cfg))
+    assert path == str(tmp_path / "comm" / "course" / "l1" / "video.mp4")
+    assert (tmp_path / "comm" / "course" / "l1" / "video.mp4").read_bytes() == b"video-bytes"
+    assert conn.sniffed == 1 and len(conn.downloaded) == 1
+
+
+def test_maybe_download_video_skips_existing_file(tmp_path):
+    dest = tmp_path / "comm" / "course" / "l1" / "video.mp4"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"already here")
+    conn = _VideoConn()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path))
+    path = conn._maybe_download_video(
+        object(), _video_lesson(), tmp_path, "comm", "course", cfg, _ctx(cfg))
+    assert path == str(dest)
+    assert conn.sniffed == 0 and conn.downloaded == []  # no player interaction
+    assert dest.read_bytes() == b"already here"
+
+
+def test_maybe_download_video_respects_toggle_and_skips_non_native(tmp_path):
+    cfg_off = SkoolConfig(downloads_dir=str(tmp_path), download_videos=False)
+    conn = _VideoConn()
+    assert conn._maybe_download_video(
+        object(), _video_lesson(), tmp_path, "c", "c", cfg_off, _ctx(cfg_off)) is None
+
+    cfg = SkoolConfig(downloads_dir=str(tmp_path))
+    # External-link-only lesson (no videoId) -> reference, not a download.
+    assert conn._maybe_download_video(
+        object(), _video_lesson(videoId=None, videoLink="https://vimeo.com/1"),
+        tmp_path, "c", "c", cfg, _ctx(cfg)) is None
+    # Unavailable native video -> skipped.
+    assert conn._maybe_download_video(
+        object(), _video_lesson(videoUnavailable=True), tmp_path, "c", "c", cfg, _ctx(cfg)) is None
+    assert conn.sniffed == 0
+
+
+def test_maybe_download_video_sniff_failure_warns_but_never_raises(tmp_path, caplog):
+    conn = _VideoConn(sniff_url=None)
+    cfg = SkoolConfig(downloads_dir=str(tmp_path))
+    with caplog.at_level("WARNING", logger="test"):
+        path = conn._maybe_download_video(
+            object(), _video_lesson(), tmp_path, "c", "c", cfg, _ctx(cfg))
+    assert path is None
+    assert any("could not capture a video URL" in r.message for r in caplog.records)
+
+
+def test_maybe_download_video_download_failure_returns_none(tmp_path):
+    conn = _VideoConn(download_ok=False)
+    cfg = SkoolConfig(downloads_dir=str(tmp_path))
+    assert conn._maybe_download_video(
+        object(), _video_lesson(), tmp_path, "c", "c", cfg, _ctx(cfg)) is None
+
+
+def test_lesson_item_prefers_local_video_over_external_link():
+    conn = _connector([_lesson("les1", videoLink="https://vimeo.com/1",
+                               _video_path="/dl/comm/course/les1/video.mp4")])
+    item = next(e for e in conn.fetch(_ctx()) if isinstance(e, BackupItem))
+    vids = [m for m in item.media if m.kind == "video"]
+    assert len(vids) == 1
+    assert vids[0].url == "/dl/comm/course/les1/video.mp4"
+    assert vids[0].filename == "video.mp4"
