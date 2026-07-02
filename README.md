@@ -32,8 +32,8 @@ exports** (JSON / NDJSON / CSV / Markdown / zip archive).
 >
 > Skool reads each community's classroom pages with your captured session,
 > catalogs the community → course → lesson structure into the DB, and downloads
-> attached resource files (native video download is planned; external video links
-> are recorded as references).
+> attached resource files and lesson videos — native (Mux) ones via player
+> capture, external ones (YouTube/Vimeo/Loom) via yt-dlp.
 >
 > All follow the same plugin contract as Raindrop — see
 > [docs/writing-a-connector.md](docs/writing-a-connector.md) (and its
@@ -265,11 +265,11 @@ store_media = true              # ...and pull the downloaded files into the DB
 ```
 
 `dbs backup courses` then fetches from Skool, catalogs the classroom structure,
-downloads the attached resources **and each lesson's native (Mux) video**
-(`download_videos`, on by default — yt-dlp with an auto-managed ffmpeg;
-`video_quality` caps the variant, default 1080), and (with `store_media`)
-archives those files — Skool content lands in the DB in one step. External
-video links (Vimeo/YouTube/Loom) are recorded as references, not downloaded.
+downloads the attached resources **and each lesson's video** — native (Mux)
+ones via player capture, external ones (YouTube/Vimeo/Loom) straight through
+yt-dlp (`download_videos`, on by default, with an auto-managed ffmpeg;
+`video_quality` caps the variant, default 1080) — and (with `store_media`)
+archives those files, so Skool content lands in the DB in one step.
 
 ## Scheduling daily backups
 

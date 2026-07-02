@@ -61,6 +61,7 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # downloads_dir = "~/skool-backup"
 # download_videos = true             # set false for catalog/resources only
 # video_quality = 1080               # cap the HLS variant height; 0 = best
+# write_markdown = true              # a url2obs-style .md note of each lesson page
 # communities = ["your-community"]   # optional; OMIT to auto-detect every community you've joined
 # courses = ["your-community/Course Title"]  # optional; only these courses (title or slug;
 #                                    # "community/course" scopes it). While set, deletion
