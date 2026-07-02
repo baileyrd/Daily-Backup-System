@@ -62,6 +62,10 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # download_videos = true             # set false for catalog/resources only
 # video_quality = 1080               # cap the HLS variant height; 0 = best
 # write_markdown = true              # a url2obs-style .md note of each lesson page
+# video_cookies_file_env = "YOUTUBE_COOKIES_FILE"  # cookies for EXTERNAL videos
+#   (a lesson's YouTube/Vimeo/Loom link) — reuses the youtube connector's secret
+#   if you already have one; needed when yt-dlp reports "Sign in to confirm
+#   you're not a bot". Or set video_cookies_from_browser = "chrome" instead.
 # communities = ["your-community"]   # optional; OMIT to auto-detect every community you've joined
 # courses = ["your-community/Course Title"]  # optional; only these courses (title or slug;
 #                                    # "community/course" scopes it). While set, deletion

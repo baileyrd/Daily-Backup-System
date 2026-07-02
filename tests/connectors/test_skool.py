@@ -512,6 +512,60 @@ def test_ydl_opts_matches_skool_downloader_invocation(tmp_path):
     opts = _ydl_opts(dest, 1080, None, external=True)
     assert "http_headers" not in opts
     assert opts["format_sort"] == ["res:1080", "vcodec:h264", "acodec:m4a"]
+    # Cookies (external downloads only): a cookiefile path and/or a browser name.
+    assert "cookiefile" not in opts and "cookiesfrombrowser" not in opts
+    opts = _ydl_opts(dest, 0, None, cookiefile="/tmp/cookies.txt")
+    assert opts["cookiefile"] == "/tmp/cookies.txt"
+    opts = _ydl_opts(dest, 0, None, cookies_from_browser="chrome")
+    assert opts["cookiesfrombrowser"] == ("chrome",)
+
+
+def test_fetch_rejects_undeclared_video_cookies_file_env():
+    from dbs.core.errors import ConnectorConfigError
+
+    cfg = SkoolConfig(downloads_dir="/dl", video_cookies_file_env="SOME_OTHER_VAR")
+    conn = _connector([])  # _acquire never runs: the raise precedes it
+    with pytest.raises(ConnectorConfigError, match="video_cookies_file_env"):
+        list(conn.fetch(_ctx(cfg)))
+
+
+def test_download_hls_attaches_cookies_for_external_only(tmp_path, monkeypatch):
+    import yt_dlp
+    from dbs.core.secrets import Secrets
+
+    captured: list[dict] = []
+
+    class _FakeYDL:
+        def __init__(self, opts):
+            captured.append(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def download(self, urls):
+            pass
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _FakeYDL)
+    conn = SkoolConnector()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path))
+    ctx = make_ctx(
+        source_id=1, run_id=1, mode="full", config=cfg,
+        secrets=Secrets({**SECRETS_ENV, "YOUTUBE_COOKIES_FILE": "/tmp/cookies.txt"},
+                        ("SKOOL_SESSION_DIR", "YOUTUBE_COOKIES_FILE")),
+    )
+    dest = tmp_path / "video.mp4"
+    conn._download_hls("https://youtu.be/x", dest, cfg, ctx, external=True)
+    assert captured[-1]["cookiefile"] == "/tmp/cookies.txt"
+    # Native (Mux) downloads never get YouTube cookies attached.
+    conn._download_hls("https://stream.video.skool.com/x.m3u8", dest, cfg, ctx, external=False)
+    assert "cookiefile" not in captured[-1]
+    # video_cookies_file_env unset (or the secret unset) -> no cookiefile, no crash.
+    cfg_no_cookies = SkoolConfig(downloads_dir=str(tmp_path), video_cookies_file_env=None)
+    conn._download_hls("https://youtu.be/x", dest, cfg_no_cookies, ctx, external=True)
+    assert "cookiefile" not in captured[-1]
 
 
 def _video_lesson(**kw):

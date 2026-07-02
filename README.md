@@ -269,7 +269,11 @@ downloads the attached resources **and each lesson's video** — native (Mux)
 ones via player capture, external ones (YouTube/Vimeo/Loom) straight through
 yt-dlp (`download_videos`, on by default, with an auto-managed ffmpeg;
 `video_quality` caps the variant, default 1080) — and (with `store_media`)
-archives those files, so Skool content lands in the DB in one step.
+archives those files, so Skool content lands in the DB in one step. External
+videos sometimes need auth (YouTube: *"Sign in to confirm you're not a
+bot"*) — `video_cookies_file_env` (defaults to the YouTube connector's own
+`YOUTUBE_COOKIES_FILE`, reused automatically if you've already captured it)
+or `video_cookies_from_browser` supplies cookies for those downloads only.
 
 ## Scheduling daily backups
 
