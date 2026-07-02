@@ -195,6 +195,8 @@ See [docs/architecture.md](docs/architecture.md) for the full design, including
 the Raindrop-specific strategy (the API has no `lastUpdate` sort, so it uses a
 `-created` early-stop fast path + periodic reconcile + trash poll).
 
+Planned/deferred work is tracked in [docs/BACKLOG.md](docs/BACKLOG.md).
+
 ## Configuration
 
 `dbs.toml` (TOML by default; YAML supported with the `[yaml]` extra). Secrets are
