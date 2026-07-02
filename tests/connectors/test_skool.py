@@ -199,17 +199,22 @@ def test_parse_courses_deep_search_fallback():
     assert [c["slug"] for c in out] == ["intro"]
 
 
-def test_parse_lessons_modules_and_standalone():
+def test_parse_lessons_unwraps_course_keyed_nodes():
+    # The REAL Skool shape: tree entries wrap their payload under `course`
+    # (skool-downloader: setInfo = node.course, modInfo = mod.course), and the
+    # module-vs-lesson distinction is the WRAPPER's children length.
     cd = {"props": {"pageProps": {"course": {"children": [
-        {"id": "m1", "name": "Mod", "metadata": {"title": "Module 1"}, "children": [
-            {"id": "l1", "metadata": {"title": "Lesson 1", "videoLink": "https://vimeo.com/1",
-                                      "resources": [{"downloadUrl": "https://x/f.pdf",
-                                                     "file_name": "f.pdf"}]}},
+        {"course": {"id": "m1", "metadata": {"title": "Module 1"}}, "children": [
+            {"course": {"id": "l1", "metadata": {
+                "title": "Lesson 1", "videoLink": "https://vimeo.com/1",
+                "resources": [{"downloadUrl": "https://x/f.pdf", "file_name": "f.pdf"}]}}},
         ]},
-        {"id": "l2", "metadata": {"title": "Standalone"}},
+        {"course": {"id": "l2", "metadata": {"title": "Standalone"}}, "children": []},
     ]}}}}
     out = _parse_lessons(cd)
-    assert [l["lessonId"] for l in out] == ["l1", "l2"]
+    assert [(l["lessonId"], l["title"]) for l in out] == [
+        ("l1", "Lesson 1"), ("l2", "Standalone"),
+    ]
     assert out[0]["moduleTitle"] == "Module 1"
     assert out[0]["hasVideo"] is True and out[0]["videoLink"] == "https://vimeo.com/1"
     assert out[0]["resources"][0]["file_name"] == "f.pdf"
@@ -217,13 +222,35 @@ def test_parse_lessons_modules_and_standalone():
     assert out[1]["moduleTitle"] is None and out[1]["hasVideo"] is False
 
 
+def test_parse_lessons_tolerates_plain_nodes():
+    cd = {"props": {"pageProps": {"course": {"children": [
+        {"id": "m1", "name": "Mod", "metadata": {"title": "Module 1"}, "children": [
+            {"id": "l1", "metadata": {"title": "Lesson 1"}},
+        ]},
+        {"id": "l2", "metadata": {"title": "Standalone"}},
+    ]}}}}
+    out = _parse_lessons(cd)
+    assert [l["lessonId"] for l in out] == ["l1", "l2"]
+    assert out[0]["moduleTitle"] == "Module 1"
+
+
 def test_parse_lessons_mux_video_sets_hasvideo():
     cd = {"props": {"pageProps": {"course": {"children": [
-        {"id": "l1", "metadata": {"title": "Native", "videoId": "mux123"}},
+        {"course": {"id": "l1", "metadata": {"title": "Native", "videoId": "mux123"}},
+         "children": []},
     ]}}}}
     out = _parse_lessons(cd)
     assert out[0]["hasVideo"] is True
     assert out[0]["videoLink"] is None and out[0]["videoId"] == "mux123"
+
+
+def test_process_lesson_missing_id_skips_without_navigation(tmp_path, caplog):
+    conn = _LessonConn()
+    with caplog.at_level("WARNING", logger="test"):
+        status, _ = _process(conn, tmp_path, lesson={"lessonId": None, "title": None})
+    assert status == "failed"
+    assert conn.enriched == 0  # never visits ?md=None
+    assert any("has no id" in r.message for r in caplog.records)
 
 
 def test_safe_path_segment():
