@@ -17,8 +17,13 @@ page's ``__NEXT_DATA__`` (``playbackId`` + ``playbackToken``), clicking the
 Mux player and sniffing the browser's resource timeline, and a shadow-DOM
 ``<video>.src`` fallback — the same ladder skool-downloader uses. External
 video links (Vimeo/YouTube/Loom) are recorded as stable references, not
-downloaded. Already-downloaded videos are skipped by path, so re-runs don't
-re-fetch.
+downloaded.
+
+Skool's course tree carries only titles/ids, so video/resource data requires
+visiting **each lesson's own page** (see ``_process_lesson``). A tiny
+``.meta.json`` sidecar per lesson folder records the outcome; re-runs skip the
+page visit when everything it lists is still on disk, so only the first run is
+slow.
 
 Auth is a **path-valued secret** ``SKOOL_SESSION_DIR``: a Playwright
 persistent-context directory holding your logged-in cookies, captured once via
@@ -38,6 +43,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -262,6 +268,7 @@ class SkoolConnector(Connector):
             return
 
         for slug in slugs:
+            stats: Counter[str] = Counter()
             data = self._classroom_next_data(page, slug, ctx)
             if data is None:
                 continue
@@ -305,13 +312,17 @@ class SkoolConnector(Connector):
                     lesson["_kind"] = "lesson"
                     lesson["_group_name"] = group_name
                     lesson["_course_name"] = course.get("title") or course_slug
-                    lesson["_resources"] = self._download_resources(
-                        page, lesson, downloads, slug, course_slug, ctx
-                    )
-                    lesson["_video_path"] = self._maybe_download_video(
+                    stats[self._process_lesson(
                         page, lesson, downloads, slug, course_slug, cfg, ctx
-                    )
+                    )] += 1
                     yield lesson
+
+            # A silent zero must never hide again: say what happened per community.
+            ctx.logger.info(
+                "skool: %s lessons — %d video(s) downloaded, %d cached, "
+                "%d without native video, %d failed",
+                slug, stats["downloaded"], stats["cached"], stats["none"], stats["failed"],
+            )
 
     # -- browser helpers (thin; not unit-tested) ----------------------------
 
@@ -403,62 +414,167 @@ class SkoolConnector(Connector):
         except Exception:  # noqa: BLE001
             return None
 
-    # -- native (Mux) video download -----------------------------------------
+    # -- per-lesson processing (enrich -> resources -> native video) ---------
 
-    def _maybe_download_video(
+    def _process_lesson(
         self, page: Any, lesson: dict[str, Any], downloads: Path,
         slug: str, course_slug: str, cfg: SkoolConfig, ctx: RunContext,
-    ) -> str | None:
-        """Download a lesson's native video if enabled/needed; return its path.
+    ) -> str:
+        """Fill a lesson's video/resource data and download its media.
 
-        Best-effort throughout: any failure logs and returns ``None`` — the
-        lesson is still indexed with its video *metadata* intact. External
-        video links are not downloaded (recorded as references by the mapper).
-        Already-downloaded files are skipped without touching the player.
+        Skool's course tree carries only titles/ids — ``videoId``, ``videoLink``
+        and ``resources`` exist only on each lesson's own page, so this visits
+        it (once). A ``.meta.json`` sidecar in the lesson's folder records the
+        outcome; when the sidecar says everything listed is already on disk,
+        re-runs merge it and skip the page visit entirely. Returns a status
+        key ("downloaded"/"cached"/"none"/"failed") for the community summary.
+        Best-effort: any failure leaves the lesson indexed with tree-level data
+        and no sidecar, so it retries next run.
         """
-        if not cfg.download_videos:
-            return None
-        if not lesson.get("videoId") or lesson.get("videoUnavailable"):
-            return None  # no native video (external links stay references)
-        dest = (
+        lesson_dir = (
             downloads / _safe(slug) / _safe(str(course_slug))
-            / _safe(str(lesson.get("lessonId"))) / "video.mp4"
+            / _safe(str(lesson.get("lessonId")))
         )
-        if dest.exists() and dest.stat().st_size > 0:
-            return str(dest)
+        video_dest = lesson_dir / "video.mp4"
+        sidecar = _load_sidecar(lesson_dir / ".meta.json")
+        if sidecar is not None and self._sidecar_complete(sidecar, lesson_dir, video_dest, cfg):
+            lesson["videoId"] = sidecar.get("videoId")
+            lesson["videoLink"] = sidecar.get("videoLink")
+            lesson["hasVideo"] = bool(sidecar.get("videoId") or sidecar.get("videoLink"))
+            lesson["_resources"] = [
+                {"path": str(lesson_dir / r["filename"]), "filename": r["filename"],
+                 "mime": r.get("mime")}
+                for r in sidecar.get("resources") or []
+                if r.get("filename")
+            ]
+            if sidecar.get("video_downloaded") and video_dest.exists():
+                lesson["_video_path"] = str(video_dest)
+            return "cached"
 
-        url = self._sniff_hls_url(page, slug, course_slug, lesson, ctx)
-        if not url:
+        enriched = self._enrich_lesson(page, lesson, slug, course_slug, ctx)
+        if enriched is None:
+            return "failed"
+        fields, page_data = enriched
+        lesson["videoLink"] = fields.get("videoLink")
+        lesson["videoId"] = fields.get("videoId")
+        lesson["hasVideo"] = bool(fields.get("videoId") or fields.get("videoLink"))
+        lesson["resources"] = fields.get("resources") or []
+        lesson["_resources"] = self._download_resources(
+            page, lesson, downloads, slug, course_slug, ctx
+        )
+
+        status = "none"
+        video_downloaded = False
+        video_failed = False
+        if fields.get("videoId") and cfg.download_videos:
+            if video_dest.exists() and video_dest.stat().st_size > 0:
+                video_downloaded = True
+                status = "cached"
+            else:
+                url = self._sniff_hls_url(page, page_data, ctx)
+                if url:
+                    video_dest.parent.mkdir(parents=True, exist_ok=True)
+                    video_downloaded = self._download_hls(url, video_dest, cfg, ctx)
+                if video_downloaded:
+                    status = "downloaded"
+                    ctx.logger.info(
+                        "skool: downloaded video for %s -> %s", lesson.get("title"), video_dest
+                    )
+                else:
+                    video_failed = True
+                    status = "failed"
+                    if not url:
+                        ctx.logger.warning(
+                            "skool: could not capture a video URL for lesson %s (%s) — "
+                            "indexed without the video.",
+                            lesson.get("lessonId"), lesson.get("title"),
+                        )
+            if video_downloaded:
+                lesson["_video_path"] = str(video_dest)
+
+        if not video_failed:  # a failed video retries next run: no sidecar
+            _write_sidecar(lesson_dir / ".meta.json", {
+                "videoId": fields.get("videoId"),
+                "videoLink": fields.get("videoLink"),
+                "video_downloaded": video_downloaded,
+                "no_native_video": not fields.get("videoId"),
+                "resources": [
+                    {"filename": r["filename"], "mime": r.get("mime")}
+                    for r in lesson["_resources"]
+                ],
+            }, ctx)
+        return status
+
+    @staticmethod
+    def _sidecar_complete(
+        sidecar: dict[str, Any], lesson_dir: Path, video_dest: Path, cfg: SkoolConfig
+    ) -> bool:
+        """Whether everything the sidecar recorded is still on disk (so the
+        lesson page needn't be visited). Enabling ``download_videos`` later
+        makes a videoless-download sidecar incomplete again, on purpose."""
+        for r in sidecar.get("resources") or []:
+            if not (lesson_dir / (r.get("filename") or "")).exists():
+                return False
+        if not cfg.download_videos:
+            return True
+        if sidecar.get("no_native_video"):
+            return True
+        return (
+            bool(sidecar.get("video_downloaded"))
+            and video_dest.exists()
+            and video_dest.stat().st_size > 0
+        )
+
+    def _enrich_lesson(
+        self, page: Any, lesson: dict[str, Any], slug: str, course_slug: str, ctx: RunContext
+    ) -> tuple[dict[str, Any], Any] | None:
+        """Read a lesson's video/resource metadata from ITS OWN page.
+
+        Returns ``(fields, page_next_data)`` or ``None`` on failure. The page
+        is left loaded so the video sniff can run without re-navigating.
+        """
+        lesson_id = lesson.get("lessonId")
+        url = f"{_BASE}/{slug}/classroom/{course_slug}?md={lesson_id}"
+        try:
+            self._goto(page, url, ctx)
+            data = page.evaluate(_NEXT_DATA_JS)
+        except Exception as exc:  # noqa: BLE001 - best-effort, retried next run
             ctx.logger.warning(
-                "skool: could not capture a video URL for lesson %s (%s) — "
-                "indexed without the video.",
-                lesson.get("lessonId"), lesson.get("title"),
+                "skool: could not load lesson page for %s (%s): %s",
+                lesson_id, lesson.get("title"), exc,
             )
             return None
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if not self._download_hls(url, dest, cfg, ctx):
+        node = _find_lesson_node(data, lesson_id)
+        if node is None:
+            ctx.logger.warning(
+                "skool: lesson %s (%s) not found in its page data (layout change?)",
+                lesson_id, lesson.get("title"),
+            )
             return None
-        ctx.logger.info("skool: downloaded video for %s -> %s", lesson.get("title"), dest)
-        return str(dest)
+        meta = node.get("metadata") or {}
+        video_link = meta.get("videoLink") or (node.get("video") or {}).get("url")
+        return (
+            {
+                "videoLink": video_link,
+                "videoId": meta.get("videoId"),
+                "resources": meta.get("resources") or [],
+            },
+            data,
+        )
 
-    def _sniff_hls_url(
-        self, page: Any, slug: str, course_slug: str, lesson: dict[str, Any], ctx: RunContext
-    ) -> str | None:
-        """Signed ``.m3u8?token=`` URL for a lesson's Mux video (Playwright seam).
+    def _sniff_hls_url(self, page: Any, next_data: Any, ctx: RunContext) -> str | None:
+        """Signed ``.m3u8?token=`` URL for the CURRENT page's Mux video.
 
-        The ladder mirrors skool-downloader: (1) reconstruct from the lesson
-        page's ``__NEXT_DATA__`` (``playbackId`` + ``playbackToken``); (2) click
-        the Mux player and watch the resource timeline for a tokened manifest;
-        (3) shadow-DOM ``<video>.src`` fallback.
+        The ladder mirrors skool-downloader: (1) reconstruct from the page's
+        ``__NEXT_DATA__`` (``playbackId`` + ``playbackToken``); (2) click the
+        Mux player and watch the resource timeline for a tokened manifest;
+        (3) shadow-DOM ``<video>.src`` fallback. Assumes the lesson page is
+        already loaded (see ``_enrich_lesson``).
         """
-        lesson_url = f"{_BASE}/{slug}/classroom/{course_slug}?md={lesson.get('lessonId')}"
+        url = _mux_hls_url(next_data)
+        if url:
+            return url
         try:
-            self._goto(page, lesson_url, ctx)
-            data = page.evaluate(_NEXT_DATA_JS)
-            url = _mux_hls_url(data)
-            if url:
-                return url
-
             try:
                 page.click('div[class*="MuxThumbnailWrapper"]', timeout=5000)
             except Exception:  # noqa: BLE001 - player may autoload without a poster
@@ -470,7 +586,7 @@ class SkoolConnector(Connector):
                 page.wait_for_timeout(500)
             return page.evaluate(_SHADOW_VIDEO_JS)
         except Exception as exc:  # noqa: BLE001 - best-effort, never fail the run
-            ctx.logger.debug("skool: video sniff failed for %s: %s", lesson_url, exc)
+            ctx.logger.debug("skool: video sniff failed: %s", exc)
             return None
 
     def _download_hls(self, url: str, dest: Path, cfg: SkoolConfig, ctx: RunContext) -> bool:
@@ -613,6 +729,50 @@ def _deep_find(obj: Any, key: str) -> Any:
         elif isinstance(cur, list):
             queue.extend(cur)
     return None
+
+
+def _find_lesson_node(next_data: dict[str, Any], lesson_id: Any) -> dict[str, Any] | None:
+    """The lesson's full payload node on its OWN page's ``__NEXT_DATA__``.
+
+    On a lesson page, tree entries wrap the payload as ``{course: {...},
+    children: [...]}`` (skool-downloader matches ``node.course?.id === md``) or
+    carry it directly. Match by id + a ``metadata`` key, searching the course
+    tree first and the whole payload as a fallback.
+    """
+    if not lesson_id:
+        return None
+    props = ((next_data or {}).get("props") or {}).get("pageProps") or {}
+
+    def bfs(root: Any) -> dict[str, Any] | None:
+        queue: list[Any] = [root]
+        while queue:
+            cur = queue.pop(0)
+            if isinstance(cur, dict):
+                if str(cur.get("id")) == str(lesson_id) and isinstance(cur.get("metadata"), dict):
+                    return cur
+                queue.extend(cur.values())
+            elif isinstance(cur, list):
+                queue.extend(cur)
+        return None
+
+    return bfs(props.get("course") or {}) or bfs(next_data)
+
+
+def _load_sidecar(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_sidecar(path: Path, data: dict[str, Any], ctx: RunContext) -> None:
+    """Best-effort: skip-state must never fail a run."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError as exc:
+        ctx.logger.debug("skool: could not write sidecar %s: %s", path, exc)
 
 
 def _mux_hls_url(next_data: dict[str, Any]) -> str | None:

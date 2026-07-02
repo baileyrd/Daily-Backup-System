@@ -375,22 +375,32 @@ def test_ydl_opts_quality_cap_and_ffmpeg_location(tmp_path):
 
 
 def _video_lesson(**kw):
-    lesson = {"lessonId": "l1", "title": "Lesson 1", "videoId": "mux1",
-              "videoUnavailable": False}
+    lesson = {"lessonId": "l1", "title": "Lesson 1", "moduleTitle": "Module 1"}
     lesson.update(kw)
     return lesson
 
 
-class _VideoConn(SkoolConnector):
-    """Overridable sniff/download seams for orchestration tests."""
+class _LessonConn(SkoolConnector):
+    """Overridable enrich/sniff/download seams for _process_lesson tests."""
 
-    def __init__(self, sniff_url="https://stream.mux.com/pb.m3u8?token=t", download_ok=True):
+    def __init__(self, fields=None, sniff_url="https://stream.mux.com/pb.m3u8?token=t",
+                 download_ok=True, enrich_fail=False):
+        self._fields = fields if fields is not None else {
+            "videoId": "mux1", "videoLink": None, "resources": []}
         self._sniff_url = sniff_url
         self._download_ok = download_ok
+        self._enrich_fail = enrich_fail
+        self.enriched = 0
         self.sniffed = 0
         self.downloaded: list[str] = []
 
-    def _sniff_hls_url(self, page, slug, course_slug, lesson, ctx):
+    def _enrich_lesson(self, page, lesson, slug, course_slug, ctx):
+        self.enriched += 1
+        if self._enrich_fail:
+            return None
+        return dict(self._fields), {"props": {"pageProps": {}}}
+
+    def _sniff_hls_url(self, page, next_data, ctx):
         self.sniffed += 1
         return self._sniff_url
 
@@ -401,61 +411,163 @@ class _VideoConn(SkoolConnector):
         return self._download_ok
 
 
-def test_maybe_download_video_happy_path(tmp_path):
-    conn = _VideoConn()
-    cfg = SkoolConfig(downloads_dir=str(tmp_path))
-    path = conn._maybe_download_video(
-        object(), _video_lesson(), tmp_path, "comm", "course", cfg, _ctx(cfg))
-    assert path == str(tmp_path / "comm" / "course" / "l1" / "video.mp4")
-    assert (tmp_path / "comm" / "course" / "l1" / "video.mp4").read_bytes() == b"video-bytes"
-    assert conn.sniffed == 1 and len(conn.downloaded) == 1
+def _process(conn, tmp_path, lesson=None, cfg=None):
+    cfg = cfg or SkoolConfig(downloads_dir=str(tmp_path))
+    lesson = lesson if lesson is not None else _video_lesson()
+    status = conn._process_lesson(object(), lesson, tmp_path, "comm", "course", cfg, _ctx(cfg))
+    return status, lesson
 
 
-def test_maybe_download_video_skips_existing_file(tmp_path):
+def test_process_lesson_downloads_video_and_writes_sidecar(tmp_path):
+    import json as _json
+
+    conn = _LessonConn()
+    status, lesson = _process(conn, tmp_path)
     dest = tmp_path / "comm" / "course" / "l1" / "video.mp4"
-    dest.parent.mkdir(parents=True)
-    dest.write_bytes(b"already here")
-    conn = _VideoConn()
+    assert status == "downloaded"
+    assert lesson["_video_path"] == str(dest)
+    assert lesson["videoId"] == "mux1" and lesson["hasVideo"] is True
+    assert dest.read_bytes() == b"video-bytes"
+    sidecar = _json.loads((dest.parent / ".meta.json").read_text())
+    assert sidecar["video_downloaded"] is True
+    assert sidecar["no_native_video"] is False
+    assert conn.enriched == 1 and conn.sniffed == 1
+
+
+def test_process_lesson_sidecar_fast_path_skips_navigation(tmp_path):
+    conn = _LessonConn()
+    _process(conn, tmp_path)  # first run: enrich + download + sidecar
+    conn2 = _LessonConn()
+    status, lesson = _process(conn2, tmp_path)
+    assert status == "cached"
+    assert conn2.enriched == 0 and conn2.sniffed == 0  # no page visit at all
+    # Merged fields match a fresh enrichment (no updated/unchanged flapping).
+    assert lesson["videoId"] == "mux1" and lesson["hasVideo"] is True
+    assert lesson["_video_path"].endswith("video.mp4")
+
+
+def test_process_lesson_sidecar_with_missing_video_reprocesses(tmp_path):
+    conn = _LessonConn()
+    _process(conn, tmp_path)
+    (tmp_path / "comm" / "course" / "l1" / "video.mp4").unlink()  # file lost
+    conn2 = _LessonConn()
+    status, _ = _process(conn2, tmp_path)
+    assert status == "downloaded"  # re-visited and re-downloaded
+    assert conn2.enriched == 1
+
+
+def test_process_lesson_no_native_video_writes_marker_sidecar(tmp_path):
+    import json as _json
+
+    conn = _LessonConn(fields={"videoId": None, "videoLink": "https://vimeo.com/1",
+                               "resources": []})
+    status, lesson = _process(conn, tmp_path)
+    assert status == "none"
+    assert lesson["videoLink"] == "https://vimeo.com/1" and lesson["hasVideo"] is True
+    assert conn.sniffed == 0 and conn.downloaded == []
+    sidecar = _json.loads((tmp_path / "comm" / "course" / "l1" / ".meta.json").read_text())
+    assert sidecar["no_native_video"] is True
+    # Second run: fast path, still no video seams touched.
+    conn2 = _LessonConn()
+    status, _ = _process(conn2, tmp_path,
+                         lesson=_video_lesson())
+    assert status == "cached" and conn2.enriched == 0
+
+
+def test_process_lesson_enrich_failure_yields_without_sidecar(tmp_path):
+    conn = _LessonConn(enrich_fail=True)
+    status, lesson = _process(conn, tmp_path)
+    assert status == "failed"
+    assert "_video_path" not in lesson
+    assert not (tmp_path / "comm" / "course" / "l1" / ".meta.json").exists()  # retries
+
+
+def test_process_lesson_video_failure_no_sidecar_retries(tmp_path):
+    conn = _LessonConn(sniff_url=None)
+    with_url_fail_status, _ = _process(conn, tmp_path)
+    assert with_url_fail_status == "failed"
+    assert not (tmp_path / "comm" / "course" / "l1" / ".meta.json").exists()
+    conn2 = _LessonConn(download_ok=False)
+    status, _ = _process(conn2, tmp_path)
+    assert status == "failed"
+    assert not (tmp_path / "comm" / "course" / "l1" / ".meta.json").exists()
+
+
+def test_process_lesson_download_videos_off_still_enriches(tmp_path):
+    import json as _json
+
+    cfg = SkoolConfig(downloads_dir=str(tmp_path), download_videos=False)
+    conn = _LessonConn()
+    status, lesson = _process(conn, tmp_path, cfg=cfg)
+    assert status == "none"
+    assert conn.enriched == 1 and conn.sniffed == 0  # metadata yes, video no
+    assert lesson["videoId"] == "mux1"
+    sidecar = _json.loads((tmp_path / "comm" / "course" / "l1" / ".meta.json").read_text())
+    assert sidecar["video_downloaded"] is False
+    # Fast path holds while the toggle stays off...
+    conn2 = _LessonConn()
+    assert _process(conn2, tmp_path, cfg=cfg)[0] == "cached" and conn2.enriched == 0
+    # ...but turning downloads on makes the sidecar incomplete -> re-process.
+    cfg_on = SkoolConfig(downloads_dir=str(tmp_path))
+    conn3 = _LessonConn()
+    assert _process(conn3, tmp_path, cfg=cfg_on)[0] == "downloaded"
+
+
+def test_process_lesson_downloads_resources_from_enrichment(tmp_path):
+    import base64
+
+    conn = _LessonConn(fields={"videoId": None, "videoLink": None, "resources": [
+        {"downloadUrl": "https://x/f.pdf", "file_name": "f.pdf",
+         "file_content_type": "application/pdf"}]})
+    body = b"%PDF-1.4 hello"
+    # _download_resources runs for real over a fake page (in-page fetch).
+    page = _FakePage(fetch={"https://x/f.pdf": {
+        "status": 200, "b64": base64.b64encode(body).decode()}})
     cfg = SkoolConfig(downloads_dir=str(tmp_path))
-    path = conn._maybe_download_video(
-        object(), _video_lesson(), tmp_path, "comm", "course", cfg, _ctx(cfg))
-    assert path == str(dest)
-    assert conn.sniffed == 0 and conn.downloaded == []  # no player interaction
-    assert dest.read_bytes() == b"already here"
+    lesson = _video_lesson()
+    conn._process_lesson(page, lesson, tmp_path, "comm", "course", cfg, _ctx(cfg))
+    dest = tmp_path / "comm" / "course" / "l1" / "f.pdf"
+    assert dest.read_bytes() == body
+    assert lesson["_resources"][0]["path"] == str(dest)
+    # Sidecar lists the resource -> fast path only while the file exists.
+    conn2 = _LessonConn()
+    assert _process(conn2, tmp_path)[0] == "cached"
+    dest.unlink()
+    conn3 = _LessonConn(fields={"videoId": None, "videoLink": None, "resources": []})
+    assert _process(conn3, tmp_path)[0] == "none"  # re-visited
+    assert conn3.enriched == 1
 
 
-def test_maybe_download_video_respects_toggle_and_skips_non_native(tmp_path):
-    cfg_off = SkoolConfig(downloads_dir=str(tmp_path), download_videos=False)
-    conn = _VideoConn()
-    assert conn._maybe_download_video(
-        object(), _video_lesson(), tmp_path, "c", "c", cfg_off, _ctx(cfg_off)) is None
-
-    cfg = SkoolConfig(downloads_dir=str(tmp_path))
-    # External-link-only lesson (no videoId) -> reference, not a download.
-    assert conn._maybe_download_video(
-        object(), _video_lesson(videoId=None, videoLink="https://vimeo.com/1"),
-        tmp_path, "c", "c", cfg, _ctx(cfg)) is None
-    # Unavailable native video -> skipped.
-    assert conn._maybe_download_video(
-        object(), _video_lesson(videoUnavailable=True), tmp_path, "c", "c", cfg, _ctx(cfg)) is None
-    assert conn.sniffed == 0
+# -- _find_lesson_node ---------------------------------------------------------
 
 
-def test_maybe_download_video_sniff_failure_warns_but_never_raises(tmp_path, caplog):
-    conn = _VideoConn(sniff_url=None)
-    cfg = SkoolConfig(downloads_dir=str(tmp_path))
-    with caplog.at_level("WARNING", logger="test"):
-        path = conn._maybe_download_video(
-            object(), _video_lesson(), tmp_path, "c", "c", cfg, _ctx(cfg))
-    assert path is None
-    assert any("could not capture a video URL" in r.message for r in caplog.records)
+def test_find_lesson_node_course_wrapped_and_plain():
+    from dbs.connectors.skool import _find_lesson_node
+
+    wrapped = {"props": {"pageProps": {"course": {"id": "root", "children": [
+        {"course": {"id": "l1", "metadata": {"title": "L", "videoId": "mux1"}},
+         "children": []},
+    ]}}}}
+    node = _find_lesson_node(wrapped, "l1")
+    assert node["metadata"]["videoId"] == "mux1"
+
+    plain = {"props": {"pageProps": {"course": {"id": "root", "children": [
+        {"id": "m1", "metadata": {"title": "Mod"}, "children": [
+            {"id": "l2", "metadata": {"title": "L2", "videoLink": "https://vimeo.com/2"}},
+        ]},
+    ]}}}}
+    node = _find_lesson_node(plain, "l2")
+    assert node["metadata"]["videoLink"] == "https://vimeo.com/2"
 
 
-def test_maybe_download_video_download_failure_returns_none(tmp_path):
-    conn = _VideoConn(download_ok=False)
-    cfg = SkoolConfig(downloads_dir=str(tmp_path))
-    assert conn._maybe_download_video(
-        object(), _video_lesson(), tmp_path, "c", "c", cfg, _ctx(cfg)) is None
+def test_find_lesson_node_fallback_and_missing():
+    from dbs.connectors.skool import _find_lesson_node
+
+    elsewhere = {"props": {"pageProps": {"renderData": {
+        "lesson": {"id": "l9", "metadata": {"title": "Elsewhere"}}}}}}
+    assert _find_lesson_node(elsewhere, "l9")["metadata"]["title"] == "Elsewhere"
+    assert _find_lesson_node(elsewhere, "nope") is None
+    assert _find_lesson_node({}, None) is None
 
 
 def test_lesson_item_prefers_local_video_over_external_link():
