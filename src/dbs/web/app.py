@@ -406,6 +406,8 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
             target = str((base / f".{ctype}-session").resolve())
         elif spec.kind == "browser_cookies":
             target = str((base / f".{ctype}-cookies.txt").resolve())
+        elif spec.kind == "browser_storage_state":
+            target = str((base / f".{ctype}-state.json").resolve())
         else:
             raise HTTPException(status_code=400, detail=f"unsupported capture kind {spec.kind!r}")
         env_path = base / ".env"

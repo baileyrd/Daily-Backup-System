@@ -1,7 +1,9 @@
 """Web tier tests: REST endpoints, background backup job, SSE, export download.
 
-Uses the offline `skool` connector (reads local manifests, no auth/network) to
-drive a real backup through the HTTP API.
+Drives a real backup through the HTTP API using the `skool` connector with its
+one browser-touching method (`_acquire`) faked out (see `_offline_skool`), so
+the end-to-end HTTP → service → engine → storage path runs with no browser,
+network, or captured session.
 """
 
 from __future__ import annotations
@@ -17,6 +19,25 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from dbs.web import create_app  # noqa: E402
 from dbs.web.jobs import JobAlreadyRunning, JobManager  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _offline_skool(monkeypatch):
+    """Fake skool's Playwright acquisition so web-tier backups drive offline.
+
+    Yields a single community manifest matching the `_write_setup` fixture, so
+    a `courses` backup produces exactly one item (`community:mycommunity`)
+    without a real browser, `SKOOL_STATE_FILE`, or `downloads_dir`.
+    """
+    from dbs.connectors.skool import SkoolConnector
+
+    def fake_acquire(self, ctx):
+        yield {
+            "_kind": "community", "slug": "mycommunity",
+            "groupName": "My Community", "updatedAt": "2024-01-01T00:00:00Z",
+        }
+
+    monkeypatch.setattr(SkoolConnector, "_acquire", fake_acquire)
 
 
 def _write_setup(tmp_path):
@@ -234,18 +255,18 @@ def test_export_unknown_format_400(client):
 
 def test_connectors_report_readiness(client):
     conns = {c["type"]: c for c in client.get("/api/connectors").json()}
-    # skool is offline/stdlib -> always ready, nothing to install.
-    assert conns["skool"]["ready"] is True
-    assert conns["skool"]["pip_requirements"] == []
-    # reddit/youtube declare optional deps + docs links.
+    # reddit/youtube/skool declare optional deps + docs links.
     assert conns["reddit"]["pip_requirements"] == ["playwright>=1.40"]
     assert conns["reddit"]["needs_playwright_browser"] is True
     assert conns["reddit"]["auth_capture"]["kind"] == "browser_session"
     assert conns["youtube"]["pip_requirements"] == ["yt-dlp>=2024.1"]
     assert conns["youtube"]["auth_capture"]["kind"] == "browser_cookies"
-    # skool captures a Playwright storageState into its own tool dir (per-source).
+    # skool now logs into skool.com via a captured Playwright storageState
+    # (connector-level, like reddit — no per-source tool dir).
+    assert conns["skool"]["pip_requirements"] == ["playwright>=1.40"]
+    assert conns["skool"]["needs_playwright_browser"] is True
     assert conns["skool"]["auth_capture"]["kind"] == "browser_storage_state"
-    assert conns["skool"]["auth_capture"]["per_source"] is True
+    assert conns["skool"]["auth_capture"]["per_source"] is False
     assert conns["reddit"]["auth_capture"]["per_source"] is False
     assert conns["reddit"]["docs_url"]
 
@@ -265,20 +286,21 @@ def test_install_unknown_connector_404(setup_client):
 
 
 def test_install_when_nothing_to_install_400(setup_client):
-    # skool needs no optional deps.
-    assert setup_client.post("/api/connectors/skool/install").status_code == 400
+    # raindrop is token-based with no optional deps -> nothing to install.
+    assert setup_client.post("/api/connectors/raindrop/install").status_code == 400
 
 
-def test_capture_unsupported_connector_400(setup_client):
-    # skool's capture is per-source -> the connector-level endpoint refuses it.
-    assert setup_client.post("/api/connectors/skool/capture").status_code == 400
+def test_capture_no_auth_capture_400(setup_client):
+    # raindrop authenticates with a token, not a browser session -> the
+    # connector-level capture endpoint refuses it.
+    assert setup_client.post("/api/connectors/raindrop/capture").status_code == 400
 
 
 def test_capture_unknown_connector_404(setup_client):
     assert setup_client.post("/api/connectors/nope/capture").status_code == 404
 
 
-# --- per-source capture (skool storageState into downloader's .auth/) -------
+# --- per-source capture (no built-in connector uses it anymore) -------------
 
 
 def test_source_capture_disabled_403(client):
@@ -290,12 +312,12 @@ def test_source_capture_unknown_source_404(setup_client):
     assert setup_client.post("/api/sources/nope/capture").status_code == 404
 
 
-def test_source_capture_requires_target_dir(setup_client):
-    # The "courses" skool source has no downloader_cwd set -> can't place the
-    # storageState; 400 with guidance (no browser is launched).
+def test_source_capture_rejected_for_connector_level_capture(setup_client):
+    # skool now captures at connector level (browser_storage_state, no
+    # target_dir_option) -> the per-source route refuses it with guidance.
     r = setup_client.post("/api/sources/courses/capture")
     assert r.status_code == 400
-    assert "downloader_cwd" in r.json()["detail"]
+    assert "per-source login capture" in r.json()["detail"]
 
 
 def test_wait_until_closed_snapshots_storage_state():
@@ -513,10 +535,12 @@ def test_delete_secret(secret_client):
     assert next(s for s in data["secrets"] if s["name"] == "RAINDROP_TOKEN")["set"] is False
 
 
-def test_secrets_empty_when_no_keys_needed(client):
-    # The default fixture only configures the offline skool source.
+def test_skool_source_needs_state_file_secret(client):
+    # The default fixture configures a skool source, which authenticates via a
+    # captured Playwright storageState referenced by SKOOL_STATE_FILE.
     data = client.get("/api/secrets").json()
-    assert data["secrets"] == []
+    assert [s["name"] for s in data["secrets"]] == ["SKOOL_STATE_FILE"]
+    assert data["secrets"][0]["set"] is False
 
 
 # --- envfile helper (unit) -------------------------------------------------

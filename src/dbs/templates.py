@@ -50,14 +50,18 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # cookies_file_env = "YOUTUBE_COOKIES_FILE"
 # # cookies_from_browser = "chrome"
 
-# Skool: catalog courses already downloaded by skool-downloader (no auth, no
-# extra — it just indexes the JSON manifests on disk; videos stay where they are).
+# Skool: back up your communities/courses/lessons via a logged-in browser
+# session. Needs the extra:  pip install 'daily-backup-system[skool]' && playwright
+# install chromium. Click "Skool login" in the UI to capture the session
+# (SKOOL_STATE_FILE). downloads_dir is where attached resource files are saved.
 # [sources.skool]
 # type = "skool"
 # enabled = true
-# downloads_dir = "~/skool-downloader/downloads"
+# downloads_dir = "~/skool-backup"
+# communities = ["your-community"]   # optional; auto-discovered from your account if omitted
 # include_kinds = ["community", "course", "lesson"]
-# include_incomplete = true       # also index lessons whose download is unfinished
+# headless = true                    # set false if Skool blocks the automated browser
+# state_file_env = "SKOOL_STATE_FILE"
 
 # --- Optional: connector collision overrides ------------------------------
 # [connectors.raindrop]
