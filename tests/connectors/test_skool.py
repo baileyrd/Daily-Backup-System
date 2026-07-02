@@ -527,6 +527,20 @@ def test_ydl_opts_matches_skool_downloader_invocation(tmp_path):
     assert "extractor_args" not in _ydl_opts(dest, 0, None)
     opts = _ydl_opts(dest, 0, None, extractor_args={"youtube": {"player_client": ["android"]}})
     assert opts["extractor_args"] == {"youtube": {"player_client": ["android"]}}
+    # js_runtimes (the actual fix for YouTube's JS challenge / bot-check).
+    assert "js_runtimes" not in _ydl_opts(dest, 0, None)
+    opts = _ydl_opts(dest, 0, None, js_runtimes={"node": {"path": "/opt/node"}})
+    assert opts["js_runtimes"] == {"node": {"path": "/opt/node"}}
+
+
+def test_js_runtime_opts_degrades_gracefully_without_nodejs_wheel(monkeypatch):
+    import sys
+
+    from dbs.connectors import skool as skool_mod
+
+    monkeypatch.setitem(sys.modules, "nodejs_wheel", None)  # simulate not installed
+    monkeypatch.setitem(sys.modules, "nodejs_wheel.executable", None)
+    assert skool_mod._js_runtime_opts() is None  # no crash, yt-dlp uses its own detection
 
 
 def test_fetch_rejects_undeclared_video_cookies_file_env():
@@ -654,6 +668,45 @@ def test_download_hls_passes_extractor_args_for_external_only(tmp_path, monkeypa
     # Native (Mux) downloads never get YouTube extractor_args.
     conn._download_hls("https://stream.video.skool.com/x.m3u8", dest, cfg, ctx, external=False)
     assert "extractor_args" not in captured[-1]
+
+
+def test_download_hls_wires_js_runtime_opts_for_every_download(tmp_path, monkeypatch):
+    # The actual fix for a persistent bot-check: yt-dlp needs a JS runtime to
+    # solve YouTube's challenge. Applies to every download, not just external
+    # (harmless/unused for Skool's own CDN, but simplest to always pass).
+    import yt_dlp
+    from dbs.connectors import skool as skool_mod
+
+    captured: list[dict] = []
+
+    class _FakeYDL:
+        def __init__(self, opts):
+            captured.append(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def download(self, urls):
+            pass
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _FakeYDL)
+    monkeypatch.setattr(skool_mod, "_js_runtime_opts",
+                        lambda: {"node": {"path": "/opt/node"}})
+    conn = SkoolConnector()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path), video_cookies_file_env=None)
+    ctx = _ctx(cfg)
+    dest = tmp_path / "video.mp4"
+    conn._download_hls("https://stream.video.skool.com/x.m3u8", dest, cfg, ctx, external=False)
+    assert captured[-1]["js_runtimes"] == {"node": {"path": "/opt/node"}}
+    conn._download_hls("https://youtu.be/x", dest, cfg, ctx, external=True)
+    assert captured[-1]["js_runtimes"] == {"node": {"path": "/opt/node"}}
+    # nodejs-wheel not installed -> no js_runtimes key, no crash.
+    monkeypatch.setattr(skool_mod, "_js_runtime_opts", lambda: None)
+    conn._download_hls("https://youtu.be/x", dest, cfg, ctx, external=True)
+    assert "js_runtimes" not in captured[-1]
 
 
 def _video_lesson(**kw):

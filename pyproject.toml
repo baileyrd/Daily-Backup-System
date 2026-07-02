@@ -33,12 +33,20 @@ dev = ["pytest>=8", "pytest-cov", "httpx>=0.27", "fastapi>=0.110", "uvicorn>=0.2
 # never imports these; each connector imports them lazily at run time, so the
 # tool stays usable (and the connectors stay discoverable) without the extra.
 reddit = ["playwright>=1.40"]
-youtube = ["yt-dlp>=2025.6.30"]
-skool = ["playwright>=1.40", "yt-dlp>=2025.6.30", "imageio-ffmpeg>=0.4"]
+# yt-dlp[default] bundles yt-dlp-ejs — required to solve YouTube's JS
+# challenge; without it, extraction silently degrades to "Sign in to confirm
+# you're not a bot" regardless of cookies/headers. nodejs-wheel is an
+# auto-managed portable Node.js binary (mirrors imageio-ffmpeg's pattern) so
+# that solver has a runtime to execute without a separate system install.
+youtube = ["yt-dlp[default]>=2026.1.29", "nodejs-wheel>=22"]
+skool = [
+    "playwright>=1.40", "yt-dlp[default]>=2026.1.29", "nodejs-wheel>=22",
+    "imageio-ffmpeg>=0.4",
+]
 # Ad-hoc YouTube research pipeline (`dbs research youtube`). Not a connector;
 # imported lazily inside src/dbs/research/ so the CLI stays usable without
 # this extra installed.
-research = ["yt-dlp>=2025.6.30", "notebooklm-py[browser]"]
+research = ["yt-dlp[default]>=2026.1.29", "nodejs-wheel>=22", "notebooklm-py[browser]"]
 
 [project.scripts]
 dbs = "dbs.cli:main"
