@@ -23,7 +23,7 @@ from dbs.connectors.skool import (
 )
 from conftest import make_ctx, registered
 
-SECRETS_ENV = {"SKOOL_STATE_FILE": "/tmp/skool-state.json"}
+SECRETS_ENV = {"SKOOL_SESSION_DIR": "/tmp/skool-session"}
 
 
 def _community(slug="comm-a", name="Community A", updated="2024-01-01T00:00:00Z"):
@@ -64,7 +64,7 @@ def _ctx(cfg=None, mode="full"):
     return make_ctx(
         source_id=1, run_id=1, mode=mode,
         config=cfg or SkoolConfig(downloads_dir="/dl"),
-        secrets=Secrets(SECRETS_ENV, ("SKOOL_STATE_FILE",)),
+        secrets=Secrets(SECRETS_ENV, ("SKOOL_SESSION_DIR",)),
     )
 
 
@@ -262,7 +262,7 @@ def _run(storage, conn, *, mode="full"):
     ctx = make_ctx(
         source_id=source.id, run_id=run_id, mode=mode,
         config=SkoolConfig(downloads_dir="/dl"),
-        secrets=Secrets(SECRETS_ENV, ("SKOOL_STATE_FILE",)),
+        secrets=Secrets(SECRETS_ENV, ("SKOOL_SESSION_DIR",)),
     )
     result = Engine(storage).run_source(registered(type(conn)), ctx)
     storage.increment_run_count(source.id)

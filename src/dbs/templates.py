@@ -53,7 +53,7 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # Skool: back up your communities/courses/lessons via a logged-in browser
 # session. Needs the extra:  pip install 'daily-backup-system[skool]' && playwright
 # install chromium. Click "Skool login" in the UI to capture the session
-# (SKOOL_STATE_FILE). downloads_dir is where attached resource files are saved.
+# (SKOOL_SESSION_DIR). downloads_dir is where attached resource files are saved.
 # [sources.skool]
 # type = "skool"
 # enabled = true
@@ -61,7 +61,7 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # communities = ["your-community"]   # optional; auto-discovered from your account if omitted
 # include_kinds = ["community", "course", "lesson"]
 # headless = true                    # set false if Skool blocks the automated browser
-# state_file_env = "SKOOL_STATE_FILE"
+# session_dir_env = "SKOOL_SESSION_DIR"
 
 # --- Optional: connector collision overrides ------------------------------
 # [connectors.raindrop]

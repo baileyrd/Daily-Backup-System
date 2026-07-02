@@ -27,7 +27,7 @@ def _offline_skool(monkeypatch):
 
     Yields a single community manifest matching the `_write_setup` fixture, so
     a `courses` backup produces exactly one item (`community:mycommunity`)
-    without a real browser, `SKOOL_STATE_FILE`, or `downloads_dir`.
+    without a real browser, `SKOOL_SESSION_DIR`, or `downloads_dir`.
     """
     from dbs.connectors.skool import SkoolConnector
 
@@ -261,11 +261,11 @@ def test_connectors_report_readiness(client):
     assert conns["reddit"]["auth_capture"]["kind"] == "browser_session"
     assert conns["youtube"]["pip_requirements"] == ["yt-dlp>=2024.1"]
     assert conns["youtube"]["auth_capture"]["kind"] == "browser_cookies"
-    # skool now logs into skool.com via a captured Playwright storageState
-    # (connector-level, like reddit — no per-source tool dir).
+    # skool logs into skool.com via a captured persistent session (connector-
+    # level, the same browser_session capture reddit uses).
     assert conns["skool"]["pip_requirements"] == ["playwright>=1.40"]
     assert conns["skool"]["needs_playwright_browser"] is True
-    assert conns["skool"]["auth_capture"]["kind"] == "browser_storage_state"
+    assert conns["skool"]["auth_capture"]["kind"] == "browser_session"
     assert conns["skool"]["auth_capture"]["per_source"] is False
     assert conns["reddit"]["auth_capture"]["per_source"] is False
     assert conns["reddit"]["docs_url"]
@@ -535,11 +535,11 @@ def test_delete_secret(secret_client):
     assert next(s for s in data["secrets"] if s["name"] == "RAINDROP_TOKEN")["set"] is False
 
 
-def test_skool_source_needs_state_file_secret(client):
+def test_skool_source_needs_session_dir_secret(client):
     # The default fixture configures a skool source, which authenticates via a
-    # captured Playwright storageState referenced by SKOOL_STATE_FILE.
+    # captured persistent session directory referenced by SKOOL_SESSION_DIR.
     data = client.get("/api/secrets").json()
-    assert [s["name"] for s in data["secrets"]] == ["SKOOL_STATE_FILE"]
+    assert [s["name"] for s in data["secrets"]] == ["SKOOL_SESSION_DIR"]
     assert data["secrets"][0]["set"] is False
 
 

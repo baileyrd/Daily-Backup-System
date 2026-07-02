@@ -116,7 +116,7 @@ on by default — `dbs serve`) can do the setup for you:
 | Connector | Needs | In the UI |
 |---|---|---|
 | **raindrop** | `RAINDROP_TOKEN` | set it in *API keys* |
-| **skool** | `[skool]` extra + `playwright install chromium`; a logged-in session | **Install**, then **Skool login** — opens a browser on the host, you log in and close it; the session file + `SKOOL_STATE_FILE` are captured for you |
+| **skool** | `[skool]` extra + `playwright install chromium`; a logged-in session | **Install**, then **Skool login** — opens a browser on the host, you log in and close it; the session dir + `SKOOL_SESSION_DIR` are captured for you |
 | **reddit** | `[reddit]` extra + `playwright install chromium`; a logged-in session dir | **Install**, then **Reddit login** — opens a browser on the host, you log in and close it; the session dir + `REDDIT_SESSION_DIR` are captured for you. Make sure reddit.com shows you logged in before closing (with *Continue with Google*, finish the redirect back to reddit first). The account is auto-detected from the session — `username` in the source config is optional. If runs fail with HTTP 403 even after re-capturing, set `headless = false` for the source |
 | **youtube** | `[youtube]` extra; a `cookies.txt` *or* `cookies_from_browser` | **Install**, then **YouTube login** — captures a `cookies.txt` and sets `YOUTUBE_COOKIES_FILE`; or skip capture and set `cookies_from_browser` (e.g. `chrome`) in the source config |
 
@@ -132,8 +132,8 @@ the window, and the artifact is captured and recorded in `.env`:
   (each run verifies the session is really logged in via Reddit's `me.json` and
   fails loudly with re-capture instructions if not);
 - **youtube** → a Netscape `cookies.txt` exported after login → `YOUTUBE_COOKIES_FILE`;
-- **skool** → a Playwright `storageState` JSON written into your dbs dir →
-  `SKOOL_STATE_FILE` (connector-level, shared by every skool source — the login
+- **skool** → a Playwright persistent-session directory written into your dbs dir →
+  `SKOOL_SESSION_DIR` (connector-level, shared by every skool source — the login
   reads each community's classroom pages and downloads their resource files).
 
 Capture drives the browser with **Playwright**. It's **one click** — if Playwright

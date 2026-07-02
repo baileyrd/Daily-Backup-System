@@ -406,8 +406,6 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
             target = str((base / f".{ctype}-session").resolve())
         elif spec.kind == "browser_cookies":
             target = str((base / f".{ctype}-cookies.txt").resolve())
-        elif spec.kind == "browser_storage_state":
-            target = str((base / f".{ctype}-state.json").resolve())
         else:
             raise HTTPException(status_code=400, detail=f"unsupported capture kind {spec.kind!r}")
         env_path = base / ".env"
@@ -426,8 +424,9 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
     def source_capture(name: str) -> dict[str, Any]:
         """Per-source browser login capture (target lives in the source's tool dir).
 
-        e.g. skool → a Playwright storageState written into the configured
-        skool-downloader checkout's .auth/ so its own downloads pick it up.
+        For connectors whose ``AuthCapture`` sets ``target_dir_option`` — the
+        session artifact is written under a directory named in that source's
+        config (e.g. an external tool's checkout) rather than the dbs dir.
         """
         _require_setup()
         svc = open_service()
