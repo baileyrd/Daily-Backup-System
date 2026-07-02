@@ -153,6 +153,17 @@ class SkoolConfig(BaseModel):
     download_videos: bool = True
     # Cap the selected HLS variant's height (e.g. 1080, 720). 0 = best available.
     video_quality: int = Field(default=1080, ge=0)
+    # Cookies for downloading EXTERNAL videos (a lesson's YouTube/Vimeo/Loom
+    # videoLink) via yt-dlp — YouTube in particular refuses some downloads
+    # without a signed-in session ("Sign in to confirm you're not a bot").
+    # Defaults to the same secret name the YouTube connector uses, so if
+    # you've already captured YOUTUBE_COOKIES_FILE for that source it's
+    # reused here automatically; set to null to send no cookies. Never used
+    # for native (Mux) video — only for external links. Alternative:
+    # video_cookies_from_browser (e.g. "chrome") reads a local browser's
+    # cookies directly, no secret needed.
+    video_cookies_file_env: str | None = "YOUTUBE_COOKIES_FILE"
+    video_cookies_from_browser: str | None = None
     # Write a markdown note of each lesson page (url2obs-convention frontmatter,
     # body converted from Skool's editor JSON, links to the downloaded media)
     # into the lesson's folder, next to its video and resources.
@@ -183,7 +194,10 @@ class SkoolConnector(Connector):
         label="Skool login",
     )
     config_model = SkoolConfig
-    secret_keys = ("SKOOL_SESSION_DIR",)
+    # YOUTUBE_COOKIES_FILE is optional here — only read if video_cookies_file_env
+    # points at it (the default) and it's actually set; external video downloads
+    # simply go cookie-less otherwise.
+    secret_keys = ("SKOOL_SESSION_DIR", "YOUTUBE_COOKIES_FILE")
     wants_managed_http = False
     schema_version = 1
     pip_requirements = ("playwright>=1.40", "yt-dlp>=2024.1", "imageio-ffmpeg>=0.4")
@@ -213,6 +227,12 @@ class SkoolConnector(Connector):
 
     def fetch(self, ctx: RunContext) -> Iterator["BackupItem | Checkpoint | ReconcileMarker"]:
         cfg: SkoolConfig = ctx.config  # type: ignore[assignment]
+        if cfg.video_cookies_file_env and cfg.video_cookies_file_env not in self.secret_keys:
+            raise ConnectorConfigError(
+                f"video_cookies_file_env={cfg.video_cookies_file_env!r} must be one of "
+                f"the declared secret_keys {self.secret_keys}; set it in your .env, or "
+                f"set video_cookies_from_browser in the source config instead."
+            )
         live_ids: set[str] = set()
         cursor: dict[str, Any] = {}
         seen = 0
@@ -754,7 +774,9 @@ class SkoolConnector(Connector):
 
         ``external`` marks a non-Skool host (a lesson's YouTube/Vimeo/Loom
         ``videoLink``) — yt-dlp's own defaults handle those best, so the
-        Skool CDN headers are dropped.
+        Skool CDN headers are dropped, and cookies are attached if configured
+        (some hosts, notably YouTube, refuse a download without a signed-in
+        session — "Sign in to confirm you're not a bot").
         """
         try:
             import yt_dlp
@@ -764,7 +786,14 @@ class SkoolConnector(Connector):
                 "Install with `pip install 'daily-backup-system[skool]'`."
             )
             return False
-        opts = _ydl_opts(dest, cfg.video_quality, _ffmpeg_location(), external=external)
+        cookiefile = None
+        if external and cfg.video_cookies_file_env:
+            cookiefile = ctx.secrets.get_optional(cfg.video_cookies_file_env)
+        opts = _ydl_opts(
+            dest, cfg.video_quality, _ffmpeg_location(), external=external,
+            cookiefile=cookiefile,
+            cookies_from_browser=cfg.video_cookies_from_browser if external else None,
+        )
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
@@ -1265,7 +1294,8 @@ def _mux_hls_url(next_data: dict[str, Any], video_id: Any) -> str | None:
 
 
 def _ydl_opts(
-    dest: Path, quality: int, ffmpeg_location: str | None, external: bool = False
+    dest: Path, quality: int, ffmpeg_location: str | None, external: bool = False,
+    cookiefile: str | None = None, cookies_from_browser: str | None = None,
 ) -> dict[str, Any]:
     """yt-dlp options for downloading one video to an exact path.
 
@@ -1275,6 +1305,9 @@ def _ydl_opts(
     yt-dlp default), mp4 merge with ``+faststart``, 8 concurrent fragments.
     ``external`` (a YouTube/Vimeo/Loom videoLink) drops the Skool headers —
     forcing a mismatched Referer/UA on those hosts breaks their extractors.
+    ``cookiefile``/``cookies_from_browser`` are only meaningful for external
+    downloads; some hosts (YouTube) refuse a download without a signed-in
+    session.
     """
     opts: dict[str, Any] = {
         "quiet": True,
@@ -1296,6 +1329,10 @@ def _ydl_opts(
         opts["format_sort"] = [f"res:{quality}", "vcodec:h264", "acodec:m4a"]
     if ffmpeg_location:
         opts["ffmpeg_location"] = ffmpeg_location
+    if cookiefile:
+        opts["cookiefile"] = cookiefile
+    if cookies_from_browser:
+        opts["cookiesfrombrowser"] = (cookies_from_browser,)
     return opts
 
 

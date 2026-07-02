@@ -541,9 +541,13 @@ def test_delete_secret(secret_client):
 def test_skool_source_needs_session_dir_secret(client):
     # The default fixture configures a skool source, which authenticates via a
     # captured persistent session directory referenced by SKOOL_SESSION_DIR.
+    # It also (optionally) reads YOUTUBE_COOKIES_FILE for external video
+    # downloads, reusing the youtube connector's secret if one is captured.
     data = client.get("/api/secrets").json()
-    assert [s["name"] for s in data["secrets"]] == ["SKOOL_SESSION_DIR"]
-    assert data["secrets"][0]["set"] is False
+    assert [s["name"] for s in data["secrets"]] == [
+        "SKOOL_SESSION_DIR", "YOUTUBE_COOKIES_FILE"
+    ]
+    assert all(s["set"] is False for s in data["secrets"])
 
 
 # --- envfile helper (unit) -------------------------------------------------
