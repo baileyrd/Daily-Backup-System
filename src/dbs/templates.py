@@ -65,7 +65,9 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # video_cookies_file_env = "YOUTUBE_COOKIES_FILE"  # cookies for EXTERNAL videos
 #   (a lesson's YouTube/Vimeo/Loom link) — reuses the youtube connector's secret
 #   if you already have one; needed when yt-dlp reports "Sign in to confirm
-#   you're not a bot". Or set video_cookies_from_browser = "chrome" instead.
+#   you're not a bot". video_cookies_from_browser = "chrome" is a fallback for
+#   when no cookie file is set — on Windows it often fails ("Failed to
+#   decrypt with DPAPI") against modern Chrome, so prefer the captured file.
 # communities = ["your-community"]   # optional; OMIT to auto-detect every community you've joined
 # courses = ["your-community/Course Title"]  # optional; only these courses (title or slug;
 #                                    # "community/course" scopes it). While set, deletion
