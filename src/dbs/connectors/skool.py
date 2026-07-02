@@ -15,9 +15,10 @@ driving the player to capture a signed HLS URL and muxing with ffmpeg — is a
 separate, heavier step tracked as phase 2; the seam is marked in
 ``_lesson_item``.
 
-Auth is a **path-valued secret** ``SKOOL_STATE_FILE``: a Playwright
-``storageState`` JSON captured once via the web UI's "Skool login" button (or
-any headed login). Login is verified per run — a redirect to ``/login`` raises
+Auth is a **path-valued secret** ``SKOOL_SESSION_DIR``: a Playwright
+persistent-context directory holding your logged-in cookies, captured once via
+the web UI's "Skool login" button (the same mechanism the Reddit connector
+uses). Login is verified per run — a redirect to ``/login`` raises
 :class:`ConnectorAuthError` instead of silently backing up nothing.
 
 Like the other browser connectors this is a **full-enumeration** source:
@@ -82,9 +83,9 @@ class SkoolConfig(BaseModel):
     include_kinds: list[str] = list(_KINDS)
     checkpoint_every: int = Field(default=200, ge=1)
     headless: bool = True
-    # Name of the env var holding the path to the Playwright storageState JSON
-    # (your logged-in Skool session). Mirrors reddit's session_dir_env.
-    state_file_env: str = "SKOOL_STATE_FILE"
+    # Name of the env var holding the path to the Playwright persistent-context
+    # directory (your logged-in Skool session). Mirrors reddit's session_dir_env.
+    session_dir_env: str = "SKOOL_SESSION_DIR"
 
 
 class SkoolConnector(Connector):
@@ -98,16 +99,17 @@ class SkoolConnector(Connector):
         "files are saved) and, optionally, communities = [\"your-community\"] "
         "(otherwise your joined communities are auto-discovered)."
     )
-    # A Playwright storageState JSON captured once; kept in the dbs dir and
-    # referenced by SKOOL_STATE_FILE in .env (a connector-level capture).
+    # A Playwright persistent-context directory captured once; kept in the dbs
+    # dir and referenced by SKOOL_SESSION_DIR in .env — the same capture the
+    # Reddit connector uses.
     auth_capture = AuthCapture(
-        kind="browser_storage_state",
-        secret_key="SKOOL_STATE_FILE",
+        kind="browser_session",
+        secret_key="SKOOL_SESSION_DIR",
         login_url="https://www.skool.com/login",
         label="Skool login",
     )
     config_model = SkoolConfig
-    secret_keys = ("SKOOL_STATE_FILE",)
+    secret_keys = ("SKOOL_SESSION_DIR",)
     wants_managed_http = False
     schema_version = 1
     pip_requirements = ("playwright>=1.40",)
@@ -165,8 +167,8 @@ class SkoolConnector(Connector):
         """Drive an authenticated browser over each community's classroom and
         yield tagged community/course/lesson dicts.
 
-        Playwright is imported lazily. The captured storageState JSON is loaded
-        into a fresh context (the site's cookies), and every classroom's
+        Playwright is imported lazily. The captured persistent-context
+        directory (the site's cookies) is loaded, and every classroom's
         ``__NEXT_DATA__`` blob is read from the rendered page. Resource files
         are downloaded to ``downloads_dir`` as a side effect; their local paths
         ride along on the lesson dict for the mapper.
@@ -181,25 +183,44 @@ class SkoolConnector(Connector):
                 "`playwright install chromium`."
             ) from exc
 
-        state_file = Path(ctx.secrets.get(cfg.state_file_env)).expanduser()
-        if not state_file.exists():
+        session_dir = Path(ctx.secrets.get(cfg.session_dir_env)).expanduser()
+        if not session_dir.exists():
             raise ConnectorConfigError(
-                f"Skool session file {state_file} does not exist; capture a login "
-                f"once (the web UI's ‘Skool login’ button) to create it."
+                f"Skool session directory {session_dir} does not exist; capture a "
+                f"login once (the web UI's ‘Skool login’ button) to create it."
             )
         downloads = Path(cfg.downloads_dir).expanduser()
 
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(
-                headless=cfg.headless,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
+            context = self._launch_context(pw, cfg, session_dir)
             try:
-                context = browser.new_context(storage_state=str(state_file))
                 page = context.new_page()
                 yield from self._walk(page, cfg, downloads, ctx)
             finally:
-                browser.close()
+                context.close()
+
+    @staticmethod
+    def _launch_context(pw: Any, cfg: SkoolConfig, session_dir: Path) -> Any:
+        """Launch the captured persistent profile, dressed as a regular Chrome.
+
+        Mirrors the Reddit connector: headless Chromium advertises
+        ``HeadlessChrome/<ver>`` in its user agent (a bot signal), so probe the
+        launched browser's own UA and relaunch once with the token scrubbed
+        (version-exact by construction).
+        """
+        kwargs: dict[str, Any] = dict(
+            user_data_dir=str(session_dir),
+            headless=cfg.headless,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        context = pw.chromium.launch_persistent_context(**kwargs)
+        probe = context.pages[0] if context.pages else context.new_page()
+        ua = probe.evaluate("() => navigator.userAgent")
+        if "HeadlessChrome" in ua:
+            context.close()
+            kwargs["user_agent"] = ua.replace("HeadlessChrome", "Chrome")
+            context = pw.chromium.launch_persistent_context(**kwargs)
+        return context
 
     def _walk(
         self, page: Any, cfg: SkoolConfig, downloads: Path, ctx: RunContext
