@@ -1,18 +1,29 @@
-"""Skool connector tests — mapping (injected) + a real filesystem walk.
+"""Skool connector tests — no browser, no network.
 
-The mapping/engine tests override ``_acquire`` to inject fabricated manifest
-dicts; the walk test builds a small skool-downloader-shaped tree on disk and
-exercises the real directory traversal and ancestor resolution.
+The Playwright-touching ``_acquire`` is overridden to inject fabricated tagged
+community/course/lesson dicts, so the mapping, reconcile, and engine paths run
+offline. The pure ``__NEXT_DATA__`` parsers and the auth/resource-fetch seam are
+exercised through fabricated blobs and a fake page (mirroring reddit's
+``_FakePage``).
 """
 
 from __future__ import annotations
 
-import json
+import pytest
 
 from dbs.core.engine import Engine
+from dbs.core.errors import ConnectorAuthError
 from dbs.core.models import BackupItem, Checkpoint, ReconcileMarker
-from dbs.connectors.skool import SkoolConfig, SkoolConnector
+from dbs.connectors.skool import (
+    SkoolConfig,
+    SkoolConnector,
+    _parse_courses,
+    _parse_lessons,
+    _safe,
+)
 from conftest import make_ctx, registered
+
+SECRETS_ENV = {"SKOOL_STATE_FILE": "/tmp/skool-state.json"}
 
 
 def _community(slug="comm-a", name="Community A", updated="2024-01-01T00:00:00Z"):
@@ -22,17 +33,16 @@ def _community(slug="comm-a", name="Community A", updated="2024-01-01T00:00:00Z"
 def _course(name="Course X", updated="2024-01-01T00:00:00Z", cover=None):
     return {
         "_kind": "course", "courseName": name, "groupName": "Community A",
-        "_group_slug": "comm-a", "courseImageUrl": cover, "modules": [], "updatedAt": updated,
+        "_group_slug": "comm-a", "courseImageUrl": cover, "updatedAt": updated,
     }
 
 
-def _lesson(lid="les1", title="Lesson 1", updated="2024-01-01T00:00:00Z", has_video=True, **kw):
+def _lesson(lid="les1", title="Lesson 1", updated="2024-01-01T00:00:00Z", **kw):
     rec = {
         "_kind": "lesson", "lessonId": lid, "title": title, "moduleTitle": "Module 1",
-        "_course_name": "Course X", "_group_name": "Community A", "_group_slug": "comm-a",
-        "_dir": "/dl/Community A/Course X/1-Module 1/1-Lesson 1",
-        "hasVideo": has_video, "videoFile": "v.mp4", "resourcesCount": 0,
-        "resourceFiles": [], "updatedAt": updated,
+        "_course_name": "Course X", "_group_name": "Community A",
+        "videoLink": None, "videoUnavailable": False, "_resources": [],
+        "updatedAt": updated,
     }
     rec.update(kw)
     return rec
@@ -49,27 +59,33 @@ def _connector(records):
 
 
 def _ctx(cfg=None, mode="full"):
+    from dbs.core.secrets import Secrets
+
     return make_ctx(
         source_id=1, run_id=1, mode=mode,
         config=cfg or SkoolConfig(downloads_dir="/dl"),
+        secrets=Secrets(SECRETS_ENV, ("SKOOL_STATE_FILE",)),
     )
+
+
+# --- mapping (injected _acquire) -------------------------------------------
 
 
 def test_maps_hierarchy_and_one_reconcile_marker():
     conn = _connector([
         _community(),
         _course(cover="https://img/c.jpg"),
-        _lesson("les1"),
-        _lesson("les2", has_video=False),
+        _lesson("les1", videoLink="https://vimeo.com/1",
+                _resources=[{"path": "/dl/comm-a/Course X/les1/notes.pdf",
+                             "filename": "notes.pdf", "mime": "application/pdf"}]),
+        _lesson("les2"),
     ])
     events = list(conn.fetch(_ctx()))
     items = [e for e in events if isinstance(e, BackupItem)]
     markers = [e for e in events if isinstance(e, ReconcileMarker)]
 
     by_id = {i.external_id: i for i in items}
-    assert set(by_id) == {
-        "community:comm-a", "course:comm-a/Course X", "les1", "les2",
-    }
+    assert set(by_id) == {"community:comm-a", "course:comm-a/Course X", "les1", "les2"}
     assert {i.item_kind for i in items} == {"community", "course", "lesson"}
     assert len(markers) == 1
     assert markers[0].live_ids == set(by_id)
@@ -80,17 +96,27 @@ def test_maps_hierarchy_and_one_reconcile_marker():
 
     lesson = by_id["les1"]
     assert lesson.tags == ["Community A", "Course X", "Module 1"]
-    assert lesson.media and lesson.media[0].kind == "video"
-    assert lesson.media[0].url.endswith("/v.mp4")
+    # A downloaded resource file (local path) + the external video link.
+    res = next(m for m in lesson.media if m.kind == "file")
+    assert res.url.endswith("/notes.pdf") and res.mime == "application/pdf"
+    vid = next(m for m in lesson.media if m.kind == "video")
+    assert vid.url == "https://vimeo.com/1"
 
-    # A lesson without a video carries no media.
+    # A lesson with no video and no resources carries no media.
     assert by_id["les2"].media == []
 
 
-def test_unavailable_video_is_not_linked():
-    conn = _connector([_lesson("les1", has_video=True, videoUnavailable=True)])
+def test_image_resource_recorded_as_image_kind():
+    conn = _connector([_lesson("les1", _resources=[
+        {"path": "/dl/x/cover.png", "filename": "cover.png", "mime": "image/png"}])])
     item = next(e for e in conn.fetch(_ctx()) if isinstance(e, BackupItem))
-    assert item.media == []
+    assert item.media[0].kind == "image"
+
+
+def test_unavailable_video_is_not_linked():
+    conn = _connector([_lesson("les1", videoLink="https://vimeo.com/1", videoUnavailable=True)])
+    item = next(e for e in conn.fetch(_ctx()) if isinstance(e, BackupItem))
+    assert [m for m in item.media if m.kind == "video"] == []
 
 
 def test_include_kinds_filter_keeps_excluded_ids_live():
@@ -101,80 +127,143 @@ def test_include_kinds_filter_keeps_excluded_ids_live():
     marker = next(e for e in events if isinstance(e, ReconcileMarker))
 
     assert [i.external_id for i in items] == ["les1"]  # only lessons emitted
-    # ...but community/course ids remain live so the sweep won't delete them.
     assert marker.live_ids == {"community:comm-a", "course:comm-a/Course X", "les1"}
 
 
-# --- real filesystem walk --------------------------------------------------
+# --- pure __NEXT_DATA__ parsers --------------------------------------------
 
 
-def _write(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data), encoding="utf-8")
+def test_parse_courses_both_shapes():
+    course = {"id": "c1", "name": "intro",
+              "metadata": {"title": "Intro", "coverImage": "http://x/i.png",
+                           "updatedAt": "2024-01-01T00:00:00Z"}}
+    flat = {"props": {"pageProps": {"allCourses": [course]}}}
+    nested = {"props": {"pageProps": {"renderData": {"allCourses": [course]}}}}
+    for nd in (flat, nested):
+        out = _parse_courses(nd)
+        assert len(out) == 1
+        assert out[0]["slug"] == "intro"  # Skool's URL segment is `name`
+        assert out[0]["title"] == "Intro"
+        assert out[0]["coverImageUrl"] == "http://x/i.png"
 
 
-def test_walks_a_real_downloader_tree(tmp_path):
-    root = tmp_path / "downloads"
-    comm = root / "Community A"
-    course = comm / "Course X"
-    lesson = course / "1-Module 1" / "1-Lesson 1"
+def test_parse_courses_empty_and_malformed():
+    assert _parse_courses({}) == []
+    assert _parse_courses({"props": {"pageProps": {"allCourses": ["bad", None]}}}) == []
 
-    _write(comm / ".group.json", {"slug": "comm-a", "groupName": "Community A", "updatedAt": "2024-01-01T00:00:00Z"})
-    _write(course / ".course.json", {"courseName": "Course X", "groupName": "Community A", "modules": [], "updatedAt": "2024-01-01T00:00:00Z"})
-    _write(lesson / "lesson.json", {
-        "lessonId": "L1", "title": "Intro", "moduleTitle": "Module 1",
-        "hasVideo": True, "videoFile": "Intro.mp4", "resourcesCount": 0,
-        "resourceFiles": [], "updatedAt": "2024-01-01T00:00:00Z",
-    })
-    (lesson / "index.html").write_text("<html></html>", encoding="utf-8")
-    (lesson / "Intro.mp4").write_text("x", encoding="utf-8")
+
+def test_parse_lessons_modules_and_standalone():
+    cd = {"props": {"pageProps": {"course": {"children": [
+        {"id": "m1", "name": "Mod", "metadata": {"title": "Module 1"}, "children": [
+            {"id": "l1", "metadata": {"title": "Lesson 1", "videoLink": "https://vimeo.com/1",
+                                      "resources": [{"downloadUrl": "https://x/f.pdf",
+                                                     "file_name": "f.pdf"}]}},
+        ]},
+        {"id": "l2", "metadata": {"title": "Standalone"}},
+    ]}}}}
+    out = _parse_lessons(cd)
+    assert [l["lessonId"] for l in out] == ["l1", "l2"]
+    assert out[0]["moduleTitle"] == "Module 1"
+    assert out[0]["hasVideo"] is True and out[0]["videoLink"] == "https://vimeo.com/1"
+    assert out[0]["resources"][0]["file_name"] == "f.pdf"
+    # Standalone lesson: no module, no video.
+    assert out[1]["moduleTitle"] is None and out[1]["hasVideo"] is False
+
+
+def test_parse_lessons_mux_video_sets_hasvideo():
+    cd = {"props": {"pageProps": {"course": {"children": [
+        {"id": "l1", "metadata": {"title": "Native", "videoId": "mux123"}},
+    ]}}}}
+    out = _parse_lessons(cd)
+    assert out[0]["hasVideo"] is True
+    assert out[0]["videoLink"] is None and out[0]["videoId"] == "mux123"
+
+
+def test_safe_path_segment():
+    assert _safe("My Course / Weird:Name") == "My_Course_Weird_Name"
+    assert _safe("") == "item"
+    assert _safe("  ...  ") == "item"
+
+
+# --- auth / resource-fetch seam (fake page) --------------------------------
+
+
+class _FakePage:
+    """Scripted Playwright page: url + evaluate(js, arg) -> payload/raise."""
+
+    def __init__(self, url="https://www.skool.com/c/classroom", next_data=None, fetch=None):
+        self.url = url
+        self._next_data = next_data
+        self._fetch = fetch or {}
+        self.goto_calls: list[str] = []
+
+    def goto(self, url, **kw):
+        self.goto_calls.append(url)
+
+    def evaluate(self, js, arg=None):
+        if "getElementById" in js:
+            return self._next_data
+        # resource fetch: return the scripted payload for the URL
+        return self._fetch.get(arg)
+
+
+def test_require_login_raises_on_login_redirect():
+    conn = SkoolConnector()
+    page = _FakePage(url="https://www.skool.com/login")
+    with pytest.raises(ConnectorAuthError, match="not logged in"):
+        conn._require_login(page, _ctx())
+
+
+def test_require_login_passes_when_authenticated():
+    conn = SkoolConnector()
+    conn._require_login(_FakePage(url="https://www.skool.com/c/classroom"), _ctx())  # no raise
+
+
+def test_download_resources_writes_files_and_records_paths(tmp_path):
+    import base64
 
     conn = SkoolConnector()
-    cfg = SkoolConfig(downloads_dir=str(root))
-    events = list(conn.fetch(make_ctx(source_id=1, run_id=1, mode="full", config=cfg)))
-    items = {i.external_id: i for i in events if isinstance(i, BackupItem)}
+    body = b"%PDF-1.4 hello"
+    page = _FakePage(fetch={"https://x/f.pdf": {
+        "status": 200, "b64": base64.b64encode(body).decode()}})
+    lesson = {"lessonId": "l1", "resources": [
+        {"downloadUrl": "https://x/f.pdf", "file_name": "f.pdf",
+         "file_content_type": "application/pdf"},
+        {"downloadUrl": "https://x/ext", "isExternal": True},  # skipped
+    ]}
+    out = conn._download_resources(page, lesson, tmp_path, "comm", "course", _ctx())
+    assert len(out) == 1
+    dest = tmp_path / "comm" / "course" / "l1" / "f.pdf"
+    assert dest.read_bytes() == body
+    assert out[0]["path"] == str(dest) and out[0]["mime"] == "application/pdf"
 
-    assert set(items) == {"community:comm-a", "course:comm-a/Course X", "L1"}
-    les = items["L1"]
-    # ancestor resolution wired course + community context into the lesson.
-    assert les.tags == ["Community A", "Course X", "Module 1"]
-    assert les.media[0].url.endswith("/1-Lesson 1/Intro.mp4")
 
-
-def test_missing_downloads_dir_raises():
-    import pytest
-    from dbs.core import ConnectorConfigError
-
+def test_download_resources_skips_existing_file(tmp_path):
     conn = SkoolConnector()
-    cfg = SkoolConfig(downloads_dir="/no/such/dir")
-    with pytest.raises(ConnectorConfigError):
-        list(conn.fetch(make_ctx(source_id=1, run_id=1, mode="full", config=cfg)))
-
-
-def test_include_incomplete_false_skips_unfinished_lessons(tmp_path):
-    root = tmp_path / "downloads"
-    lesson = root / "Course X" / "1-Lesson"
-    # No index.html / video on disk -> incomplete.
-    _write(lesson / "lesson.json", {
-        "lessonId": "L1", "title": "Intro", "hasVideo": True, "videoFile": "v.mp4",
-        "resourcesCount": 0, "resourceFiles": [], "updatedAt": "2024-01-01T00:00:00Z",
-    })
-    conn = SkoolConnector()
-    cfg = SkoolConfig(downloads_dir=str(root), include_incomplete=False)
-    items = [
-        e for e in conn.fetch(make_ctx(source_id=1, run_id=1, mode="full", config=cfg))
-        if isinstance(e, BackupItem)
-    ]
-    assert items == []
+    dest = tmp_path / "comm" / "course" / "l1" / "f.pdf"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"already here")
+    page = _FakePage(fetch={})  # evaluate would return None -> would fail if called
+    lesson = {"lessonId": "l1", "resources": [
+        {"downloadUrl": "https://x/f.pdf", "file_name": "f.pdf"}]}
+    out = conn._download_resources(page, lesson, tmp_path, "comm", "course", _ctx())
+    assert dest.read_bytes() == b"already here"  # not overwritten
+    assert out[0]["filename"] == "f.pdf"
 
 
 # --- end-to-end through the engine ----------------------------------------
 
 
 def _run(storage, conn, *, mode="full"):
+    from dbs.core.secrets import Secrets
+
     source = storage.upsert_source("skool", "skool", "test:skool", "{}", 1)
     run_id = storage.begin_run(source.id, "test:skool", mode, None)
-    ctx = make_ctx(source_id=source.id, run_id=run_id, mode=mode, config=SkoolConfig(downloads_dir="/dl"))
+    ctx = make_ctx(
+        source_id=source.id, run_id=run_id, mode=mode,
+        config=SkoolConfig(downloads_dir="/dl"),
+        secrets=Secrets(SECRETS_ENV, ("SKOOL_STATE_FILE",)),
+    )
     result = Engine(storage).run_source(registered(type(conn)), ctx)
     storage.increment_run_count(source.id)
     return source, result
@@ -186,7 +275,6 @@ def test_engine_soft_deletes_removed_lessons(storage):
     ]))
     assert r1.created == 5
 
-    # les2 removed from disk -> swept.
     _src, r2 = _run(storage, _connector([
         _community(), _course(), _lesson("les1"), _lesson("les3"),
     ]))
@@ -202,76 +290,3 @@ def test_volatile_updatedat_does_not_spawn_revisions(storage):
     assert r2.updated == 0
     revs = storage.conn.execute("SELECT COUNT(*) FROM item_revisions").fetchone()[0]
     assert revs == 1
-
-
-# --- downloader invocation (open() runs an external fetch, then we index) ---
-
-_WRITE_GROUP = (
-    "import sys, json, pathlib;"
-    "d = pathlib.Path(sys.argv[1]) / 'comm';"
-    "d.mkdir(parents=True, exist_ok=True);"
-    "(d / '.group.json').write_text(json.dumps({'slug': 'comm', 'groupName': 'Fetched Comm'}))"
-)
-
-
-def test_downloader_runs_then_indexes(tmp_path):
-    import sys
-
-    root = tmp_path / "downloads"
-    root.mkdir()
-    cfg = SkoolConfig(
-        downloads_dir=str(root),
-        downloader_cmd=[sys.executable, "-c", _WRITE_GROUP, "{downloads_dir}"],
-    )
-    conn = SkoolConnector()
-    ctx = make_ctx(source_id=1, run_id=1, mode="full", config=cfg)
-    # Nothing on disk yet; the downloader creates it during open().
-    conn.open(ctx)
-    items = [e for e in conn.fetch(ctx) if isinstance(e, BackupItem)]
-    assert any(i.external_id == "community:comm" for i in items)
-
-
-def test_downloader_substitutes_downloads_dir_placeholder(tmp_path):
-    import sys
-
-    root = tmp_path / "dl"
-    root.mkdir()
-    cfg = SkoolConfig(
-        downloads_dir=str(root),
-        downloader_cmd=[sys.executable, "-c", _WRITE_GROUP, "{downloads_dir}"],
-    )
-    SkoolConnector().open(make_ctx(source_id=1, run_id=1, mode="full", config=cfg))
-    assert (root / "comm" / ".group.json").is_file()
-
-
-def test_downloader_nonzero_exit_is_transient_error(tmp_path):
-    import sys
-    import pytest
-    from dbs.core import TransientFetchError
-
-    cfg = SkoolConfig(
-        downloads_dir=str(tmp_path),
-        downloader_cmd=[sys.executable, "-c", "import sys; sys.exit(2)"],
-    )
-    with pytest.raises(TransientFetchError):
-        SkoolConnector().open(make_ctx(source_id=1, run_id=1, mode="full", config=cfg))
-
-
-def test_downloader_missing_command_is_config_error(tmp_path):
-    import pytest
-    from dbs.core import ConnectorConfigError
-
-    cfg = SkoolConfig(
-        downloads_dir=str(tmp_path),
-        downloader_cmd=["this-binary-does-not-exist-xyz"],
-    )
-    with pytest.raises(ConnectorConfigError):
-        SkoolConnector().open(make_ctx(source_id=1, run_id=1, mode="full", config=cfg))
-
-
-def test_no_downloader_cmd_is_noop(tmp_path):
-    # Default: open() does nothing, no command runs.
-    SkoolConnector().open(make_ctx(
-        source_id=1, run_id=1, mode="full",
-        config=SkoolConfig(downloads_dir=str(tmp_path)),
-    ))

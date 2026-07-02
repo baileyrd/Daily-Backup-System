@@ -1,38 +1,36 @@
-"""Skool connector — indexes a ``skool-downloader`` output tree (metadata only).
+"""Skool connector — backs up your communities/courses/lessons directly.
 
-Skool courses are large binary media (1080p videos, PDFs, images). Downloading
-them is the job of the separate ``skool-downloader`` tool; duplicating that into a
-row-oriented SQLite backup would be wasteful and is squarely out of scope. What
-*is* valuable is having the **catalog** — every community, course, and lesson you
-have archived — alongside your other backed-up sources, so ``dbs status`` /
-``dbs export`` give one unified view and you can see when lessons appear, change,
-or vanish.
+Skool has no public API, but it's a Next.js site: every classroom page embeds a
+``__NEXT_DATA__`` JSON blob describing the community, its courses, and each
+course's module/lesson tree. This connector loads your **captured browser
+session** (Playwright) and reads those blobs straight from the authenticated
+pages — no external tooling. It indexes the **catalog** (community → course →
+lesson) into the backup DB and downloads each lesson's attached **resource
+files** to a local ``downloads_dir`` (recorded as :class:`MediaRef` paths).
 
-So this connector does **not** talk to Skool at all. It walks the directory tree
-``skool-downloader`` writes and indexes the JSON manifests it leaves behind:
+Video is handled in two stages. This connector records each lesson's video
+*metadata* (whether it has one, and any external Vimeo/YouTube/Loom link as a
+stable reference). Downloading Skool's native (Mux) video — which requires
+driving the player to capture a signed HLS URL and muxing with ffmpeg — is a
+separate, heavier step tracked as phase 2; the seam is marked in
+``_lesson_item``.
 
-* ``.group.json``  → one **community** item   (``slug``, ``groupName``)
-* ``.course.json`` → one **course** item      (``courseName``, ``modules`` …)
-* ``lesson.json``  → one **lesson** item       (``lessonId``, ``title``, video/resource state)
+Auth is a **path-valued secret** ``SKOOL_STATE_FILE``: a Playwright
+``storageState`` JSON captured once via the web UI's "Skool login" button (or
+any headed login). Login is verified per run — a redirect to ``/login`` raises
+:class:`ConnectorAuthError` instead of silently backing up nothing.
 
-Because it reads local files there is **no auth** (``requires_auth=False``) and no
-heavy dependency — just the stdlib. The large media stays on disk; a lesson's
-video is recorded as a :class:`MediaRef` pointing at the local file rather than
-ingested.
-
-Like the other browser/offline connectors this is a **full-enumeration** source:
-``supports_incremental=False`` (every run re-walks the tree) and a single
-:class:`ReconcileMarker` lets the engine soft-delete catalog entries whose
-manifests have disappeared. The per-run ``updatedAt`` churn is stripped via
-``volatile_fields`` so a re-download that changes nothing of substance does not
-spawn spurious revisions.
+Like the other browser connectors this is a **full-enumeration** source:
+``supports_incremental=False`` (every run re-reads the classrooms) and a single
+:class:`ReconcileMarker` lets the engine soft-delete catalog entries that have
+vanished. The per-page ``updatedAt`` churn is stripped via ``volatile_fields``.
+Playwright is imported **lazily** inside :meth:`_acquire` so the module stays
+importable without the optional ``dbs[skool]`` extra.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import subprocess
+import re
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -43,6 +41,7 @@ from ..core import (
     BackupItem,
     Capabilities,
     Checkpoint,
+    ConnectorAuthError,
     ConnectorConfigError,
     Connector,
     Cursor,
@@ -54,111 +53,85 @@ from ..core import (
     parse_iso,
 )
 
-_GROUP_MANIFEST = ".group.json"
-_COURSE_MANIFEST = ".course.json"
-_LESSON_MANIFEST = "lesson.json"
 _KINDS = ("community", "course", "lesson")
+_BASE = "https://www.skool.com"
+# Reads document.getElementById('__NEXT_DATA__') from the current page and
+# returns the parsed JSON (or null if the element is absent).
+_NEXT_DATA_JS = (
+    "() => { const el = document.getElementById('__NEXT_DATA__'); "
+    "return el ? JSON.parse(el.textContent) : null; }"
+)
+# Same-origin fetch of a resource URL, returned base64-encoded so bytes survive
+# the JS->Python round trip. {status, b64} — text-less on success so large
+# binaries aren't double-encoded as UTF-8.
+_FETCH_BYTES_JS = (
+    "(u) => fetch(u, {credentials: 'include'}).then(r => r.arrayBuffer().then(b => ({"
+    "status: r.status, "
+    "b64: btoa(Array.from(new Uint8Array(b), c => String.fromCharCode(c)).join('')) })))"
+)
 
 
 class SkoolConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # Root of the skool-downloader output (its `downloads/` directory, or a
-    # single community/course directory).
+    # Where downloaded resource files (and, in phase 2, videos) are written.
     downloads_dir: str
+    # Community slugs (or full classroom URLs) to back up. Empty = auto-discover
+    # the communities the logged-in account has joined.
+    communities: list[str] = []
     include_kinds: list[str] = list(_KINDS)
-    # Index lessons whose download is incomplete/failed (still useful catalog
-    # data). When False, only verifiably-complete lessons are indexed.
-    include_incomplete: bool = True
     checkpoint_every: int = Field(default=200, ge=1)
-    # Optional: run an external fetch command (e.g. skool-downloader) BEFORE
-    # indexing, to refresh the local tree. argv list — run directly, never via a
-    # shell (so no shell-injection). The token "{downloads_dir}" in any argument
-    # is replaced with downloads_dir. Empty = don't run anything (default).
-    downloader_cmd: list[str] = []
-    downloader_cwd: str | None = None
-    downloader_timeout: int = Field(default=3600, ge=1)
+    headless: bool = True
+    # Name of the env var holding the path to the Playwright storageState JSON
+    # (your logged-in Skool session). Mirrors reddit's session_dir_env.
+    state_file_env: str = "SKOOL_STATE_FILE"
 
 
 class SkoolConnector(Connector):
     type = "skool"
-    display_name = "Skool (downloaded courses)"
-    description = "Catalog of communities/courses/lessons from a skool-downloader output tree."
+    display_name = "Skool (courses)"
+    description = "Your Skool communities, courses, and lessons via a logged-in browser session."
     docs_url = "https://github.com/baileyrd/skool-downloader"
     setup_hint = (
-        "Set downloads_dir (skool-downloader's output) + downloader_cwd (its "
-        "folder) + downloader_cmd (to fetch). Then click ‘Skool login’ — it "
-        "captures your Skool session into skool-downloader's .auth/, the same "
-        "storageState its own `npm run login` would. No separate login step."
+        "Click ‘Skool login’ to capture a session: a browser opens, you log in, "
+        "and you CLOSE the window to finish. Set downloads_dir (where resource "
+        "files are saved) and, optionally, communities = [\"your-community\"] "
+        "(otherwise your joined communities are auto-discovered)."
     )
-    # The login session skool-downloader loads is a Playwright storageState JSON
-    # at <its checkout>/.auth/storage_state.json. We capture exactly that (a
-    # per-source target, since the path is under the configured downloader_cwd).
+    # A Playwright storageState JSON captured once; kept in the dbs dir and
+    # referenced by SKOOL_STATE_FILE in .env (a connector-level capture).
     auth_capture = AuthCapture(
         kind="browser_storage_state",
+        secret_key="SKOOL_STATE_FILE",
         login_url="https://www.skool.com/login",
-        target_dir_option="downloader_cwd",
-        target_path=".auth/storage_state.json",
         label="Skool login",
     )
     config_model = SkoolConfig
-    secret_keys = ()  # reads local files; no credentials
+    secret_keys = ("SKOOL_STATE_FILE",)
     wants_managed_http = False
     schema_version = 1
+    pip_requirements = ("playwright>=1.40",)
+    runtime_imports = ("playwright",)
+    needs_playwright_browser = True
     item_kinds = (
         ItemKind(name="community", display_name="Community"),
         ItemKind(name="course", display_name="Course"),
         ItemKind(name="lesson", display_name="Lesson"),
     )
     capabilities = Capabilities(
-        supports_incremental=False,  # re-walk the tree every run
+        supports_incremental=False,  # re-read the classrooms every run
         supports_full_enumeration=True,  # enables the soft-delete reconcile sweep
         supports_native_deletes=False,  # removals detected via reconcile only
         produces_media=True,
         media_inline=False,
         items_mutable=True,
-        requires_auth=False,
+        requires_auth=True,
         supports_rate_limit_backoff=False,
         paginated=False,
     )
-    # Manifests rewrite `updatedAt` on every download even when nothing of
-    # substance changed; strip it before hashing to avoid revision spam.
+    # Skool rewrites `updatedAt` constantly; strip it before hashing to avoid
+    # revision spam on otherwise-unchanged lessons.
     volatile_fields = ("updatedAt",)
-
-    # -- lifecycle ----------------------------------------------------------
-
-    def open(self, ctx: RunContext) -> None:
-        """Refresh the local tree via an external downloader, if configured."""
-        cfg: SkoolConfig = ctx.config  # type: ignore[assignment]
-        if cfg.downloader_cmd:
-            self._run_downloader(cfg, ctx)
-
-    def _run_downloader(self, cfg: "SkoolConfig", ctx: RunContext) -> None:
-        argv = [tok.replace("{downloads_dir}", cfg.downloads_dir) for tok in cfg.downloader_cmd]
-        ctx.logger.info("skool: refreshing via %s", " ".join(argv))
-        try:
-            proc = subprocess.run(
-                argv,
-                cwd=cfg.downloader_cwd,
-                capture_output=True,
-                text=True,
-                timeout=cfg.downloader_timeout,
-            )
-        except FileNotFoundError as exc:
-            raise ConnectorConfigError(
-                f"downloader_cmd not found: {argv[0]!r} — check the path/command. ({exc})"
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise TransientFetchError(
-                f"skool downloader timed out after {cfg.downloader_timeout}s"
-            ) from exc
-        if proc.stdout:
-            ctx.logger.debug("skool downloader stdout:\n%s", proc.stdout.strip())
-        if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-15:]
-            raise TransientFetchError(
-                f"skool downloader exited {proc.returncode}: " + " | ".join(tail)
-            )
 
     # -- main entrypoint ----------------------------------------------------
 
@@ -186,76 +159,177 @@ class SkoolConnector(Connector):
         yield Checkpoint(Cursor(dict(cursor)), note="final")
         yield ReconcileMarker(live_ids=live_ids)
 
-    # -- acquisition (filesystem walk; overridden in tests) -----------------
+    # -- acquisition (the only Playwright-touching part; overridden in tests) --
 
     def _acquire(self, ctx: RunContext) -> Iterator[dict[str, Any]]:
-        """Walk the downloads tree and yield one tagged manifest dict per entry.
+        """Drive an authenticated browser over each community's classroom and
+        yield tagged community/course/lesson dicts.
 
-        Each yielded dict is the raw manifest plus a ``_kind`` tag and derived
-        ancestor context (course/community) so the mapping has everything it
-        needs without re-reading the tree.
+        Playwright is imported lazily. The captured storageState JSON is loaded
+        into a fresh context (the site's cookies), and every classroom's
+        ``__NEXT_DATA__`` blob is read from the rendered page. Resource files
+        are downloaded to ``downloads_dir`` as a side effect; their local paths
+        ride along on the lesson dict for the mapper.
         """
         cfg: SkoolConfig = ctx.config  # type: ignore[assignment]
-        root = Path(cfg.downloads_dir).expanduser()
-        if not root.exists():
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:  # pragma: no cover - only without the extra
             raise ConnectorConfigError(
-                f"Skool downloads_dir {root} does not exist; point it at the "
-                f"output directory created by skool-downloader."
+                "the Skool connector needs Playwright; install it with "
+                "`pip install 'daily-backup-system[skool]'` and run "
+                "`playwright install chromium`."
+            ) from exc
+
+        state_file = Path(ctx.secrets.get(cfg.state_file_env)).expanduser()
+        if not state_file.exists():
+            raise ConnectorConfigError(
+                f"Skool session file {state_file} does not exist; capture a login "
+                f"once (the web UI's ‘Skool login’ button) to create it."
             )
+        downloads = Path(cfg.downloads_dir).expanduser()
 
-        cache: dict[Path, dict[str, Any] | None] = {}
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                headless=cfg.headless,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            try:
+                context = browser.new_context(storage_state=str(state_file))
+                page = context.new_page()
+                yield from self._walk(page, cfg, downloads, ctx)
+            finally:
+                browser.close()
 
-        def ancestor(start: Path, filename: str) -> dict[str, Any] | None:
-            """Nearest manifest of ``filename`` at or above ``start`` (cached)."""
-            for d in [start, *start.parents]:
-                if not _within(d, root):
-                    break
-                candidate = d / filename
-                if candidate in cache:
-                    found = cache[candidate]
-                elif candidate.is_file():
-                    found = cache[candidate] = _read_json(candidate)
-                else:
-                    found = cache[candidate] = None
-                if found is not None:
-                    return found
+    def _walk(
+        self, page: Any, cfg: SkoolConfig, downloads: Path, ctx: RunContext
+    ) -> Iterator[dict[str, Any]]:
+        slugs = [self._slug(s) for s in cfg.communities] or self._discover_communities(page, ctx)
+        if not slugs:
+            ctx.logger.warning(
+                "skool: no communities to back up — set `communities` in the "
+                "source config, or join a community with the logged-in account."
+            )
+            return
+
+        for slug in slugs:
+            data = self._classroom_next_data(page, slug, ctx)
+            if data is None:
+                continue
+            props = (data.get("props") or {}).get("pageProps") or {}
+            render = props.get("renderData") or {}
+            group = props.get("currentGroup") or render.get("currentGroup") or {}
+            group_name = _group_name(group) or slug
+            yield {
+                "_kind": "community",
+                "slug": slug,
+                "groupName": group_name,
+                "updatedAt": (group.get("metadata") or {}).get("updatedAt")
+                or group.get("updatedAt"),
+            }
+
+            for course in _parse_courses(data):
+                course_slug = course.get("slug") or course.get("id")
+                yield {
+                    "_kind": "course",
+                    "courseName": course.get("title") or course_slug,
+                    "courseImageUrl": course.get("coverImageUrl"),
+                    "updatedAt": course.get("updatedAt"),
+                    "_group_slug": slug,
+                    "groupName": group_name,
+                }
+                cdata = self._classroom_next_data(page, slug, ctx, course_slug=course_slug)
+                if cdata is None:
+                    continue
+                for lesson in _parse_lessons(cdata):
+                    lesson["_kind"] = "lesson"
+                    lesson["_group_name"] = group_name
+                    lesson["_course_name"] = course.get("title") or course_slug
+                    lesson["_resources"] = self._download_resources(
+                        page, lesson, downloads, slug, course_slug, ctx
+                    )
+                    yield lesson
+
+    # -- browser helpers (thin; not unit-tested) ----------------------------
+
+    def _discover_communities(self, page: Any, ctx: RunContext) -> list[str]:
+        """Slugs of the communities the logged-in account has joined."""
+        self._goto(page, f"{_BASE}/", ctx)
+        self._require_login(page, ctx)
+        data = page.evaluate(_NEXT_DATA_JS)
+        props = ((data or {}).get("props") or {}).get("pageProps") or {}
+        groups = props.get("groups") or props.get("myGroups") or []
+        slugs = [g.get("name") or g.get("slug") for g in groups if isinstance(g, dict)]
+        return [s for s in slugs if s]
+
+    def _classroom_next_data(
+        self, page: Any, slug: str, ctx: RunContext, course_slug: str | None = None
+    ) -> dict[str, Any] | None:
+        url = f"{_BASE}/{slug}/classroom"
+        if course_slug:
+            url = f"{url}/{course_slug}"
+        self._goto(page, url, ctx)
+        self._require_login(page, ctx)
+        data = page.evaluate(_NEXT_DATA_JS)
+        if data is None:
+            ctx.logger.warning("skool: no __NEXT_DATA__ on %s (layout change?)", url)
+        return data
+
+    def _download_resources(
+        self, page: Any, lesson: dict[str, Any], downloads: Path,
+        slug: str, course_slug: str, ctx: RunContext,
+    ) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        lesson_dir = downloads / _safe(slug) / _safe(course_slug) / _safe(str(lesson.get("lessonId")))
+        for res in lesson.get("resources") or []:
+            url = res.get("downloadUrl")
+            if not url or res.get("isExternal"):
+                continue
+            name = _safe(res.get("file_name") or res.get("title") or "resource")
+            dest = lesson_dir / name
+            if not dest.exists():
+                data = self._fetch_bytes(page, url, ctx)
+                if data is None:
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(data)
+            out.append({"path": str(dest), "filename": name, "mime": res.get("file_content_type")})
+        return out
+
+    def _fetch_bytes(self, page: Any, url: str, ctx: RunContext) -> bytes | None:
+        import base64
+
+        try:
+            payload = page.evaluate(_FETCH_BYTES_JS, url)
+        except Exception as exc:  # noqa: BLE001 - best-effort resource fetch
+            ctx.logger.debug("skool: resource fetch failed for %s: %s", url, exc)
+            return None
+        if not 200 <= int(payload.get("status", 0)) < 300:
+            ctx.logger.debug("skool: resource %s returned HTTP %s", url, payload.get("status"))
+            return None
+        try:
+            return base64.b64decode(payload.get("b64") or "")
+        except Exception:  # noqa: BLE001
             return None
 
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames.sort()  # deterministic order
-            here = Path(dirpath)
+    def _goto(self, page: Any, url: str, ctx: RunContext) -> None:
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        except Exception as exc:  # noqa: BLE001 - navigation is retried by the run, not here
+            raise TransientFetchError(f"skool: could not load {url}: {exc}") from exc
 
-            if _GROUP_MANIFEST in filenames:
-                data = _read_json(here / _GROUP_MANIFEST)
-                if data is not None:
-                    yield {**data, "_kind": "community", "_dir": str(here)}
+    def _require_login(self, page: Any, ctx: RunContext) -> None:
+        if "/login" in (page.url or ""):
+            raise ConnectorAuthError(
+                "the captured Skool session is not logged in — re-run the ‘Skool "
+                "login’ capture (log in, then CLOSE the window)."
+            )
 
-            if _COURSE_MANIFEST in filenames:
-                data = _read_json(here / _COURSE_MANIFEST)
-                if data is not None:
-                    group = ancestor(here.parent, _GROUP_MANIFEST)
-                    yield {
-                        **data,
-                        "_kind": "course",
-                        "_dir": str(here),
-                        "_group_slug": (group or {}).get("slug"),
-                    }
-
-            if _LESSON_MANIFEST in filenames:
-                data = _read_json(here / _LESSON_MANIFEST)
-                if data is not None:
-                    course = ancestor(here, _COURSE_MANIFEST)
-                    group = ancestor(here, _GROUP_MANIFEST)
-                    if not cfg.include_incomplete and not _lesson_complete(here, data):
-                        continue
-                    yield {
-                        **data,
-                        "_kind": "lesson",
-                        "_dir": str(here),
-                        "_course_name": (course or {}).get("courseName"),
-                        "_group_name": (group or {}).get("groupName"),
-                        "_group_slug": (group or {}).get("slug"),
-                    }
+    @staticmethod
+    def _slug(community: str) -> str:
+        """Accept a bare slug or a full skool.com URL; return the slug."""
+        m = re.search(r"skool\.com/([^/?#]+)", community)
+        return m.group(1) if m else community.strip("/ ")
 
     # -- mapping (pure; the part tests assert on) ---------------------------
 
@@ -304,10 +378,23 @@ class SkoolConnector(Connector):
         if not lesson_id:
             return None
         media: list[MediaRef] = []
-        if raw.get("hasVideo") and not raw.get("videoUnavailable"):
-            video_name = raw.get("videoFile") or "video.mp4"
-            local_path = os.path.join(raw.get("_dir", ""), video_name)
-            media.append(MediaRef(url=local_path, kind="video", filename=video_name))
+        # Downloaded resource files (local paths — never re-fetched by storage).
+        for res in raw.get("_resources") or []:
+            media.append(
+                MediaRef(
+                    url=res["path"],
+                    kind="image" if str(res.get("mime") or "").startswith("image/") else "file",
+                    filename=res.get("filename"),
+                    mime=res.get("mime"),
+                )
+            )
+        # Phase 1: record only an EXTERNAL video link (Vimeo/YouTube/Loom) as a
+        # stable reference. Native Skool (Mux) video download is phase 2.
+        # TODO(phase 2): capture the signed Mux HLS URL, download via yt-dlp
+        # (+ffmpeg) into downloads_dir, and record the local path here.
+        video_link = raw.get("videoLink")
+        if video_link and not raw.get("videoUnavailable"):
+            media.append(MediaRef(url=video_link, kind="video"))
         tags = [
             t
             for t in (raw.get("_group_name"), raw.get("_course_name"), raw.get("moduleTitle"))
@@ -324,43 +411,87 @@ class SkoolConnector(Connector):
         )
 
 
-def _within(child: Path, root: Path) -> bool:
-    try:
-        child.relative_to(root)
-        return True
-    except ValueError:
-        return False
+# -- pure parsers over Skool's __NEXT_DATA__ (unit-tested, no browser) -------
 
 
-def _read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        with path.open(encoding="utf-8") as fh:
-            data = json.load(fh)
-        return data if isinstance(data, dict) else None
-    except (OSError, ValueError):
-        return None
+def _group_name(group: dict[str, Any]) -> str | None:
+    meta = group.get("metadata") or {}
+    return meta.get("displayName") or meta.get("name") or group.get("name")
 
 
-def _lesson_complete(lesson_dir: Path, manifest: dict[str, Any]) -> bool:
-    """Mirror skool-downloader's isLessonDirComplete (best-effort, metadata only)."""
-    if not isinstance(manifest.get("resourceFiles"), list):
-        return False
-    if manifest.get("videoFailed"):
-        return False
-    if (manifest.get("resourceFailures") or 0) > 0:
-        return False
-    if not (lesson_dir / "index.html").is_file():
-        return False
-    if manifest.get("hasVideo"):
-        video = lesson_dir / (manifest.get("videoFile") or "video.mp4")
-        if not (video.is_file() and video.stat().st_size > 0):
-            return False
-    res_dir = lesson_dir / "resources"
-    for name in manifest["resourceFiles"]:
-        f = res_dir / name
-        if not (f.is_file() and f.stat().st_size > 0):
-            return False
-    return True
+def _parse_courses(next_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Course descriptors from a classroom page's ``__NEXT_DATA__``.
+
+    Handles both ``pageProps.allCourses`` and the nested
+    ``pageProps.renderData.allCourses`` shape Skool has shipped.
+    """
+    props = ((next_data or {}).get("props") or {}).get("pageProps") or {}
+    raw = props.get("allCourses") or (props.get("renderData") or {}).get("allCourses") or []
+    out: list[dict[str, Any]] = []
+    for c in raw:
+        if not isinstance(c, dict):
+            continue
+        meta = c.get("metadata") or {}
+        out.append(
+            {
+                "id": c.get("id"),
+                "slug": c.get("name") or c.get("id"),  # Skool's URL segment is `name`
+                "title": meta.get("title") or c.get("name") or c.get("id"),
+                "coverImageUrl": meta.get("coverImage") or meta.get("coverSmallUrl"),
+                "updatedAt": meta.get("updatedAt") or c.get("updatedAt"),
+            }
+        )
+    return out
+
+
+def _parse_lessons(course_next_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten a course page's module/lesson tree into lesson dicts.
+
+    ``pageProps.course.children`` holds nodes: a node with non-empty
+    ``children`` is a module (its children are lessons); a childless node is a
+    standalone lesson under a synthetic module.
+    """
+    props = ((course_next_data or {}).get("props") or {}).get("pageProps") or {}
+    course = props.get("course") or {}
+    out: list[dict[str, Any]] = []
+
+    def emit(node: dict[str, Any], module_title: str | None) -> None:
+        meta = node.get("metadata") or {}
+        video_link = meta.get("videoLink") or (meta.get("video") or {}).get("url")
+        out.append(
+            {
+                "lessonId": node.get("id"),
+                "title": meta.get("title") or node.get("name"),
+                "moduleTitle": module_title,
+                "updatedAt": meta.get("updatedAt") or node.get("updatedAt"),
+                "hasVideo": bool(video_link or meta.get("videoId")),
+                "videoLink": video_link,
+                "videoId": meta.get("videoId"),
+                "resources": meta.get("resources") or [],
+            }
+        )
+
+    for node in course.get("children") or []:
+        if not isinstance(node, dict):
+            continue
+        children = node.get("children") or []
+        if children:
+            module_title = (node.get("metadata") or {}).get("title") or node.get("name")
+            for child in children:
+                if isinstance(child, dict):
+                    emit(child, module_title)
+        else:
+            emit(node, None)
+    return out
+
+
+_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _safe(name: str) -> str:
+    """Filesystem-safe path segment."""
+    cleaned = _UNSAFE.sub("_", (name or "").strip()).strip("._")
+    return cleaned or "item"
 
 
 __all__ = ["SkoolConnector", "SkoolConfig"]

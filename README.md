@@ -19,19 +19,21 @@ exports** (JSON / NDJSON / CSV / Markdown / zip archive).
 > Status: v0.1 ships the full foundation plus four built-in connectors:
 > **Raindrop.io** (the REST/token reference), **Reddit** (saved posts &
 > comments), **YouTube** (Watch Later, Liked, history, playlists), and **Skool**
-> (a metadata catalog of courses downloaded by `skool-downloader`). Reddit and
-> YouTube are *browser-session* connectors — they reuse your logged-in session
-> rather than an API token — and pull in heavy optional dependencies, so they
-> install via extras:
+> (a native catalog of your communities' classrooms). Reddit, YouTube, and Skool
+> are *browser-session* connectors — they reuse your logged-in session rather than
+> an API token — and pull in heavy optional dependencies, so they install via
+> extras:
 >
 > ```bash
 > pip install -e ".[reddit]" && playwright install chromium   # Reddit (Playwright)
 > pip install -e ".[youtube]"                                  # YouTube (yt-dlp)
+> pip install -e ".[skool]" && playwright install chromium    # Skool (Playwright)
 > ```
 >
-> Skool needs no extra and no auth: it indexes the `.group.json` / `.course.json`
-> / `lesson.json` manifests that `skool-downloader` writes to disk (the large
-> video files stay there; DBS catalogs the community → course → lesson structure).
+> Skool reads each community's classroom pages with your captured session,
+> catalogs the community → course → lesson structure into the DB, and downloads
+> attached resource files (native video download is planned; external video links
+> are recorded as references).
 >
 > All follow the same plugin contract as Raindrop — see
 > [docs/writing-a-connector.md](docs/writing-a-connector.md) (and its
@@ -114,7 +116,7 @@ on by default — `dbs serve`) can do the setup for you:
 | Connector | Needs | In the UI |
 |---|---|---|
 | **raindrop** | `RAINDROP_TOKEN` | set it in *API keys* |
-| **skool** | a `skool-downloader` checkout (`downloads_dir` + `downloader_cwd`) | set the paths; **Skool login** (on the Sources row) captures your session into its `.auth/`; optionally `downloader_cmd` to fetch first (below) |
+| **skool** | `[skool]` extra + `playwright install chromium`; a logged-in session | **Install**, then **Skool login** — opens a browser on the host, you log in and close it; the session file + `SKOOL_STATE_FILE` are captured for you |
 | **reddit** | `[reddit]` extra + `playwright install chromium`; a logged-in session dir | **Install**, then **Reddit login** — opens a browser on the host, you log in and close it; the session dir + `REDDIT_SESSION_DIR` are captured for you. Make sure reddit.com shows you logged in before closing (with *Continue with Google*, finish the redirect back to reddit first). The account is auto-detected from the session — `username` in the source config is optional. If runs fail with HTTP 403 even after re-capturing, set `headless = false` for the source |
 | **youtube** | `[youtube]` extra; a `cookies.txt` *or* `cookies_from_browser` | **Install**, then **YouTube login** — captures a `cookies.txt` and sets `YOUTUBE_COOKIES_FILE`; or skip capture and set `cookies_from_browser` (e.g. `chrome`) in the source config |
 
@@ -130,10 +132,9 @@ the window, and the artifact is captured and recorded in `.env`:
   (each run verifies the session is really logged in via Reddit's `me.json` and
   fails loudly with re-capture instructions if not);
 - **youtube** → a Netscape `cookies.txt` exported after login → `YOUTUBE_COOKIES_FILE`;
-- **skool** → a Playwright `storageState` written into your `skool-downloader`
-  checkout's `.auth/` (per-source — needs `downloader_cwd`; use the **Skool login**
-  button on the *Sources* row). It's the exact artifact skool-downloader's own
-  `npm run login` produces, so its downloads pick it up — no separate login.
+- **skool** → a Playwright `storageState` JSON written into your dbs dir →
+  `SKOOL_STATE_FILE` (connector-level, shared by every skool source — the login
+  reads each community's classroom pages and downloads their resource files).
 
 Capture drives the browser with **Playwright**. It's **one click** — if Playwright
 or its browser are missing, capture installs them first (watch the streamed log),
@@ -228,7 +229,8 @@ files — set `store_media` on the source:
 [sources.courses]
 type = "skool"
 enabled = true
-downloads_dir = "~/skool-downloads"
+communities = ["your-community"]
+downloads_dir = "~/skool-backup"
 store_media = true              # archive media bytes into the DB
 max_media_mb = 200             # per-file cap; 0 = no limit (files over the cap
                                #   are recorded by path + size, bytes skipped)
@@ -242,29 +244,26 @@ produces); remote URLs stay referenced. Archived bytes are included in the
 > off by default and capped per file for that reason — turn it on deliberately,
 > and keep `max_media_mb` sane unless you really want multi-GB blobs in the DB.
 
-### Fetching before indexing (skool)
+### Fetching from Skool
 
-The **skool** connector indexes a local `skool-downloader` tree rather than
-talking to Skool itself. To make one `dbs backup` *fetch then store*, point it at
-your downloader with `downloader_cmd` — an argv list run directly (no shell;
-`{downloads_dir}` is substituted) before indexing:
+The **skool** connector talks to Skool directly: on every `dbs backup` it logs in
+with your captured session, reads each community's classroom pages, and catalogs
+the community → course → lesson structure into the DB. Attached resource files are
+downloaded to `downloads_dir`; with `store_media` set, those files are pulled into
+the DB too:
 
 ```toml
 [sources.courses]
 type = "skool"
-downloads_dir = "~/skool-downloads"
-downloader_cmd = ["skool-downloader", "--out", "{downloads_dir}"]
-store_media = true              # ...and pull the fetched files into the DB
+communities = ["your-community"]
+downloads_dir = "~/skool-backup"
+store_media = true              # ...and pull the downloaded files into the DB
 ```
 
-`dbs backup courses` then runs your downloader, indexes the refreshed tree, and
-(with `store_media`) archives the lesson files — Skool content lands in the DB
-without a separate manual step. A non-zero exit fails the run so you see auth/
-fetch problems instead of silently backing up a stale tree.
-
-> Only configure a `downloader_cmd` you trust — it runs on every backup. It's a
-> plain argv (never a shell string), so there's no shell-injection, but it is a
-> command your machine will execute.
+`dbs backup courses` then fetches from Skool, catalogs the classroom structure,
+downloads the attached resources, and (with `store_media`) archives those files —
+Skool content lands in the DB in one step. Native video download is not yet
+implemented; external video links are recorded as references.
 
 ## Scheduling daily backups
 

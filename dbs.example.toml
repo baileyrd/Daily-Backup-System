@@ -45,25 +45,25 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # cookies_file_env = "YOUTUBE_COOKIES_FILE"
 # # cookies_from_browser = "chrome"
 
-# Skool: catalog courses downloaded by skool-downloader (it indexes the JSON
-# manifests on disk). Set downloader_cwd to your skool-downloader checkout; the
-# web UI's "Skool login" button captures your Skool session into its .auth/
-# (the same Playwright storageState its own `npm run login` writes). By default
-# videos stay where they are (referenced); set store_media to archive the bytes.
+# Skool: back up your communities/courses/lessons directly via a logged-in
+# browser session (no external tool). Needs the extra:
+#   pip install 'daily-backup-system[skool]' && playwright install chromium
+# Click "Skool login" in the web UI to capture the session (SKOOL_STATE_FILE);
+# a browser opens, you log in, and CLOSE the window to finish. The catalog is
+# indexed into the DB and each lesson's attached resource files are downloaded
+# to downloads_dir (recorded as references; set store_media to pull the bytes
+# into the DB). Native Skool video download is not yet implemented; external
+# video links (Vimeo/YouTube/Loom) are recorded as references.
 # [sources.skool]
 # type = "skool"
 # enabled = true
-# downloads_dir = "~/skool-downloader/downloads"
-# downloader_cwd = "~/skool-downloader"   # the checkout; login + fetch run here
+# downloads_dir = "~/skool-backup"        # where resource files are saved
+# communities = ["your-community"]         # optional; auto-discovered if omitted
 # include_kinds = ["community", "course", "lesson"]
-# include_incomplete = true       # also index lessons whose download is unfinished
-# store_media = true              # pull the downloaded lesson files INTO the DB
-# max_media_mb = 200              # per-file cap (0 = no limit); larger files stay referenced
-# Run skool-downloader before indexing (argv list, no shell; "{downloads_dir}"
-# is substituted). Combine with store_media + "Skool login" for a one-command
-# "log in once -> fetch from Skool -> store everything in the DB" backup.
-# downloader_cmd = ["npm", "run", "skool", "--", "--out", "{downloads_dir}"]
-# downloader_timeout = 7200       # seconds (default 3600)
+# headless = true                          # set false if Skool blocks the automated browser
+# state_file_env = "SKOOL_STATE_FILE"
+# store_media = true                       # pull downloaded resource files INTO the DB
+# max_media_mb = 200                       # per-file cap (0 = no limit); larger files stay referenced
 
 # --- Optional: connector collision overrides ------------------------------
 # [connectors.raindrop]
