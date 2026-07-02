@@ -69,10 +69,13 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 #   when no cookie file is set — on Windows it often fails ("Failed to
 #   decrypt with DPAPI") against modern Chrome, so prefer the captured file.
 #   If "Sign in to confirm you're not a bot" persists even with valid, fresh
-#   cookies: first make sure yt-dlp itself is current (`pip install -U
-#   yt-dlp` — YouTube's bot-check tracks yt-dlp releases closely). If it
-#   still fails, try an alternate emulated client:
-#   video_extractor_args = { youtube = { player_client = ["android"] } }
+#   cookies: YouTube now requires a "PO token" for its web/mweb/android/ios
+#   player clients, which plain cookies can't satisfy. web_embedded does NOT
+#   require one (see yt-dlp's PO Token Guide) and a Skool-embedded video is
+#   normally embed-enabled, so it's the best thing to try:
+#   video_extractor_args = { youtube = { player_client = ["web_embedded"] } }
+#   Still failing (embedding disabled on that specific video)? A PO token
+#   provider plugin is the durable fix — see yt-dlp's PO Token Guide.
 # communities = ["your-community"]   # optional; OMIT to auto-detect every community you've joined
 # courses = ["your-community/Course Title"]  # optional; only these courses (title or slug;
 #                                    # "community/course" scopes it). While set, deletion

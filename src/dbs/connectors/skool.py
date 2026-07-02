@@ -168,11 +168,16 @@ class SkoolConfig(BaseModel):
     # FILE (above) sidesteps that entirely, so it always wins when both are set.
     video_cookies_from_browser: str | None = None
     # Extra yt-dlp extractor-args for EXTERNAL videos, passed straight
-    # through, e.g. {"youtube": {"player_client": ["android"]}}. YouTube's
-    # bot-check ("Sign in to confirm you're not a bot") can persist even with
-    # valid, current cookies; switching the emulated client is a well-known
-    # yt-dlp community workaround for that case. Try upgrading yt-dlp and
-    # re-capturing cookies first — this is a fallback, not the first fix.
+    # through. YouTube's bot-check ("Sign in to confirm you're not a bot")
+    # now requires a "PO token" for its web/mweb/android/ios player clients
+    # even with valid cookies — headers and cookies alone can't clear it.
+    # web_embedded does NOT require one (as of yt-dlp's PO Token Guide) and
+    # a Skool-embedded video is normally embed-enabled, so it's the best
+    # first thing to try:
+    # {"youtube": {"player_client": ["web_embedded"]}}
+    # If that specific video still fails (embedding disabled elsewhere), the
+    # durable fix is a PO token provider plugin (see yt-dlp's PO Token Guide)
+    # — out of scope here.
     video_extractor_args: dict[str, dict[str, list[str]]] | None = None
     # Write a markdown note of each lesson page (url2obs-convention frontmatter,
     # body converted from Skool's editor JSON, links to the downloaded media)
