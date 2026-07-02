@@ -431,6 +431,12 @@ class SkoolConnector(Connector):
         Best-effort: any failure leaves the lesson indexed with tree-level data
         and no sidecar, so it retries next run.
         """
+        if not lesson.get("lessonId"):
+            ctx.logger.warning(
+                "skool: a lesson in %s/%s has no id — skipped (tree shape change?)",
+                slug, course_slug,
+            )
+            return "failed"
         lesson_dir = (
             downloads / _safe(slug) / _safe(str(course_slug))
             / _safe(str(lesson.get("lessonId")))
@@ -898,23 +904,29 @@ def _parse_courses(next_data: dict[str, Any]) -> list[dict[str, Any]]:
 def _parse_lessons(course_next_data: dict[str, Any]) -> list[dict[str, Any]]:
     """Flatten a course page's module/lesson tree into lesson dicts.
 
-    ``pageProps.course.children`` holds nodes: a node with non-empty
-    ``children`` is a module (its children are lessons); a childless node is a
-    standalone lesson under a synthetic module.
+    ``pageProps.course.children`` holds nodes that **wrap their payload under a
+    ``course`` key** (skool-downloader's parseClassroom: ``setInfo =
+    node.course``, ``modInfo = mod.course``, lesson id = ``modInfo.id``); the
+    module-vs-lesson distinction is the WRAPPER's ``children`` length. Plain
+    (unwrapped) nodes are tolerated too.
     """
     props = ((course_next_data or {}).get("props") or {}).get("pageProps") or {}
     course = props.get("course") or {}
     out: list[dict[str, Any]] = []
 
-    def emit(node: dict[str, Any], module_title: str | None) -> None:
-        meta = node.get("metadata") or {}
+    def unwrap(node: dict[str, Any]) -> dict[str, Any]:
+        inner = node.get("course")
+        return inner if isinstance(inner, dict) else node
+
+    def emit(payload: dict[str, Any], module_title: str | None) -> None:
+        meta = payload.get("metadata") or {}
         video_link = meta.get("videoLink") or (meta.get("video") or {}).get("url")
         out.append(
             {
-                "lessonId": node.get("id"),
-                "title": meta.get("title") or node.get("name"),
+                "lessonId": payload.get("id"),
+                "title": meta.get("title") or payload.get("name"),
                 "moduleTitle": module_title,
-                "updatedAt": meta.get("updatedAt") or node.get("updatedAt"),
+                "updatedAt": meta.get("updatedAt") or payload.get("updatedAt"),
                 "hasVideo": bool(video_link or meta.get("videoId")),
                 "videoLink": video_link,
                 "videoId": meta.get("videoId"),
@@ -925,14 +937,15 @@ def _parse_lessons(course_next_data: dict[str, Any]) -> list[dict[str, Any]]:
     for node in course.get("children") or []:
         if not isinstance(node, dict):
             continue
-        children = node.get("children") or []
+        children = node.get("children") or []  # wrapper level, per the reference
         if children:
-            module_title = (node.get("metadata") or {}).get("title") or node.get("name")
+            payload = unwrap(node)
+            module_title = (payload.get("metadata") or {}).get("title") or payload.get("name")
             for child in children:
                 if isinstance(child, dict):
-                    emit(child, module_title)
+                    emit(unwrap(child), module_title)
         else:
-            emit(node, None)
+            emit(unwrap(node), None)
     return out
 
 
