@@ -159,10 +159,13 @@ class SkoolConfig(BaseModel):
     # Defaults to the same secret name the YouTube connector uses, so if
     # you've already captured YOUTUBE_COOKIES_FILE for that source it's
     # reused here automatically; set to null to send no cookies. Never used
-    # for native (Mux) video — only for external links. Alternative:
-    # video_cookies_from_browser (e.g. "chrome") reads a local browser's
-    # cookies directly, no secret needed.
+    # for native (Mux) video — only for external links.
     video_cookies_file_env: str | None = "YOUTUBE_COOKIES_FILE"
+    # Fallback ONLY: used when video_cookies_file_env resolves to nothing.
+    # Reads a local browser's cookies directly (e.g. "chrome"), no secret
+    # needed — but on Windows, Chrome's "App-Bound Encryption" makes yt-dlp's
+    # live read fail with "Failed to decrypt with DPAPI"; a captured cookie
+    # FILE (above) sidesteps that entirely, so it always wins when both are set.
     video_cookies_from_browser: str | None = None
     # Write a markdown note of each lesson page (url2obs-convention frontmatter,
     # body converted from Skool's editor JSON, links to the downloaded media)
@@ -789,10 +792,18 @@ class SkoolConnector(Connector):
         cookiefile = None
         if external and cfg.video_cookies_file_env:
             cookiefile = ctx.secrets.get_optional(cfg.video_cookies_file_env)
+        # A cookie FILE never needs live browser decryption, so it's strictly
+        # more reliable — in particular it sidesteps Chrome's Windows "App-
+        # Bound Encryption", which breaks yt-dlp's cookies_from_browser read
+        # ("Failed to decrypt with DPAPI"). Only fall back to the browser read
+        # when no file is available; never send both (conflicting sources
+        # would make yt-dlp attempt the browser read regardless).
+        cookies_from_browser = (
+            cfg.video_cookies_from_browser if external and not cookiefile else None
+        )
         opts = _ydl_opts(
             dest, cfg.video_quality, _ffmpeg_location(), external=external,
-            cookiefile=cookiefile,
-            cookies_from_browser=cfg.video_cookies_from_browser if external else None,
+            cookiefile=cookiefile, cookies_from_browser=cookies_from_browser,
         )
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:

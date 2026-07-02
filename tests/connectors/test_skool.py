@@ -568,6 +568,52 @@ def test_download_hls_attaches_cookies_for_external_only(tmp_path, monkeypatch):
     assert "cookiefile" not in captured[-1]
 
 
+def test_download_hls_cookiefile_wins_over_cookies_from_browser(tmp_path, monkeypatch):
+    # A live-browser cookie read can fail (e.g. Chrome's Windows "App-Bound
+    # Encryption" -> yt-dlp's "Failed to decrypt with DPAPI") even when a
+    # captured cookie FILE works fine. Never send both to yt-dlp: the file
+    # always wins when one is available, so a from_browser fallback left in
+    # config can't reintroduce that failure.
+    import yt_dlp
+    from dbs.core.secrets import Secrets
+
+    captured: list[dict] = []
+
+    class _FakeYDL:
+        def __init__(self, opts):
+            captured.append(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def download(self, urls):
+            pass
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _FakeYDL)
+    conn = SkoolConnector()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path), video_cookies_from_browser="chrome")
+    ctx = make_ctx(
+        source_id=1, run_id=1, mode="full", config=cfg,
+        secrets=Secrets({**SECRETS_ENV, "YOUTUBE_COOKIES_FILE": "/tmp/cookies.txt"},
+                        ("SKOOL_SESSION_DIR", "YOUTUBE_COOKIES_FILE")),
+    )
+    dest = tmp_path / "video.mp4"
+    conn._download_hls("https://youtu.be/x", dest, cfg, ctx, external=True)
+    assert captured[-1]["cookiefile"] == "/tmp/cookies.txt"
+    assert "cookiesfrombrowser" not in captured[-1]
+    # No cookiefile available (secret unset) -> falls back to cookies_from_browser.
+    ctx_no_file = make_ctx(
+        source_id=1, run_id=1, mode="full", config=cfg,
+        secrets=Secrets(SECRETS_ENV, ("SKOOL_SESSION_DIR", "YOUTUBE_COOKIES_FILE")),
+    )
+    conn._download_hls("https://youtu.be/x", dest, cfg, ctx_no_file, external=True)
+    assert "cookiefile" not in captured[-1]
+    assert captured[-1]["cookiesfrombrowser"] == ("chrome",)
+
+
 def _video_lesson(**kw):
     lesson = {"lessonId": "l1", "title": "Lesson 1", "moduleTitle": "Module 1"}
     lesson.update(kw)

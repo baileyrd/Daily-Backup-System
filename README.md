@@ -274,6 +274,10 @@ videos sometimes need auth (YouTube: *"Sign in to confirm you're not a
 bot"*) — `video_cookies_file_env` (defaults to the YouTube connector's own
 `YOUTUBE_COOKIES_FILE`, reused automatically if you've already captured it)
 or `video_cookies_from_browser` supplies cookies for those downloads only.
+The captured cookie *file* always wins when both are set — it needs no live
+browser read, so it isn't affected by Chrome's Windows "App-Bound
+Encryption", which otherwise makes `video_cookies_from_browser` fail with
+*"Failed to decrypt with DPAPI"*.
 
 ## Scheduling daily backups
 
