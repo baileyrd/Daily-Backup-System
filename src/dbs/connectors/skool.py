@@ -135,6 +135,11 @@ class SkoolConfig(BaseModel):
     # Community slugs (or full classroom URLs) to back up. Empty = auto-discover
     # the communities the logged-in account has joined.
     communities: list[str] = []
+    # Only back up these courses (titles or Skool URL slugs, case-insensitive).
+    # Prefix with a community slug to scope: "chase-ai/Claude Code Masterclass".
+    # Empty = all courses. While set, enumeration is partial, so the deletion
+    # sweep is skipped — nothing already backed up gets marked deleted.
+    courses: list[str] = []
     include_kinds: list[str] = list(_KINDS)
     checkpoint_every: int = Field(default=200, ge=1)
     headless: bool = True
@@ -220,7 +225,16 @@ class SkoolConnector(Connector):
 
         cursor["items_seen"] = seen
         yield Checkpoint(Cursor(dict(cursor)), note="final")
-        yield ReconcileMarker(live_ids=live_ids)
+        if cfg.courses:
+            # A course filter makes the walk a partial enumeration: anything
+            # outside it never shows up in live_ids, so a reconcile sweep would
+            # soft-delete every unselected course/lesson. Skip it instead.
+            ctx.logger.info(
+                "skool: `courses` filter active — deletion detection skipped "
+                "(partial enumeration)"
+            )
+        else:
+            yield ReconcileMarker(live_ids=live_ids)
 
     # -- acquisition (the only Playwright-touching part; overridden in tests) --
 
@@ -324,8 +338,14 @@ class SkoolConnector(Connector):
                     "__NEXT_DATA__ written under %s/_debug/ for diagnosis.",
                     slug, sorted(props.keys()), downloads,
                 )
+            community_dir = downloads / _safe(slug)
+            used_course_dirs: set[str] = set()
+            skipped_courses = 0
             for course in courses:
                 course_slug = course.get("slug") or course.get("id")
+                if not _course_selected(cfg.courses, slug, course):
+                    skipped_courses += 1
+                    continue
                 yield {
                     "_kind": "course",
                     "courseName": course.get("title") or course_slug,
@@ -337,23 +357,37 @@ class SkoolConnector(Connector):
                     "_group_slug": slug,
                     "groupName": group_name,
                 }
+                # Human-titled course dir; adopt a legacy slug-named one in place.
+                course_dir = community_dir / _course_dir_name(
+                    course, str(course_slug), used_course_dirs
+                )
+                _adopt_dir(course_dir, community_dir / _safe(str(course_slug)), ctx)
                 cdata = self._classroom_next_data(page, slug, ctx, course_slug=course_slug)
                 if cdata is None:
                     continue
-                for lesson in _parse_lessons(cdata):
+                for idx, lesson in enumerate(_parse_lessons(cdata), 1):
                     lesson["_kind"] = "lesson"
                     lesson["_group_name"] = group_name
                     lesson["_course_name"] = course.get("title") or course_slug
+                    lesson_dir = course_dir / _lesson_dir_name(idx, lesson)
                     stats[self._process_lesson(
-                        page, lesson, downloads, slug, course_slug, cfg, ctx
+                        page, lesson, lesson_dir, slug, course_slug, cfg, ctx
                     )] += 1
                     yield lesson
 
+            if courses and skipped_courses == len(courses):
+                ctx.logger.warning(
+                    "skool: %s — the `courses` filter matched none of the %d "
+                    "course(s). Available titles: %s",
+                    slug, len(courses),
+                    ", ".join(repr(c.get("title") or c.get("slug")) for c in courses),
+                )
             # A silent zero must never hide again: say what happened per community.
             ctx.logger.info(
                 "skool: %s lessons — %d video(s) downloaded, %d cached, "
-                "%d without native video, %d failed",
-                slug, stats["downloaded"], stats["cached"], stats["none"], stats["failed"],
+                "%d without native video, %d failed (%d course(s) filtered out)",
+                slug, stats["downloaded"], stats["cached"], stats["none"],
+                stats["failed"], skipped_courses,
             )
 
     # -- browser helpers (thin; not unit-tested) ----------------------------
@@ -408,8 +442,7 @@ class SkoolConnector(Connector):
             ctx.logger.debug("skool: could not write debug dump %s: %s", name, exc)
 
     def _download_resources(
-        self, page: Any, lesson: dict[str, Any], downloads: Path,
-        slug: str, course_slug: str, ctx: RunContext,
+        self, page: Any, lesson: dict[str, Any], lesson_dir: Path, ctx: RunContext,
     ) -> tuple[list[dict[str, Any]], int]:
         """Download a lesson's native resource files; return ``(saved, failures)``.
 
@@ -423,7 +456,6 @@ class SkoolConnector(Connector):
         """
         out: list[dict[str, Any]] = []
         failures = 0
-        lesson_dir = downloads / _safe(slug) / _safe(course_slug) / _safe(str(lesson.get("lessonId")))
         for res in lesson.get("resources") or []:
             if not isinstance(res, dict):
                 continue
@@ -491,7 +523,7 @@ class SkoolConnector(Connector):
     # -- per-lesson processing (enrich -> resources -> native video) ---------
 
     def _process_lesson(
-        self, page: Any, lesson: dict[str, Any], downloads: Path,
+        self, page: Any, lesson: dict[str, Any], lesson_dir: Path,
         slug: str, course_slug: str, cfg: SkoolConfig, ctx: RunContext,
     ) -> str:
         """Fill a lesson's video/resource data and download its media.
@@ -508,7 +540,7 @@ class SkoolConnector(Connector):
         """
         try:
             return self._process_lesson_inner(
-                page, lesson, downloads, slug, course_slug, cfg, ctx
+                page, lesson, lesson_dir, slug, course_slug, cfg, ctx
             )
         except (ConnectorAuthError, ConnectorConfigError):
             raise  # operator problems abort the run, as everywhere else
@@ -520,7 +552,7 @@ class SkoolConnector(Connector):
             return "failed"
 
     def _process_lesson_inner(
-        self, page: Any, lesson: dict[str, Any], downloads: Path,
+        self, page: Any, lesson: dict[str, Any], lesson_dir: Path,
         slug: str, course_slug: str, cfg: SkoolConfig, ctx: RunContext,
     ) -> str:
         if not lesson.get("lessonId"):
@@ -529,10 +561,7 @@ class SkoolConnector(Connector):
                 slug, course_slug,
             )
             return "failed"
-        lesson_dir = (
-            downloads / _safe(slug) / _safe(str(course_slug))
-            / _safe(str(lesson.get("lessonId")))
-        )
+        _adopt_lesson_dir(lesson_dir, lesson.get("lessonId"), ctx)
         video_dest = lesson_dir / "video.mp4"
         sidecar = _load_sidecar(lesson_dir / ".meta.json")
         if sidecar is not None and self._sidecar_complete(sidecar, lesson_dir, video_dest, cfg):
@@ -560,7 +589,7 @@ class SkoolConnector(Connector):
         if fields.get("desc"):
             lesson["desc"] = fields["desc"]
         lesson["_resources"], resource_failures = self._download_resources(
-            page, lesson, downloads, slug, course_slug, ctx
+            page, lesson, lesson_dir, ctx
         )
 
         status = "none"
@@ -596,6 +625,7 @@ class SkoolConnector(Connector):
         # (mirrors skool-downloader's videoFailed/resourceFailures gate).
         if not video_failed and not resource_failures:
             _write_sidecar(lesson_dir / ".meta.json", {
+                "lessonId": lesson.get("lessonId"),  # anchors dir-rename migration
                 "videoId": fields.get("videoId"),
                 "videoLink": fields.get("videoLink"),
                 "video_downloaded": video_downloaded,
@@ -945,6 +975,88 @@ def _find_lesson_node(next_data: dict[str, Any], lesson_id: Any) -> dict[str, An
     return bfs(next_data)
 
 
+def _course_selected(
+    selectors: list[str], community_slug: str, course: dict[str, Any]
+) -> bool:
+    """Whether a course passes the config's ``courses`` filter.
+
+    Each selector is a course title or Skool URL slug, compared
+    case-insensitively; a "community/course" form scopes the selector to one
+    community. An empty filter selects everything.
+    """
+    if not selectors:
+        return True
+    title = str(course.get("title") or "").strip().lower()
+    slug = str(course.get("slug") or "").strip().lower()
+    for sel in selectors:
+        want = str(sel).strip().lower()
+        if "/" in want:
+            comm, _, want = want.partition("/")
+            if comm.strip() != community_slug.strip().lower():
+                continue
+            want = want.strip()
+        if want and want in (title, slug):
+            return True
+    return False
+
+
+def _course_dir_name(course: dict[str, Any], course_slug: str, used: set[str]) -> str:
+    """Directory name for a course: its human title, disambiguated with the
+    slug when two courses in one community share a title."""
+    name = _safe(str(course.get("title") or course_slug))
+    if name in used:
+        name = _safe(f"{name} ({course_slug})")
+    used.add(name)
+    return name
+
+
+def _lesson_dir_name(index: int, lesson: dict[str, Any]) -> str:
+    """Directory name for a lesson: "NN - Title" (skool-downloader's video
+    naming), keeping the course order sortable; the raw id when untitled."""
+    title = lesson.get("title")
+    if not title:
+        return _safe(str(lesson.get("lessonId") or "lesson"))
+    return _safe(f"{index:02d} - {title}")
+
+
+def _adopt_dir(new_dir: Path, legacy_dir: Path, ctx: RunContext) -> bool:
+    """Rename an existing download directory to its new name (best-effort),
+    so layout changes never re-download anything."""
+    if new_dir.exists() or legacy_dir == new_dir or not legacy_dir.is_dir():
+        return False
+    try:
+        new_dir.parent.mkdir(parents=True, exist_ok=True)
+        legacy_dir.rename(new_dir)
+    except OSError as exc:
+        ctx.logger.warning(
+            "skool: could not rename %s -> %s: %s", legacy_dir, new_dir, exc
+        )
+        return False
+    ctx.logger.info("skool: renamed %s -> %s", legacy_dir.name, new_dir)
+    return True
+
+
+def _adopt_lesson_dir(lesson_dir: Path, lesson_id: Any, ctx: RunContext) -> None:
+    """Find this lesson's downloads under an older directory name and rename.
+
+    Two prior shapes are healed: the legacy id-named directory, and any
+    sibling whose sidecar records the same ``lessonId`` (an index shift —
+    Skool inserted/removed a lesson mid-course, renumbering "NN - Title")."""
+    if lesson_dir.exists():
+        return
+    if _adopt_dir(lesson_dir, lesson_dir.parent / _safe(str(lesson_id)), ctx):
+        return
+    try:
+        siblings = [d for d in lesson_dir.parent.iterdir() if d.is_dir()]
+    except OSError:
+        return
+    for sib in siblings:
+        sidecar = _load_sidecar(sib / ".meta.json")
+        if sidecar and str(sidecar.get("lessonId")) == str(lesson_id):
+            _adopt_dir(lesson_dir, sib, ctx)
+            return
+
+
 def _load_sidecar(path: Path) -> dict[str, Any] | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1146,12 +1258,22 @@ def _parse_lessons(course_next_data: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+_UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+# Windows device names are invalid as file/dir names on any drive letter.
+_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10)),
+}
 
 
 def _safe(name: str) -> str:
-    """Filesystem-safe path segment."""
-    cleaned = _UNSAFE.sub("_", (name or "").strip()).strip("._")
+    """Filesystem-safe path segment that keeps names human-readable.
+
+    Only characters Windows forbids are replaced (with a space, then whitespace
+    runs collapse), so titles like "01 - Lesson Title" survive as-is."""
+    cleaned = " ".join(_UNSAFE.sub(" ", name or "").split()).strip("._ ")
+    if cleaned.upper() in _RESERVED:
+        cleaned += "_"
     return cleaned or "item"
 
 

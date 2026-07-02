@@ -120,6 +120,35 @@ def test_unavailable_video_is_not_linked():
     assert [m for m in item.media if m.kind == "video"] == []
 
 
+def test_course_selected_matching():
+    from dbs.connectors.skool import _course_selected
+
+    course = {"title": "Claude Code Masterclass", "slug": "b787b647"}
+    assert _course_selected([], "chase-ai", course) is True  # no filter = all
+    # Title or slug, case-insensitive.
+    assert _course_selected(["claude code masterclass"], "chase-ai", course) is True
+    assert _course_selected(["B787B647"], "chase-ai", course) is True
+    assert _course_selected(["Other Course"], "chase-ai", course) is False
+    # "community/course" scopes the selector to one community.
+    assert _course_selected(
+        ["chase-ai/Claude Code Masterclass"], "chase-ai", course) is True
+    assert _course_selected(
+        ["other-comm/Claude Code Masterclass"], "chase-ai", course) is False
+    # Any selector matching is enough.
+    assert _course_selected(
+        ["Nope", "chase-ai/claude code masterclass"], "chase-ai", course) is True
+
+
+def test_courses_filter_suppresses_reconcile_marker():
+    # A course filter is a partial enumeration: emitting a ReconcileMarker
+    # would soft-delete everything outside the filter. It must be withheld.
+    cfg = SkoolConfig(downloads_dir="/dl", courses=["Course X"])
+    conn = _connector([_community(), _course(), _lesson("les1")])
+    events = list(conn.fetch(_ctx(cfg)))
+    assert [e for e in events if isinstance(e, ReconcileMarker)] == []
+    assert any(isinstance(e, BackupItem) for e in events)  # items still flow
+
+
 def test_include_kinds_filter_keeps_excluded_ids_live():
     cfg = SkoolConfig(downloads_dir="/dl", include_kinds=["lesson"])
     conn = _connector([_community(), _course(), _lesson("les1")])
@@ -254,9 +283,33 @@ def test_process_lesson_missing_id_skips_without_navigation(tmp_path, caplog):
 
 
 def test_safe_path_segment():
-    assert _safe("My Course / Weird:Name") == "My_Course_Weird_Name"
+    # Human-readable: only Windows-illegal chars are replaced; spaces survive.
+    assert _safe("My Course / Weird:Name") == "My Course Weird Name"
+    assert _safe("01 - Lesson Title") == "01 - Lesson Title"
+    assert _safe("What? A <Title>*") == "What A Title"
+    assert _safe("Trailing dots... ") == "Trailing dots"
+    assert _safe("CON") == "CON_"  # Windows device name
     assert _safe("") == "item"
     assert _safe("  ...  ") == "item"
+
+
+def test_course_dir_name_uses_title_and_disambiguates():
+    from dbs.connectors.skool import _course_dir_name
+
+    used: set[str] = set()
+    assert _course_dir_name({"title": "AI Bootcamp"}, "b787b647", used) == "AI Bootcamp"
+    # Same title again in the community -> slug-suffixed, never merged.
+    assert (_course_dir_name({"title": "AI Bootcamp"}, "c99", used)
+            == "AI Bootcamp (c99)")
+    assert _course_dir_name({}, "b787b647", used) == "b787b647"  # no title
+
+
+def test_lesson_dir_name_index_prefix_and_fallback():
+    from dbs.connectors.skool import _lesson_dir_name
+
+    assert _lesson_dir_name(1, {"title": "Welcome", "lessonId": "l1"}) == "01 - Welcome"
+    assert _lesson_dir_name(12, {"title": "Q&A: part 2?"}) == "12 - Q&A part 2"
+    assert _lesson_dir_name(3, {"lessonId": "fffacde8"}) == "fffacde8"  # untitled
 
 
 # --- auth / resource-fetch seam (fake page) --------------------------------
@@ -309,7 +362,7 @@ def test_download_resources_writes_files_and_records_paths(tmp_path):
          "file_content_type": "application/pdf"},
         {"downloadUrl": "https://x/ext", "isExternal": True},  # skipped
     ]}
-    out, failures = conn._download_resources(page, lesson, tmp_path, "comm", "course", _ctx())
+    out, failures = conn._download_resources(page, lesson, tmp_path / "comm" / "course" / "l1", _ctx())
     assert len(out) == 1 and failures == 0
     dest = tmp_path / "comm" / "course" / "l1" / "f.pdf"
     assert dest.read_bytes() == body
@@ -324,7 +377,7 @@ def test_download_resources_skips_existing_file(tmp_path):
     page = _FakePage(fetch={})  # evaluate would return None -> would fail if called
     lesson = {"lessonId": "l1", "resources": [
         {"downloadUrl": "https://x/f.pdf", "file_name": "f.pdf"}]}
-    out, failures = conn._download_resources(page, lesson, tmp_path, "comm", "course", _ctx())
+    out, failures = conn._download_resources(page, lesson, tmp_path / "comm" / "course" / "l1", _ctx())
     assert dest.read_bytes() == b"already here"  # not overwritten
     assert out[0]["filename"] == "f.pdf" and failures == 0
 
@@ -340,7 +393,7 @@ def test_download_resources_resolves_file_id_via_files_api(tmp_path):
         download_urls={"f1": {"success": True, "url": "https://signed/f1"}},
         fetch={"https://signed/f1": {"status": 200, "b64": base64.b64encode(body).decode()}})
     lesson = {"lessonId": "l1", "resources": [{"file_id": "f1", "file_name": "notes.pdf"}]}
-    out, failures = conn._download_resources(page, lesson, tmp_path, "c", "x", _ctx())
+    out, failures = conn._download_resources(page, lesson, tmp_path / "c" / "x" / "l1", _ctx())
     assert failures == 0
     assert (tmp_path / "c" / "x" / "l1" / "notes.pdf").read_bytes() == body
     assert out[0]["filename"] == "notes.pdf"
@@ -354,7 +407,7 @@ def test_download_resources_counts_failures_for_retry(tmp_path, caplog):
         {"title": "no handle at all"},  # no url, no file_id: skipped, not a failure
     ]}
     with caplog.at_level("WARNING", logger="test"):
-        out, failures = conn._download_resources(page, lesson, tmp_path, "c", "x", _ctx())
+        out, failures = conn._download_resources(page, lesson, tmp_path / "c" / "x" / "l1", _ctx())
     assert out == [] and failures == 1
     assert any("download URL" in r.message for r in caplog.records)
 
@@ -494,10 +547,14 @@ class _LessonConn(SkoolConnector):
         return self._download_ok
 
 
-def _process(conn, tmp_path, lesson=None, cfg=None):
+def _process(conn, tmp_path, lesson=None, cfg=None, page=None):
     cfg = cfg or SkoolConfig(downloads_dir=str(tmp_path))
     lesson = lesson if lesson is not None else _video_lesson()
-    status = conn._process_lesson(object(), lesson, tmp_path, "comm", "course", cfg, _ctx(cfg))
+    # The dir is computed in _walk; tests keep the historical comm/course/<id> shape.
+    lesson_dir = tmp_path / "comm" / "course" / str(lesson.get("lessonId"))
+    status = conn._process_lesson(
+        page if page is not None else object(), lesson, lesson_dir, "comm", "course",
+        cfg, _ctx(cfg))
     return status, lesson
 
 
@@ -512,6 +569,7 @@ def test_process_lesson_downloads_video_and_writes_sidecar(tmp_path):
     assert lesson["videoId"] == "mux1" and lesson["hasVideo"] is True
     assert dest.read_bytes() == b"video-bytes"
     sidecar = _json.loads((dest.parent / ".meta.json").read_text())
+    assert sidecar["lessonId"] == "l1"  # anchors dir-rename migration
     assert sidecar["video_downloaded"] is True
     assert sidecar["no_native_video"] is False
     assert conn.enriched == 1 and conn.sniffed == 1
@@ -606,9 +664,8 @@ def test_process_lesson_downloads_resources_from_enrichment(tmp_path):
     # _download_resources runs for real over a fake page (in-page fetch).
     page = _FakePage(fetch={"https://x/f.pdf": {
         "status": 200, "b64": base64.b64encode(body).decode()}})
-    cfg = SkoolConfig(downloads_dir=str(tmp_path))
     lesson = _video_lesson()
-    conn._process_lesson(page, lesson, tmp_path, "comm", "course", cfg, _ctx(cfg))
+    _, lesson = _process(conn, tmp_path, lesson=lesson, page=page)
     dest = tmp_path / "comm" / "course" / "l1" / "f.pdf"
     assert dest.read_bytes() == body
     assert lesson["_resources"][0]["path"] == str(dest)
@@ -628,15 +685,62 @@ def test_process_lesson_resource_failure_withholds_sidecar(tmp_path):
         {"file_id": "f1", "file_name": "notes.pdf"}]}
     conn = _LessonConn(fields=fields)
     page = _FakePage(download_urls={"f1": {"success": False, "error": "HTTP 403"}})
-    cfg = SkoolConfig(downloads_dir=str(tmp_path))
-    status = conn._process_lesson(page, _video_lesson(), tmp_path, "comm", "course",
-                                  cfg, _ctx(cfg))
+    status, _ = _process(conn, tmp_path, page=page)
     assert status == "none"  # lesson stays indexed with tree-level data
     assert not (tmp_path / "comm" / "course" / "l1" / ".meta.json").exists()
     conn2 = _LessonConn(fields=fields)
     page2 = _FakePage(download_urls={"f1": {"success": False, "error": "HTTP 403"}})
-    conn2._process_lesson(page2, _video_lesson(), tmp_path, "comm", "course", cfg, _ctx(cfg))
+    _process(conn2, tmp_path, page=page2)
     assert conn2.enriched == 1  # no fast path: really revisited
+
+
+# -- dir naming migration (rename in place, never re-download) -------------------
+
+
+def test_process_lesson_adopts_legacy_id_named_dir(tmp_path):
+    # First run wrote everything under the old id-named layout (comm/course/l1).
+    conn = _LessonConn()
+    _process(conn, tmp_path)
+    legacy = tmp_path / "comm" / "course" / "l1"
+    assert (legacy / "video.mp4").exists()
+    # Next run computes the human-readable dir: the old one is renamed, cached.
+    new_dir = tmp_path / "comm" / "course" / "01 - Lesson 1"
+    conn2 = _LessonConn()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path))
+    status = conn2._process_lesson(
+        object(), _video_lesson(), new_dir, "comm", "course", cfg, _ctx(cfg))
+    assert status == "cached" and conn2.enriched == 0  # nothing re-downloaded
+    assert not legacy.exists()
+    assert (new_dir / "video.mp4").read_bytes() == b"video-bytes"
+
+
+def test_process_lesson_renumbers_on_index_shift(tmp_path):
+    conn = _LessonConn()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path))
+    old_dir = tmp_path / "comm" / "course" / "01 - Lesson 1"
+    assert conn._process_lesson(
+        object(), _video_lesson(), old_dir, "comm", "course", cfg, _ctx(cfg)
+    ) == "downloaded"
+    # Skool inserted a lesson above: the same lesson now arrives as index 2.
+    # The sidecar's recorded lessonId anchors the rename.
+    new_dir = tmp_path / "comm" / "course" / "02 - Lesson 1"
+    conn2 = _LessonConn()
+    status = conn2._process_lesson(
+        object(), _video_lesson(), new_dir, "comm", "course", cfg, _ctx(cfg))
+    assert status == "cached" and conn2.enriched == 0
+    assert not old_dir.exists() and (new_dir / "video.mp4").exists()
+
+
+def test_adopt_dir_never_clobbers_or_invents(tmp_path):
+    from dbs.connectors.skool import _adopt_dir
+
+    new = tmp_path / "New Name"
+    new.mkdir()
+    legacy = tmp_path / "old"
+    legacy.mkdir()
+    assert _adopt_dir(new, legacy, _ctx()) is False  # target exists: keep both
+    assert legacy.exists()
+    assert _adopt_dir(tmp_path / "Other", tmp_path / "missing", _ctx()) is False
 
 
 # -- _sniff_hls_url ladder (fake page) ------------------------------------------
@@ -902,7 +1006,7 @@ def test_download_resources_skips_non_dict_entries(tmp_path):
     conn = SkoolConnector()
     page = _FakePage(fetch={})
     lesson = {"lessonId": "l1", "resources": ["oops-a-string"]}
-    out, failures = conn._download_resources(page, lesson, tmp_path, "c", "c", _ctx())
+    out, failures = conn._download_resources(page, lesson, tmp_path / "c" / "c" / "l1", _ctx())
     assert out == [] and failures == 0  # no crash, nothing written
 
 
