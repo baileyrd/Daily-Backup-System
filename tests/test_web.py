@@ -262,8 +262,11 @@ def test_connectors_report_readiness(client):
     assert conns["youtube"]["pip_requirements"] == ["yt-dlp>=2024.1"]
     assert conns["youtube"]["auth_capture"]["kind"] == "browser_cookies"
     # skool logs into skool.com via a captured persistent session (connector-
-    # level, the same browser_session capture reddit uses).
-    assert conns["skool"]["pip_requirements"] == ["playwright>=1.40"]
+    # level, the same browser_session capture reddit uses) and downloads
+    # native video via yt-dlp with auto-managed ffmpeg.
+    assert conns["skool"]["pip_requirements"] == [
+        "playwright>=1.40", "yt-dlp>=2024.1", "imageio-ffmpeg>=0.4",
+    ]
     assert conns["skool"]["needs_playwright_browser"] is True
     assert conns["skool"]["auth_capture"]["kind"] == "browser_session"
     assert conns["skool"]["auth_capture"]["per_source"] is False

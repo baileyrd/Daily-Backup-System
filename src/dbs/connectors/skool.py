@@ -8,12 +8,17 @@ pages — no external tooling. It indexes the **catalog** (community → course 
 lesson) into the backup DB and downloads each lesson's attached **resource
 files** to a local ``downloads_dir`` (recorded as :class:`MediaRef` paths).
 
-Video is handled in two stages. This connector records each lesson's video
-*metadata* (whether it has one, and any external Vimeo/YouTube/Loom link as a
-stable reference). Downloading Skool's native (Mux) video — which requires
-driving the player to capture a signed HLS URL and muxing with ffmpeg — is a
-separate, heavier step tracked as phase 2; the seam is marked in
-``_lesson_item``.
+Native (Mux) lesson video is downloaded too (``download_videos``, on by
+default): the lesson page embeds — or the player reveals — a signed
+``.m3u8?token=`` HLS URL, which yt-dlp downloads into ``downloads_dir``
+(ffmpeg is auto-managed via ``imageio-ffmpeg``, falling back to the system
+PATH). The signed URL is found by, in order: reconstructing it from the lesson
+page's ``__NEXT_DATA__`` (``playbackId`` + ``playbackToken``), clicking the
+Mux player and sniffing the browser's resource timeline, and a shadow-DOM
+``<video>.src`` fallback — the same ladder skool-downloader uses. External
+video links (Vimeo/YouTube/Loom) are recorded as stable references, not
+downloaded. Already-downloaded videos are skipped by path, so re-runs don't
+re-fetch.
 
 Auth is a **path-valued secret** ``SKOOL_SESSION_DIR``: a Playwright
 persistent-context directory holding your logged-in cookies, captured once via
@@ -71,6 +76,20 @@ _FETCH_BYTES_JS = (
     "status: r.status, "
     "b64: btoa(Array.from(new Uint8Array(b), c => String.fromCharCode(c)).join('')) })))"
 )
+# Signed Mux HLS manifests the player has fetched so far (they carry token=).
+_M3U8_PERF_JS = (
+    "() => performance.getEntriesByType('resource').map(e => e.name)"
+    ".filter(n => n.includes('m3u8') && n.includes('token='))"
+)
+# Fallback: find a <video src=...m3u8...> anywhere, including inside shadow DOM.
+_SHADOW_VIDEO_JS = (
+    "() => { const walk = (root) => {"
+    " for (const el of root.querySelectorAll('*')) {"
+    "  if (el.tagName === 'VIDEO' && el.src && el.src.includes('m3u8')) return el.src;"
+    "  if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }"
+    " } return null; };"
+    " return walk(document); }"
+)
 
 
 class SkoolConfig(BaseModel):
@@ -84,6 +103,12 @@ class SkoolConfig(BaseModel):
     include_kinds: list[str] = list(_KINDS)
     checkpoint_every: int = Field(default=200, ge=1)
     headless: bool = True
+    # Download each lesson's native (Mux) video into downloads_dir. Requires
+    # yt-dlp (installed by the [skool] extra); ffmpeg is auto-managed via
+    # imageio-ffmpeg with a system-PATH fallback. Off = metadata/links only.
+    download_videos: bool = True
+    # Cap the selected HLS variant's height (e.g. 1080, 720). 0 = best available.
+    video_quality: int = Field(default=1080, ge=0)
     # Name of the env var holding the path to the Playwright persistent-context
     # directory (your logged-in Skool session). Mirrors reddit's session_dir_env.
     session_dir_env: str = "SKOOL_SESSION_DIR"
@@ -113,8 +138,8 @@ class SkoolConnector(Connector):
     secret_keys = ("SKOOL_SESSION_DIR",)
     wants_managed_http = False
     schema_version = 1
-    pip_requirements = ("playwright>=1.40",)
-    runtime_imports = ("playwright",)
+    pip_requirements = ("playwright>=1.40", "yt-dlp>=2024.1", "imageio-ffmpeg>=0.4")
+    runtime_imports = ("playwright", "yt_dlp")
     needs_playwright_browser = True
     item_kinds = (
         ItemKind(name="community", display_name="Community"),
@@ -283,6 +308,9 @@ class SkoolConnector(Connector):
                     lesson["_resources"] = self._download_resources(
                         page, lesson, downloads, slug, course_slug, ctx
                     )
+                    lesson["_video_path"] = self._maybe_download_video(
+                        page, lesson, downloads, slug, course_slug, cfg, ctx
+                    )
                     yield lesson
 
     # -- browser helpers (thin; not unit-tested) ----------------------------
@@ -375,6 +403,95 @@ class SkoolConnector(Connector):
         except Exception:  # noqa: BLE001
             return None
 
+    # -- native (Mux) video download -----------------------------------------
+
+    def _maybe_download_video(
+        self, page: Any, lesson: dict[str, Any], downloads: Path,
+        slug: str, course_slug: str, cfg: SkoolConfig, ctx: RunContext,
+    ) -> str | None:
+        """Download a lesson's native video if enabled/needed; return its path.
+
+        Best-effort throughout: any failure logs and returns ``None`` — the
+        lesson is still indexed with its video *metadata* intact. External
+        video links are not downloaded (recorded as references by the mapper).
+        Already-downloaded files are skipped without touching the player.
+        """
+        if not cfg.download_videos:
+            return None
+        if not lesson.get("videoId") or lesson.get("videoUnavailable"):
+            return None  # no native video (external links stay references)
+        dest = (
+            downloads / _safe(slug) / _safe(str(course_slug))
+            / _safe(str(lesson.get("lessonId"))) / "video.mp4"
+        )
+        if dest.exists() and dest.stat().st_size > 0:
+            return str(dest)
+
+        url = self._sniff_hls_url(page, slug, course_slug, lesson, ctx)
+        if not url:
+            ctx.logger.warning(
+                "skool: could not capture a video URL for lesson %s (%s) — "
+                "indexed without the video.",
+                lesson.get("lessonId"), lesson.get("title"),
+            )
+            return None
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not self._download_hls(url, dest, cfg, ctx):
+            return None
+        ctx.logger.info("skool: downloaded video for %s -> %s", lesson.get("title"), dest)
+        return str(dest)
+
+    def _sniff_hls_url(
+        self, page: Any, slug: str, course_slug: str, lesson: dict[str, Any], ctx: RunContext
+    ) -> str | None:
+        """Signed ``.m3u8?token=`` URL for a lesson's Mux video (Playwright seam).
+
+        The ladder mirrors skool-downloader: (1) reconstruct from the lesson
+        page's ``__NEXT_DATA__`` (``playbackId`` + ``playbackToken``); (2) click
+        the Mux player and watch the resource timeline for a tokened manifest;
+        (3) shadow-DOM ``<video>.src`` fallback.
+        """
+        lesson_url = f"{_BASE}/{slug}/classroom/{course_slug}?md={lesson.get('lessonId')}"
+        try:
+            self._goto(page, lesson_url, ctx)
+            data = page.evaluate(_NEXT_DATA_JS)
+            url = _mux_hls_url(data)
+            if url:
+                return url
+
+            try:
+                page.click('div[class*="MuxThumbnailWrapper"]', timeout=5000)
+            except Exception:  # noqa: BLE001 - player may autoload without a poster
+                pass
+            for _ in range(20):  # ~10s: the player fetches the manifest on play
+                urls = page.evaluate(_M3U8_PERF_JS)
+                if urls:
+                    return urls[0]
+                page.wait_for_timeout(500)
+            return page.evaluate(_SHADOW_VIDEO_JS)
+        except Exception as exc:  # noqa: BLE001 - best-effort, never fail the run
+            ctx.logger.debug("skool: video sniff failed for %s: %s", lesson_url, exc)
+            return None
+
+    def _download_hls(self, url: str, dest: Path, cfg: SkoolConfig, ctx: RunContext) -> bool:
+        """Download an HLS URL to ``dest`` via yt-dlp (yt-dlp seam)."""
+        try:
+            import yt_dlp
+        except ImportError:
+            ctx.logger.warning(
+                "skool: yt-dlp is not installed — video downloads skipped. "
+                "Install with `pip install 'daily-backup-system[skool]'`."
+            )
+            return False
+        opts = _ydl_opts(dest, cfg.video_quality, _ffmpeg_location())
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+        except Exception as exc:  # noqa: BLE001 - includes DownloadError; best-effort
+            ctx.logger.warning("skool: video download failed (%s): %s", dest.name, exc)
+            return False
+        return dest.exists() and dest.stat().st_size > 0
+
     def _goto(self, page: Any, url: str, ctx: RunContext) -> None:
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
@@ -451,12 +568,14 @@ class SkoolConnector(Connector):
                     mime=res.get("mime"),
                 )
             )
-        # Phase 1: record only an EXTERNAL video link (Vimeo/YouTube/Loom) as a
-        # stable reference. Native Skool (Mux) video download is phase 2.
-        # TODO(phase 2): capture the signed Mux HLS URL, download via yt-dlp
-        # (+ffmpeg) into downloads_dir, and record the local path here.
+        # A downloaded native (Mux) video: local path, never re-fetched by
+        # storage. Falls back to the EXTERNAL link (Vimeo/YouTube/Loom) as a
+        # stable reference — external videos are not downloaded.
+        video_path = raw.get("_video_path")
         video_link = raw.get("videoLink")
-        if video_link and not raw.get("videoUnavailable"):
+        if video_path:
+            media.append(MediaRef(url=video_path, kind="video", filename="video.mp4"))
+        elif video_link and not raw.get("videoUnavailable"):
             media.append(MediaRef(url=video_link, kind="video"))
         tags = [
             t
@@ -494,6 +613,56 @@ def _deep_find(obj: Any, key: str) -> Any:
         elif isinstance(cur, list):
             queue.extend(cur)
     return None
+
+
+def _mux_hls_url(next_data: dict[str, Any]) -> str | None:
+    """Reconstruct the signed Mux manifest URL from a lesson page's
+    ``__NEXT_DATA__``, if the playback id + token are embedded.
+
+    Mirrors skool-downloader's fallback: ``pageProps.video`` →
+    ``https://stream.mux.com/{playbackId}.m3u8?token={playbackToken}``, with a
+    deep search for the two keys if the ``video`` object moves.
+    """
+    props = ((next_data or {}).get("props") or {}).get("pageProps") or {}
+    video = props.get("video")
+    if isinstance(video, dict):
+        pid = video.get("playbackId")
+        token = video.get("playbackToken") or video.get("token")
+        if pid and token:
+            return f"https://stream.mux.com/{pid}.m3u8?token={token}"
+    pid = _deep_find(next_data, "playbackId")
+    token = _deep_find(next_data, "playbackToken")
+    if pid and token:
+        return f"https://stream.mux.com/{pid}.m3u8?token={token}"
+    return None
+
+
+def _ydl_opts(dest: Path, quality: int, ffmpeg_location: str | None) -> dict[str, Any]:
+    """yt-dlp options for downloading one HLS video to an exact path."""
+    opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "outtmpl": str(dest),
+        # Master playlists expose height variants; cap to the configured one.
+        "format": f"best[height<=?{quality}]" if quality else "best",
+        "merge_output_format": "mp4",
+        "socket_timeout": 30,
+        "retries": 3,
+    }
+    if ffmpeg_location:
+        opts["ffmpeg_location"] = ffmpeg_location
+    return opts
+
+
+def _ffmpeg_location() -> str | None:
+    """Path to the auto-managed ffmpeg binary (imageio-ffmpeg), or ``None`` to
+    let yt-dlp find one on the system PATH."""
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:  # noqa: BLE001 - not installed / no binary for this OS
+        return None
 
 
 def _parse_memberships(next_data: dict[str, Any]) -> list[dict[str, Any]]:
