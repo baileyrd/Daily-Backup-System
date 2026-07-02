@@ -31,6 +31,7 @@ importable without the optional ``dbs[skool]`` extra.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any, Iterator
@@ -249,7 +250,18 @@ class SkoolConnector(Connector):
                 or group.get("updatedAt"),
             }
 
-            for course in _parse_courses(data):
+            courses = _parse_courses(data)
+            if not courses:
+                # Skool's course list may live under a different __NEXT_DATA__
+                # key (or be loaded client-side). Surface where to look and dump
+                # the raw payload so the shape can be fixed precisely.
+                self._dump_debug(data, downloads, f"{_safe(slug)}-classroom", ctx)
+                ctx.logger.warning(
+                    "skool: found 0 courses for %s. pageProps keys seen: %s. Raw "
+                    "__NEXT_DATA__ written under %s/_debug/ for diagnosis.",
+                    slug, sorted(props.keys()), downloads,
+                )
+            for course in courses:
                 course_slug = course.get("slug") or course.get("id")
                 yield {
                     "_kind": "course",
@@ -295,6 +307,17 @@ class SkoolConnector(Connector):
         if data is None:
             ctx.logger.warning("skool: no __NEXT_DATA__ on %s (layout change?)", url)
         return data
+
+    def _dump_debug(self, data: Any, downloads: Path, name: str, ctx: RunContext) -> None:
+        """Best-effort: write a raw __NEXT_DATA__ payload for diagnosis."""
+        try:
+            debug_dir = downloads / "_debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            (debug_dir / f"{name}.json").write_text(
+                json.dumps(data, indent=2, default=str), encoding="utf-8"
+            )
+        except Exception as exc:  # noqa: BLE001 - diagnostics must never fail a run
+            ctx.logger.debug("skool: could not write debug dump %s: %s", name, exc)
 
     def _download_resources(
         self, page: Any, lesson: dict[str, Any], downloads: Path,
@@ -440,14 +463,35 @@ def _group_name(group: dict[str, Any]) -> str | None:
     return meta.get("displayName") or meta.get("name") or group.get("name")
 
 
+def _deep_find(obj: Any, key: str) -> Any:
+    """First value stored under ``key`` anywhere in a nested dict/list (BFS)."""
+    queue: list[Any] = [obj]
+    while queue:
+        cur = queue.pop(0)
+        if isinstance(cur, dict):
+            if key in cur:
+                return cur[key]
+            queue.extend(cur.values())
+        elif isinstance(cur, list):
+            queue.extend(cur)
+    return None
+
+
 def _parse_courses(next_data: dict[str, Any]) -> list[dict[str, Any]]:
     """Course descriptors from a classroom page's ``__NEXT_DATA__``.
 
-    Handles both ``pageProps.allCourses`` and the nested
-    ``pageProps.renderData.allCourses`` shape Skool has shipped.
+    Tries ``pageProps.allCourses`` and the nested
+    ``pageProps.renderData.allCourses`` first, then falls back to a deep search
+    for an ``allCourses`` array anywhere in the payload (Skool moves it around
+    between frontend releases).
     """
     props = ((next_data or {}).get("props") or {}).get("pageProps") or {}
-    raw = props.get("allCourses") or (props.get("renderData") or {}).get("allCourses") or []
+    raw = (
+        props.get("allCourses")
+        or (props.get("renderData") or {}).get("allCourses")
+        or _deep_find(next_data, "allCourses")
+        or []
+    )
     out: list[dict[str, Any]] = []
     for c in raw:
         if not isinstance(c, dict):

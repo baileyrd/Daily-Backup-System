@@ -152,6 +152,14 @@ def test_parse_courses_empty_and_malformed():
     assert _parse_courses({"props": {"pageProps": {"allCourses": ["bad", None]}}}) == []
 
 
+def test_parse_courses_deep_search_fallback():
+    # allCourses nested somewhere unexpected (not under pageProps directly).
+    nd = {"props": {"pageProps": {"data": {"nested": {"allCourses": [
+        {"id": "c1", "name": "intro", "metadata": {"title": "Intro"}}]}}}}}
+    out = _parse_courses(nd)
+    assert [c["slug"] for c in out] == ["intro"]
+
+
 def test_parse_lessons_modules_and_standalone():
     cd = {"props": {"pageProps": {"course": {"children": [
         {"id": "m1", "name": "Mod", "metadata": {"title": "Module 1"}, "children": [
