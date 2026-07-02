@@ -229,7 +229,7 @@ files — set `store_media` on the source:
 [sources.courses]
 type = "skool"
 enabled = true
-communities = ["your-community"]
+# communities = ["your-community"]   # optional; omit to auto-detect every community you've joined
 downloads_dir = "~/skool-backup"
 store_media = true              # archive media bytes into the DB
 max_media_mb = 200             # per-file cap; 0 = no limit (files over the cap
@@ -255,7 +255,7 @@ the DB too:
 ```toml
 [sources.courses]
 type = "skool"
-communities = ["your-community"]
+# communities = ["your-community"]   # optional; omit to auto-detect every community you've joined
 downloads_dir = "~/skool-backup"
 store_media = true              # ...and pull the downloaded files into the DB
 ```
