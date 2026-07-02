@@ -570,7 +570,7 @@ def test_process_lesson_downloads_video_and_writes_sidecar(tmp_path):
 
     conn = _LessonConn()
     status, lesson = _process(conn, tmp_path)
-    dest = tmp_path / "comm" / "course" / "l1" / "video.mp4"
+    dest = tmp_path / "comm" / "course" / "l1" / "l1.mp4"  # named after the lesson dir
     assert status == "downloaded"
     assert lesson["_video_path"] == str(dest)
     assert lesson["videoId"] == "mux1" and lesson["hasVideo"] is True
@@ -591,13 +591,13 @@ def test_process_lesson_sidecar_fast_path_skips_navigation(tmp_path):
     assert conn2.enriched == 0 and conn2.sniffed == 0  # no page visit at all
     # Merged fields match a fresh enrichment (no updated/unchanged flapping).
     assert lesson["videoId"] == "mux1" and lesson["hasVideo"] is True
-    assert lesson["_video_path"].endswith("video.mp4")
+    assert lesson["_video_path"].endswith("l1.mp4")
 
 
 def test_process_lesson_sidecar_with_missing_video_reprocesses(tmp_path):
     conn = _LessonConn()
     _process(conn, tmp_path)
-    (tmp_path / "comm" / "course" / "l1" / "video.mp4").unlink()  # file lost
+    (tmp_path / "comm" / "course" / "l1" / "l1.mp4").unlink()  # file lost
     conn2 = _LessonConn()
     status, _ = _process(conn2, tmp_path)
     assert status == "downloaded"  # re-visited and re-downloaded
@@ -616,7 +616,7 @@ def test_process_lesson_external_video_downloads_via_ytdlp(tmp_path):
     assert conn.sniffed == 0
     assert conn.downloaded == ["https://youtu.be/hBFBhkXTS18"]
     assert conn.downloaded_external == [True]
-    assert lesson["_video_path"].endswith("video.mp4")
+    assert lesson["_video_path"].endswith("l1.mp4")
     sidecar = _json.loads((tmp_path / "comm" / "course" / "l1" / ".meta.json").read_text())
     assert sidecar["video_downloaded"] is True
     assert sidecar["videoLink"] == "https://youtu.be/hBFBhkXTS18"
@@ -663,7 +663,7 @@ def test_old_external_link_sidecar_reprocesses_and_downloads(tmp_path):
                                "resources": []})
     status, _ = _process(conn, tmp_path)
     assert status == "downloaded" and conn.enriched == 1
-    assert (lesson_dir / "video.mp4").read_bytes() == b"video-bytes"
+    assert (lesson_dir / "l1.mp4").read_bytes() == b"video-bytes"
 
 
 def test_process_lesson_enrich_failure_yields_without_sidecar(tmp_path):
@@ -768,7 +768,7 @@ def test_process_lesson_writes_url2obs_note(tmp_path):
     assert 'tags: ["Chase AI+", "Claude Code Masterclass", "Module 1"]' in note
     # Body converted from the TipTap desc; downloaded video embedded.
     assert "Welcome!" in note and "```bash\necho hi\n```" in note
-    assert "![[video.mp4]]" in note
+    assert "![[l1.mp4]]" in note
     # The sidecar records the note -> fast path holds while it exists.
     sidecar = _json.loads((tmp_path / "comm" / "course" / "l1" / ".meta.json").read_text())
     assert sidecar["note"] == "l1.md"
@@ -814,7 +814,7 @@ def test_process_lesson_adopts_legacy_id_named_dir(tmp_path):
     conn = _LessonConn()
     _process(conn, tmp_path)
     legacy = tmp_path / "comm" / "course" / "l1"
-    assert (legacy / "video.mp4").exists()
+    assert (legacy / "l1.mp4").exists()
     # Next run computes the human-readable dir: the old one is renamed, cached.
     new_dir = tmp_path / "comm" / "course" / "01 - Lesson 1"
     conn2 = _LessonConn()
@@ -823,10 +823,11 @@ def test_process_lesson_adopts_legacy_id_named_dir(tmp_path):
         object(), _video_lesson(), new_dir, "comm", "course", cfg, _ctx(cfg))
     assert status == "cached" and conn2.enriched == 0  # nothing re-downloaded
     assert not legacy.exists()
-    assert (new_dir / "video.mp4").read_bytes() == b"video-bytes"
-    # The lesson note follows the folder's new name.
+    assert (new_dir / "01 - Lesson 1.mp4").read_bytes() == b"video-bytes"
+    # Note and video follow the folder's new name; the embed is patched.
     assert (new_dir / "01 - Lesson 1.md").exists()
-    assert not (new_dir / "l1.md").exists()
+    assert not (new_dir / "l1.md").exists() and not (new_dir / "l1.mp4").exists()
+    assert "![[01 - Lesson 1.mp4]]" in (new_dir / "01 - Lesson 1.md").read_text()
 
 
 def test_process_lesson_renumbers_on_index_shift(tmp_path):
@@ -843,7 +844,25 @@ def test_process_lesson_renumbers_on_index_shift(tmp_path):
     status = conn2._process_lesson(
         object(), _video_lesson(), new_dir, "comm", "course", cfg, _ctx(cfg))
     assert status == "cached" and conn2.enriched == 0
-    assert not old_dir.exists() and (new_dir / "video.mp4").exists()
+    assert not old_dir.exists() and (new_dir / "02 - Lesson 1.mp4").exists()
+
+
+def test_legacy_video_mp4_renamed_in_place(tmp_path):
+    # Downloads from before videos carried the lesson name: video.mp4 is
+    # renamed to <dir>.mp4 and the note's embed is patched — no re-download.
+    conn = _LessonConn()
+    _process(conn, tmp_path)
+    lesson_dir = tmp_path / "comm" / "course" / "l1"
+    (lesson_dir / "l1.mp4").rename(lesson_dir / "video.mp4")  # simulate old layout
+    note = lesson_dir / "l1.md"
+    note.write_text(note.read_text().replace("![[l1.mp4]]", "![[video.mp4]]"))
+    conn2 = _LessonConn()
+    status, lesson = _process(conn2, tmp_path)
+    assert status == "cached" and conn2.enriched == 0
+    assert (lesson_dir / "l1.mp4").read_bytes() == b"video-bytes"
+    assert not (lesson_dir / "video.mp4").exists()
+    assert "![[l1.mp4]]" in note.read_text()
+    assert lesson["_video_path"].endswith("l1.mp4")
 
 
 def test_adopt_dir_never_clobbers_or_invents(tmp_path):
@@ -1047,12 +1066,12 @@ def test_parse_courses_carries_access_privacy_and_modules():
 
 def test_lesson_item_prefers_local_video_over_external_link():
     conn = _connector([_lesson("les1", videoLink="https://vimeo.com/1",
-                               _video_path="/dl/comm/course/les1/video.mp4")])
+                               _video_path="/dl/comm/course/les1/01 - Lesson 1.mp4")])
     item = next(e for e in conn.fetch(_ctx()) if isinstance(e, BackupItem))
     vids = [m for m in item.media if m.kind == "video"]
     assert len(vids) == 1
-    assert vids[0].url == "/dl/comm/course/les1/video.mp4"
-    assert vids[0].filename == "video.mp4"
+    assert vids[0].url == "/dl/comm/course/les1/01 - Lesson 1.mp4"
+    assert vids[0].filename == "01 - Lesson 1.mp4"
 
 
 # -- string-encoded metadata normalization -------------------------------------
