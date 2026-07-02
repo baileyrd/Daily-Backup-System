@@ -507,6 +507,11 @@ def test_ydl_opts_matches_skool_downloader_invocation(tmp_path):
     opts = _ydl_opts(dest, 0, None)
     assert "format_sort" not in opts and "format" not in opts
     assert "ffmpeg_location" not in opts
+    # External hosts (YouTube/Vimeo/Loom videoLink): Skool headers would
+    # break their extractors — yt-dlp defaults are used instead.
+    opts = _ydl_opts(dest, 1080, None, external=True)
+    assert "http_headers" not in opts
+    assert opts["format_sort"] == ["res:1080", "vcodec:h264", "acodec:m4a"]
 
 
 def _video_lesson(**kw):
@@ -529,6 +534,7 @@ class _LessonConn(SkoolConnector):
         self.enriched = 0
         self.sniffed = 0
         self.downloaded: list[str] = []
+        self.downloaded_external: list[bool] = []
 
     def _enrich_lesson(self, page, lesson, slug, course_slug, ctx):
         self.enriched += 1
@@ -540,8 +546,9 @@ class _LessonConn(SkoolConnector):
         self.sniffed += 1
         return self._sniff_url
 
-    def _download_hls(self, url, dest, cfg, ctx):
+    def _download_hls(self, url, dest, cfg, ctx, external=False):
         self.downloaded.append(url)
+        self.downloaded_external.append(external)
         if self._download_ok:
             dest.write_bytes(b"video-bytes")
         return self._download_ok
@@ -597,22 +604,66 @@ def test_process_lesson_sidecar_with_missing_video_reprocesses(tmp_path):
     assert conn2.enriched == 1
 
 
-def test_process_lesson_no_native_video_writes_marker_sidecar(tmp_path):
+def test_process_lesson_external_video_downloads_via_ytdlp(tmp_path):
     import json as _json
 
-    conn = _LessonConn(fields={"videoId": None, "videoLink": "https://vimeo.com/1",
+    # No native videoId, but an external videoLink (YouTube/Vimeo/Loom):
+    # the link goes straight to yt-dlp — no player sniff, no Skool headers.
+    conn = _LessonConn(fields={"videoId": None, "videoLink": "https://youtu.be/hBFBhkXTS18",
                                "resources": []})
     status, lesson = _process(conn, tmp_path)
+    assert status == "downloaded"
+    assert conn.sniffed == 0
+    assert conn.downloaded == ["https://youtu.be/hBFBhkXTS18"]
+    assert conn.downloaded_external == [True]
+    assert lesson["_video_path"].endswith("video.mp4")
+    sidecar = _json.loads((tmp_path / "comm" / "course" / "l1" / ".meta.json").read_text())
+    assert sidecar["video_downloaded"] is True
+    assert sidecar["videoLink"] == "https://youtu.be/hBFBhkXTS18"
+    # Second run: fast path, no page visit.
+    conn2 = _LessonConn()
+    assert _process(conn2, tmp_path)[0] == "cached" and conn2.enriched == 0
+
+
+def test_process_lesson_external_video_failure_retries(tmp_path):
+    conn = _LessonConn(fields={"videoId": None, "videoLink": "https://youtu.be/x",
+                               "resources": []}, download_ok=False)
+    status, _ = _process(conn, tmp_path)
+    assert status == "failed"
+    assert not (tmp_path / "comm" / "course" / "l1" / ".meta.json").exists()  # retries
+
+
+def test_process_lesson_truly_videoless_writes_marker_sidecar(tmp_path):
+    import json as _json
+
+    conn = _LessonConn(fields={"videoId": None, "videoLink": None, "resources": []})
+    status, lesson = _process(conn, tmp_path)
     assert status == "none"
-    assert lesson["videoLink"] == "https://vimeo.com/1" and lesson["hasVideo"] is True
     assert conn.sniffed == 0 and conn.downloaded == []
     sidecar = _json.loads((tmp_path / "comm" / "course" / "l1" / ".meta.json").read_text())
     assert sidecar["no_native_video"] is True
     # Second run: fast path, still no video seams touched.
     conn2 = _LessonConn()
-    status, _ = _process(conn2, tmp_path,
-                         lesson=_video_lesson())
+    status, _ = _process(conn2, tmp_path, lesson=_video_lesson())
     assert status == "cached" and conn2.enriched == 0
+
+
+def test_old_external_link_sidecar_reprocesses_and_downloads(tmp_path):
+    import json as _json
+
+    # A sidecar written BEFORE external downloads existed (the live bug):
+    # videoLink recorded, marked "done" with no file. Must now re-process.
+    lesson_dir = tmp_path / "comm" / "course" / "l1"
+    lesson_dir.mkdir(parents=True)
+    (lesson_dir / ".meta.json").write_text(_json.dumps({
+        "videoId": None, "videoLink": "https://youtu.be/hBFBhkXTS18",
+        "video_downloaded": False, "no_native_video": True, "resources": [],
+    }))
+    conn = _LessonConn(fields={"videoId": None, "videoLink": "https://youtu.be/hBFBhkXTS18",
+                               "resources": []})
+    status, _ = _process(conn, tmp_path)
+    assert status == "downloaded" and conn.enriched == 1
+    assert (lesson_dir / "video.mp4").read_bytes() == b"video-bytes"
 
 
 def test_process_lesson_enrich_failure_yields_without_sidecar(tmp_path):

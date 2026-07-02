@@ -143,9 +143,10 @@ class SkoolConfig(BaseModel):
     include_kinds: list[str] = list(_KINDS)
     checkpoint_every: int = Field(default=200, ge=1)
     headless: bool = True
-    # Download each lesson's native (Mux) video into downloads_dir. Requires
-    # yt-dlp (installed by the [skool] extra); ffmpeg is auto-managed via
-    # imageio-ffmpeg with a system-PATH fallback. Off = metadata/links only.
+    # Download each lesson's video into downloads_dir — native (Mux) ones via
+    # player capture, external ones (a YouTube/Vimeo/Loom videoLink) straight
+    # through yt-dlp (installed by the [skool] extra); ffmpeg is auto-managed
+    # via imageio-ffmpeg with a system-PATH fallback. Off = metadata/links only.
     download_videos: bool = True
     # Cap the selected HLS variant's height (e.g. 1080, 720). 0 = best available.
     video_quality: int = Field(default=1080, ge=0)
@@ -595,15 +596,23 @@ class SkoolConnector(Connector):
         status = "none"
         video_downloaded = False
         video_failed = False
-        if fields.get("videoId") and cfg.download_videos:
+        # Native (Mux) videos are captured from the player; external ones
+        # (YouTube/Vimeo/Loom videoLink) go straight to yt-dlp.
+        is_external = not fields.get("videoId") and bool(fields.get("videoLink"))
+        if (fields.get("videoId") or is_external) and cfg.download_videos:
             if video_dest.exists() and video_dest.stat().st_size > 0:
                 video_downloaded = True
                 status = "cached"
             else:
-                url = self._sniff_hls_url(page, page_data, fields.get("videoId"), ctx)
+                if is_external:
+                    url = fields.get("videoLink")
+                else:
+                    url = self._sniff_hls_url(page, page_data, fields.get("videoId"), ctx)
                 if url:
                     video_dest.parent.mkdir(parents=True, exist_ok=True)
-                    video_downloaded = self._download_hls(url, video_dest, cfg, ctx)
+                    video_downloaded = self._download_hls(
+                        url, video_dest, cfg, ctx, external=is_external
+                    )
                 if video_downloaded:
                     status = "downloaded"
                     ctx.logger.info(
@@ -643,14 +652,15 @@ class SkoolConnector(Connector):
     ) -> bool:
         """Whether everything the sidecar recorded is still on disk (so the
         lesson page needn't be visited). Enabling ``download_videos`` later
-        makes a videoless-download sidecar incomplete again, on purpose."""
+        makes a videoless-download sidecar incomplete again, on purpose; so
+        do sidecars written before external videoLink downloads existed."""
         for r in sidecar.get("resources") or []:
             if not (lesson_dir / (r.get("filename") or "")).exists():
                 return False
         if not cfg.download_videos:
             return True
-        if sidecar.get("no_native_video"):
-            return True
+        if not sidecar.get("videoId") and not sidecar.get("videoLink"):
+            return True  # genuinely videoless lesson
         return (
             bool(sidecar.get("video_downloaded"))
             and video_dest.exists()
@@ -713,8 +723,16 @@ class SkoolConnector(Connector):
             ctx.logger.debug("skool: player interaction failed: %s", exc)
         return stream_url or _mux_hls_url(next_data, video_id)
 
-    def _download_hls(self, url: str, dest: Path, cfg: SkoolConfig, ctx: RunContext) -> bool:
-        """Download an HLS URL to ``dest`` via yt-dlp (yt-dlp seam)."""
+    def _download_hls(
+        self, url: str, dest: Path, cfg: SkoolConfig, ctx: RunContext,
+        external: bool = False,
+    ) -> bool:
+        """Download a video URL to ``dest`` via yt-dlp (yt-dlp seam).
+
+        ``external`` marks a non-Skool host (a lesson's YouTube/Vimeo/Loom
+        ``videoLink``) — yt-dlp's own defaults handle those best, so the
+        Skool CDN headers are dropped.
+        """
         try:
             import yt_dlp
         except ImportError:
@@ -723,7 +741,7 @@ class SkoolConnector(Connector):
                 "Install with `pip install 'daily-backup-system[skool]'`."
             )
             return False
-        opts = _ydl_opts(dest, cfg.video_quality, _ffmpeg_location())
+        opts = _ydl_opts(dest, cfg.video_quality, _ffmpeg_location(), external=external)
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
@@ -1094,22 +1112,22 @@ def _mux_hls_url(next_data: dict[str, Any], video_id: Any) -> str | None:
     return None
 
 
-def _ydl_opts(dest: Path, quality: int, ffmpeg_location: str | None) -> dict[str, Any]:
-    """yt-dlp options for downloading one HLS video to an exact path.
+def _ydl_opts(
+    dest: Path, quality: int, ffmpeg_location: str | None, external: bool = False
+) -> dict[str, Any]:
+    """yt-dlp options for downloading one video to an exact path.
 
     Mirrors skool-downloader's invocation: the Skool ``Referer`` (their CDN
     rejects referer-less requests) + a plain Chrome UA, format SORT (never a
     ``format`` selector — ``-S res:{q},vcodec:h264,acodec:m4a``; quality 0 =
     yt-dlp default), mp4 merge with ``+faststart``, 8 concurrent fragments.
+    ``external`` (a YouTube/Vimeo/Loom videoLink) drops the Skool headers —
+    forcing a mismatched Referer/UA on those hosts breaks their extractors.
     """
     opts: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
         "outtmpl": str(dest),
-        "http_headers": {
-            "Referer": "https://www.skool.com/",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        },
         "merge_output_format": "mp4",
         "concurrent_fragment_downloads": 8,
         "socket_timeout": 30,
@@ -1117,6 +1135,11 @@ def _ydl_opts(dest: Path, quality: int, ffmpeg_location: str | None) -> dict[str
         "fragment_retries": 10,
         "postprocessor_args": {"ffmpeg": ["-movflags", "+faststart"]},
     }
+    if not external:
+        opts["http_headers"] = {
+            "Referer": "https://www.skool.com/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        }
     if quality:
         opts["format_sort"] = [f"res:{quality}", "vcodec:h264", "acodec:m4a"]
     if ffmpeg_location:
