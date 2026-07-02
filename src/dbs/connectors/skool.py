@@ -570,7 +570,10 @@ class SkoolConnector(Connector):
             )
             return "failed"
         _adopt_lesson_dir(lesson_dir, lesson.get("lessonId"), ctx)
-        video_dest = lesson_dir / "video.mp4"
+        # The video carries the lesson's name, like skool-downloader's
+        # "{index} - {title}.mp4"; a legacy `video.mp4` is renamed in place.
+        video_dest = lesson_dir / f"{lesson_dir.name}.mp4"
+        _adopt_video_name(lesson_dir, video_dest)
         sidecar = _load_sidecar(lesson_dir / ".meta.json")
         if sidecar is not None and self._sidecar_complete(sidecar, lesson_dir, video_dest, cfg):
             lesson["videoId"] = sidecar.get("videoId")
@@ -876,13 +879,15 @@ class SkoolConnector(Connector):
                     mime=res.get("mime"),
                 )
             )
-        # A downloaded native (Mux) video: local path, never re-fetched by
-        # storage. Falls back to the EXTERNAL link (Vimeo/YouTube/Loom) as a
-        # stable reference — external videos are not downloaded.
+        # A downloaded video: local path, never re-fetched by storage. Falls
+        # back to the external link (Vimeo/YouTube/Loom) as a reference when
+        # no file made it to disk.
         video_path = raw.get("_video_path")
         video_link = raw.get("videoLink")
         if video_path:
-            media.append(MediaRef(url=video_path, kind="video", filename="video.mp4"))
+            media.append(
+                MediaRef(url=video_path, kind="video", filename=Path(video_path).name)
+            )
         elif video_link and not raw.get("videoUnavailable"):
             media.append(MediaRef(url=video_link, kind="video"))
         tags = [
@@ -1085,7 +1090,7 @@ def _adopt_lesson_dir(lesson_dir: Path, lesson_id: Any, ctx: RunContext) -> None
         return
     legacy = lesson_dir.parent / _safe(str(lesson_id))
     if _adopt_dir(lesson_dir, legacy, ctx):
-        _rename_note(lesson_dir, legacy.name)
+        _rename_lesson_files(lesson_dir, legacy.name)
         return
     try:
         siblings = [d for d in lesson_dir.parent.iterdir() if d.is_dir()]
@@ -1095,26 +1100,64 @@ def _adopt_lesson_dir(lesson_dir: Path, lesson_id: Any, ctx: RunContext) -> None
         sidecar = _load_sidecar(sib / ".meta.json")
         if sidecar and str(sidecar.get("lessonId")) == str(lesson_id):
             if _adopt_dir(lesson_dir, sib, ctx):
-                _rename_note(lesson_dir, sib.name)
+                _rename_lesson_files(lesson_dir, sib.name)
             return
 
 
-def _rename_note(lesson_dir: Path, old_dir_name: str) -> None:
-    """After a lesson dir rename, keep its note named after the dir
-    (best-effort — a stale name only costs one cosmetic mismatch)."""
-    old = lesson_dir / f"{old_dir_name}.md"
-    new = lesson_dir / f"{lesson_dir.name}.md"
-    if not old.is_file() or old == new or new.exists():
+def _rename_lesson_files(lesson_dir: Path, old_dir_name: str) -> None:
+    """After a lesson dir rename, keep its note and video named after the dir
+    and the note's embed pointing at the renamed video (best-effort — a stale
+    name only costs one cosmetic mismatch)."""
+    if old_dir_name == lesson_dir.name:
+        return
+
+    def move(suffix: str) -> bool:
+        old = lesson_dir / f"{old_dir_name}{suffix}"
+        new = lesson_dir / f"{lesson_dir.name}{suffix}"
+        if not old.is_file() or new.exists():
+            return False
+        try:
+            old.rename(new)
+        except OSError:
+            return False
+        return True
+
+    move(".mp4")
+    if not move(".md"):
         return
     try:
-        old.rename(new)
+        _patch_note_embed(lesson_dir, f"{old_dir_name}.mp4")
         sidecar_path = lesson_dir / ".meta.json"
         sidecar = _load_sidecar(sidecar_path)
-        if sidecar and sidecar.get("note") == old.name:
-            sidecar["note"] = new.name
+        if sidecar and sidecar.get("note") == f"{old_dir_name}.md":
+            sidecar["note"] = f"{lesson_dir.name}.md"
             sidecar_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
     except OSError:
         pass
+
+
+def _adopt_video_name(lesson_dir: Path, video_dest: Path) -> None:
+    """Rename a legacy ``video.mp4`` to the lesson-titled filename in place
+    (best-effort), keeping the note's embed link resolving."""
+    legacy = lesson_dir / "video.mp4"
+    if video_dest.exists() or not legacy.is_file():
+        return
+    try:
+        legacy.rename(video_dest)
+        _patch_note_embed(lesson_dir, "video.mp4")
+    except OSError:
+        pass
+
+
+def _patch_note_embed(lesson_dir: Path, old_video_name: str) -> None:
+    """Point the lesson note's ``![[...]]`` embed at the current video name."""
+    note = lesson_dir / f"{lesson_dir.name}.md"
+    if not note.is_file():
+        return
+    text = note.read_text(encoding="utf-8")
+    patched = text.replace(f"![[{old_video_name}]]", f"![[{lesson_dir.name}.mp4]]")
+    if patched != text:
+        note.write_text(patched, encoding="utf-8")
 
 
 def _write_lesson_note(
@@ -1154,7 +1197,7 @@ def _write_lesson_note(
     if body:
         lines += [body, ""]
     if video_downloaded:
-        lines += ["![[video.mp4]]", ""]
+        lines += [f"![[{lesson_dir.name}.mp4]]", ""]
     elif fields.get("videoLink"):
         lines += [f"[Video]({fields['videoLink']})", ""]
     local = [r for r in lesson.get("_resources") or [] if r.get("filename")]
