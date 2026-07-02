@@ -81,7 +81,7 @@ class YouTubeConnector(Connector):
     schema_version = 1
     # Optional runtime deps (the `[youtube]` extra) — declared so the UI/CLI can
     # report readiness and offer a one-click install.
-    pip_requirements = ("yt-dlp>=2024.1",)
+    pip_requirements = ("yt-dlp>=2025.6.30",)
     runtime_imports = ("yt_dlp",)
     # Cookies can be captured from a UI by opening a browser and exporting them
     # to a Netscape cookies.txt (what yt-dlp reads). Capture itself needs
