@@ -783,10 +783,11 @@ class SkoolConnector(Connector):
         """Download a video URL to ``dest`` via yt-dlp (yt-dlp seam).
 
         ``external`` marks a non-Skool host (a lesson's YouTube/Vimeo/Loom
-        ``videoLink``) — yt-dlp's own defaults handle those best, so the
-        Skool CDN headers are dropped, and cookies are attached if configured
-        (some hosts, notably YouTube, refuse a download without a signed-in
-        session — "Sign in to confirm you're not a bot").
+        ``videoLink``) — cookies are only attached for these (some hosts,
+        notably YouTube, refuse a download without a signed-in session —
+        "Sign in to confirm you're not a bot"). The Referer/UA headers,
+        unlike cookies, are sent unconditionally to every download, native
+        or external, matching skool-downloader exactly.
         """
         try:
             import yt_dlp
@@ -809,7 +810,7 @@ class SkoolConnector(Connector):
             cfg.video_cookies_from_browser if external and not cookiefile else None
         )
         opts = _ydl_opts(
-            dest, cfg.video_quality, _ffmpeg_location(), external=external,
+            dest, cfg.video_quality, _ffmpeg_location(),
             cookiefile=cookiefile, cookies_from_browser=cookies_from_browser,
             extractor_args=cfg.video_extractor_args if external else None,
         )
@@ -1313,26 +1314,38 @@ def _mux_hls_url(next_data: dict[str, Any], video_id: Any) -> str | None:
 
 
 def _ydl_opts(
-    dest: Path, quality: int, ffmpeg_location: str | None, external: bool = False,
+    dest: Path, quality: int, ffmpeg_location: str | None,
     cookiefile: str | None = None, cookies_from_browser: str | None = None,
     extractor_args: dict[str, dict[str, list[str]]] | None = None,
 ) -> dict[str, Any]:
     """yt-dlp options for downloading one video to an exact path.
 
-    Mirrors skool-downloader's invocation: the Skool ``Referer`` (their CDN
-    rejects referer-less requests) + a plain Chrome UA, format SORT (never a
-    ``format`` selector — ``-S res:{q},vcodec:h264,acodec:m4a``; quality 0 =
-    yt-dlp default), mp4 merge with ``+faststart``, 8 concurrent fragments.
-    ``external`` (a YouTube/Vimeo/Loom videoLink) drops the Skool headers —
-    forcing a mismatched Referer/UA on those hosts breaks their extractors.
-    ``cookiefile``/``cookies_from_browser``/``extractor_args`` are only
-    meaningful for external downloads; some hosts (YouTube) refuse a
+    Mirrors skool-downloader's invocation VERBATIM (confirmed against its
+    ``buildVideoArgs``): the Skool ``Referer`` + a full, real-browser-shaped
+    Chrome UA are sent UNCONDITIONALLY — for native AND external (YouTube/
+    Vimeo/Loom) downloads alike, never gated by host. A prior version of this
+    code sent an incomplete UA (missing the AppleWebKit/Chrome/Safari tokens
+    — a dead giveaway of a non-browser client to a fingerprint check) and
+    stripped both headers entirely for external downloads; that divergence
+    is the likely cause of YouTube's bot-check rejecting a download the
+    reference tool completes fine with the exact same cookies. Also: format
+    SORT (never a ``format`` selector — ``-S res:{q},vcodec:h264,acodec:m4a``;
+    quality 0 = yt-dlp default), mp4 merge with ``+faststart``, 8 concurrent
+    fragments. ``cookiefile``/``cookies_from_browser``/``extractor_args`` are
+    only meaningful for external downloads; some hosts (YouTube) refuse a
     download without a signed-in session or an emulated player client.
     """
     opts: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
         "outtmpl": str(dest),
+        "http_headers": {
+            "Referer": "https://www.skool.com/",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            ),
+        },
         "merge_output_format": "mp4",
         "concurrent_fragment_downloads": 8,
         "socket_timeout": 30,
@@ -1340,11 +1353,6 @@ def _ydl_opts(
         "fragment_retries": 10,
         "postprocessor_args": {"ffmpeg": ["-movflags", "+faststart"]},
     }
-    if not external:
-        opts["http_headers"] = {
-            "Referer": "https://www.skool.com/",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        }
     if quality:
         opts["format_sort"] = [f"res:{quality}", "vcodec:h264", "acodec:m4a"]
     if ffmpeg_location:
