@@ -278,12 +278,13 @@ The captured cookie *file* always wins when both are set — it needs no live
 browser read, so it isn't affected by Chrome's Windows "App-Bound
 Encryption", which otherwise makes `video_cookies_from_browser` fail with
 *"Failed to decrypt with DPAPI"*. If *"Sign in to confirm you're not a bot"*
-persists even with valid cookies, first make sure yt-dlp itself is current
-(`pip install -U yt-dlp` — YouTube's bot-check tracks yt-dlp releases
-closely); as a fallback, `video_extractor_args` passes extra yt-dlp
-extractor-args straight through, e.g.
-`{ youtube = { player_client = ["android"] } }` to try an alternate
-emulated client, a common yt-dlp community workaround for a persistent block.
+persists even with valid, current cookies, YouTube now requires a "PO
+token" for its web/mweb/android/ios player clients that plain cookies
+can't satisfy — `video_extractor_args` passes extra yt-dlp extractor-args
+straight through, e.g. `{ youtube = { player_client = ["web_embedded"] } }`,
+which does not require one (a Skool-embedded video is normally
+embed-enabled). A persistent block after that means a PO token provider
+plugin is the durable fix (see yt-dlp's PO Token Guide).
 
 ## Scheduling daily backups
 
