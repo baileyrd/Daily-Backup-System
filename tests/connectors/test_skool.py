@@ -19,6 +19,7 @@ from dbs.connectors.skool import (
     SkoolConnector,
     _parse_courses,
     _parse_lessons,
+    _parse_memberships,
     _safe,
 )
 from conftest import make_ctx, registered
@@ -150,6 +151,44 @@ def test_parse_courses_both_shapes():
 def test_parse_courses_empty_and_malformed():
     assert _parse_courses({}) == []
     assert _parse_courses({"props": {"pageProps": {"allCourses": ["bad", None]}}}) == []
+
+
+def test_parse_memberships_direct_and_nested():
+    direct = {"props": {"pageProps": {"self": {"allGroups": [
+        {"name": "chase-ai", "id": "g1", "metadata": {"displayName": "Chase AI+"}},
+    ]}}}}
+    nested = {"props": {"pageProps": {"self": {"allGroups": [
+        {"group": {"name": "chase-ai", "id": "g1", "metadata": {"displayName": "Chase AI+"}}},
+    ]}}}}
+    for nd in (direct, nested):
+        out = _parse_memberships(nd)
+        assert len(out) == 1
+        assert out[0]["slug"] == "chase-ai"
+        assert out[0]["id"] == "g1"
+        assert out[0]["displayName"] == "Chase AI+"
+
+
+def test_parse_memberships_dedupes_and_defaults_displayname():
+    nd = {"props": {"pageProps": {"self": {"allGroups": [
+        {"name": "a"},                         # no metadata -> displayName falls back to slug
+        {"name": "a"},                         # duplicate -> collapsed
+        {"name": "b", "metadata": {"displayName": "Bee"}},
+    ]}}}}
+    out = _parse_memberships(nd)
+    assert [(m["slug"], m["displayName"]) for m in out] == [("a", "a"), ("b", "Bee")]
+
+
+def test_parse_memberships_deep_search_fallback():
+    # allGroups nested somewhere other than pageProps.self.
+    nd = {"props": {"pageProps": {"bootstrap": {"self": {"allGroups": [
+        {"name": "chase-ai"}]}}}}}
+    assert [m["slug"] for m in _parse_memberships(nd)] == ["chase-ai"]
+
+
+def test_parse_memberships_empty_and_malformed():
+    assert _parse_memberships({}) == []
+    assert _parse_memberships({"props": {"pageProps": {"self": {}}}}) == []
+    assert _parse_memberships({"props": {"pageProps": {"self": {"allGroups": ["x", None]}}}}) == []
 
 
 def test_parse_courses_deep_search_fallback():

@@ -226,7 +226,9 @@ class SkoolConnector(Connector):
     def _walk(
         self, page: Any, cfg: SkoolConfig, downloads: Path, ctx: RunContext
     ) -> Iterator[dict[str, Any]]:
-        slugs = [self._slug(s) for s in cfg.communities] or self._discover_communities(page, ctx)
+        slugs = [self._slug(s) for s in cfg.communities] or self._discover_communities(
+            page, downloads, ctx
+        )
         if not slugs:
             ctx.logger.warning(
                 "skool: no communities to back up — set `communities` in the "
@@ -285,15 +287,32 @@ class SkoolConnector(Connector):
 
     # -- browser helpers (thin; not unit-tested) ----------------------------
 
-    def _discover_communities(self, page: Any, ctx: RunContext) -> list[str]:
-        """Slugs of the communities the logged-in account has joined."""
+    def _discover_communities(self, page: Any, downloads: Path, ctx: RunContext) -> list[str]:
+        """Slugs of the communities the logged-in account has joined.
+
+        Reads ``__NEXT_DATA__`` → ``props.pageProps.self.allGroups`` on the home
+        page — the same source skool-downloader's ``listMemberships`` uses.
+        """
         self._goto(page, f"{_BASE}/", ctx)
         self._require_login(page, ctx)
         data = page.evaluate(_NEXT_DATA_JS)
-        props = ((data or {}).get("props") or {}).get("pageProps") or {}
-        groups = props.get("groups") or props.get("myGroups") or []
-        slugs = [g.get("name") or g.get("slug") for g in groups if isinstance(g, dict)]
-        return [s for s in slugs if s]
+        members = _parse_memberships(data)
+        if not members:
+            props = ((data or {}).get("props") or {}).get("pageProps") or {}
+            self._dump_debug(data, downloads, "home", ctx)
+            ctx.logger.warning(
+                "skool: could not auto-detect any joined communities. pageProps "
+                "keys seen: %s. Raw __NEXT_DATA__ written under %s/_debug/ for "
+                "diagnosis. You can also set `communities` explicitly.",
+                sorted(props.keys()), downloads,
+            )
+            return []
+        ctx.logger.info(
+            "skool: discovered %d joined communit%s: %s",
+            len(members), "y" if len(members) == 1 else "ies",
+            ", ".join(m["displayName"] for m in members),
+        )
+        return [m["slug"] for m in members]
 
     def _classroom_next_data(
         self, page: Any, slug: str, ctx: RunContext, course_slug: str | None = None
@@ -475,6 +494,44 @@ def _deep_find(obj: Any, key: str) -> Any:
         elif isinstance(cur, list):
             queue.extend(cur)
     return None
+
+
+def _parse_memberships(next_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Communities the logged-in account has joined, from the home page's
+    ``__NEXT_DATA__``.
+
+    Mirrors skool-downloader's ``parseMembershipsFromSelf``: the list lives at
+    ``props.pageProps.self.allGroups``; each entry is either the group directly
+    or wraps it under ``group``. Falls back to a deep search if Skool relocates
+    ``self``/``allGroups``.
+    """
+    props = ((next_data or {}).get("props") or {}).get("pageProps") or {}
+    self_ = props.get("self")
+    if not isinstance(self_, dict):
+        self_ = _deep_find(next_data, "self") or {}
+    all_groups = self_.get("allGroups") if isinstance(self_, dict) else None
+    if not isinstance(all_groups, list):
+        all_groups = _deep_find(next_data, "allGroups") or []
+
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for m in all_groups:
+        if not isinstance(m, dict):
+            continue
+        inner = m.get("group") if isinstance(m.get("group"), dict) else {}
+        slug = m.get("name") or inner.get("name")
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        meta = m.get("metadata") or inner.get("metadata") or {}
+        out.append(
+            {
+                "slug": slug,
+                "id": m.get("id") or inner.get("id"),
+                "displayName": meta.get("displayName") or slug,
+            }
+        )
+    return out
 
 
 def _parse_courses(next_data: dict[str, Any]) -> list[dict[str, Any]]:
