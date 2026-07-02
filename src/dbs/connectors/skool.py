@@ -167,6 +167,13 @@ class SkoolConfig(BaseModel):
     # live read fail with "Failed to decrypt with DPAPI"; a captured cookie
     # FILE (above) sidesteps that entirely, so it always wins when both are set.
     video_cookies_from_browser: str | None = None
+    # Extra yt-dlp extractor-args for EXTERNAL videos, passed straight
+    # through, e.g. {"youtube": {"player_client": ["android"]}}. YouTube's
+    # bot-check ("Sign in to confirm you're not a bot") can persist even with
+    # valid, current cookies; switching the emulated client is a well-known
+    # yt-dlp community workaround for that case. Try upgrading yt-dlp and
+    # re-capturing cookies first — this is a fallback, not the first fix.
+    video_extractor_args: dict[str, dict[str, list[str]]] | None = None
     # Write a markdown note of each lesson page (url2obs-convention frontmatter,
     # body converted from Skool's editor JSON, links to the downloaded media)
     # into the lesson's folder, next to its video and resources.
@@ -203,7 +210,7 @@ class SkoolConnector(Connector):
     secret_keys = ("SKOOL_SESSION_DIR", "YOUTUBE_COOKIES_FILE")
     wants_managed_http = False
     schema_version = 1
-    pip_requirements = ("playwright>=1.40", "yt-dlp>=2024.1", "imageio-ffmpeg>=0.4")
+    pip_requirements = ("playwright>=1.40", "yt-dlp>=2025.6.30", "imageio-ffmpeg>=0.4")
     runtime_imports = ("playwright", "yt_dlp")
     needs_playwright_browser = True
     item_kinds = (
@@ -804,6 +811,7 @@ class SkoolConnector(Connector):
         opts = _ydl_opts(
             dest, cfg.video_quality, _ffmpeg_location(), external=external,
             cookiefile=cookiefile, cookies_from_browser=cookies_from_browser,
+            extractor_args=cfg.video_extractor_args if external else None,
         )
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -1307,6 +1315,7 @@ def _mux_hls_url(next_data: dict[str, Any], video_id: Any) -> str | None:
 def _ydl_opts(
     dest: Path, quality: int, ffmpeg_location: str | None, external: bool = False,
     cookiefile: str | None = None, cookies_from_browser: str | None = None,
+    extractor_args: dict[str, dict[str, list[str]]] | None = None,
 ) -> dict[str, Any]:
     """yt-dlp options for downloading one video to an exact path.
 
@@ -1316,9 +1325,9 @@ def _ydl_opts(
     yt-dlp default), mp4 merge with ``+faststart``, 8 concurrent fragments.
     ``external`` (a YouTube/Vimeo/Loom videoLink) drops the Skool headers —
     forcing a mismatched Referer/UA on those hosts breaks their extractors.
-    ``cookiefile``/``cookies_from_browser`` are only meaningful for external
-    downloads; some hosts (YouTube) refuse a download without a signed-in
-    session.
+    ``cookiefile``/``cookies_from_browser``/``extractor_args`` are only
+    meaningful for external downloads; some hosts (YouTube) refuse a
+    download without a signed-in session or an emulated player client.
     """
     opts: dict[str, Any] = {
         "quiet": True,
@@ -1344,6 +1353,8 @@ def _ydl_opts(
         opts["cookiefile"] = cookiefile
     if cookies_from_browser:
         opts["cookiesfrombrowser"] = (cookies_from_browser,)
+    if extractor_args:
+        opts["extractor_args"] = extractor_args
     return opts
 
 

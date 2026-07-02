@@ -518,6 +518,10 @@ def test_ydl_opts_matches_skool_downloader_invocation(tmp_path):
     assert opts["cookiefile"] == "/tmp/cookies.txt"
     opts = _ydl_opts(dest, 0, None, cookies_from_browser="chrome")
     assert opts["cookiesfrombrowser"] == ("chrome",)
+    # extractor_args (e.g. an alternate player_client) pass straight through.
+    assert "extractor_args" not in _ydl_opts(dest, 0, None)
+    opts = _ydl_opts(dest, 0, None, extractor_args={"youtube": {"player_client": ["android"]}})
+    assert opts["extractor_args"] == {"youtube": {"player_client": ["android"]}}
 
 
 def test_fetch_rejects_undeclared_video_cookies_file_env():
@@ -612,6 +616,39 @@ def test_download_hls_cookiefile_wins_over_cookies_from_browser(tmp_path, monkey
     conn._download_hls("https://youtu.be/x", dest, cfg, ctx_no_file, external=True)
     assert "cookiefile" not in captured[-1]
     assert captured[-1]["cookiesfrombrowser"] == ("chrome",)
+
+
+def test_download_hls_passes_extractor_args_for_external_only(tmp_path, monkeypatch):
+    # A fallback for "Sign in to confirm you're not a bot" persisting even
+    # with valid cookies: an alternate emulated player_client.
+    import yt_dlp
+
+    captured: list[dict] = []
+
+    class _FakeYDL:
+        def __init__(self, opts):
+            captured.append(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def download(self, urls):
+            pass
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _FakeYDL)
+    conn = SkoolConnector()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path), video_cookies_file_env=None,
+                      video_extractor_args={"youtube": {"player_client": ["android"]}})
+    ctx = _ctx(cfg)
+    dest = tmp_path / "video.mp4"
+    conn._download_hls("https://youtu.be/x", dest, cfg, ctx, external=True)
+    assert captured[-1]["extractor_args"] == {"youtube": {"player_client": ["android"]}}
+    # Native (Mux) downloads never get YouTube extractor_args.
+    conn._download_hls("https://stream.video.skool.com/x.m3u8", dest, cfg, ctx, external=False)
+    assert "extractor_args" not in captured[-1]
 
 
 def _video_lesson(**kw):

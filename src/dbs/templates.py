@@ -68,6 +68,11 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 #   you're not a bot". video_cookies_from_browser = "chrome" is a fallback for
 #   when no cookie file is set — on Windows it often fails ("Failed to
 #   decrypt with DPAPI") against modern Chrome, so prefer the captured file.
+#   If "Sign in to confirm you're not a bot" persists even with valid, fresh
+#   cookies: first make sure yt-dlp itself is current (`pip install -U
+#   yt-dlp` — YouTube's bot-check tracks yt-dlp releases closely). If it
+#   still fails, try an alternate emulated client:
+#   video_extractor_args = { youtube = { player_client = ["android"] } }
 # communities = ["your-community"]   # optional; OMIT to auto-detect every community you've joined
 # courses = ["your-community/Course Title"]  # optional; only these courses (title or slug;
 #                                    # "community/course" scopes it). While set, deletion

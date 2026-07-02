@@ -13,7 +13,7 @@ from __future__ import annotations
 # `pip_requirements`) so the web UI's install button derives its pip command
 # from trusted package metadata, never from client input. Keep in sync with
 # pyproject.toml's `research` extra.
-PIP_REQUIREMENTS = ("yt-dlp>=2024.1", "notebooklm-py[browser]")
+PIP_REQUIREMENTS = ("yt-dlp>=2025.6.30", "notebooklm-py[browser]")
 RUNTIME_IMPORTS = ("yt_dlp", "notebooklm")
 
 from .models import (

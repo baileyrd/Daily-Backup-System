@@ -259,13 +259,13 @@ def test_connectors_report_readiness(client):
     assert conns["reddit"]["pip_requirements"] == ["playwright>=1.40"]
     assert conns["reddit"]["needs_playwright_browser"] is True
     assert conns["reddit"]["auth_capture"]["kind"] == "browser_session"
-    assert conns["youtube"]["pip_requirements"] == ["yt-dlp>=2024.1"]
+    assert conns["youtube"]["pip_requirements"] == ["yt-dlp>=2025.6.30"]
     assert conns["youtube"]["auth_capture"]["kind"] == "browser_cookies"
     # skool logs into skool.com via a captured persistent session (connector-
     # level, the same browser_session capture reddit uses) and downloads
     # native video via yt-dlp with auto-managed ffmpeg.
     assert conns["skool"]["pip_requirements"] == [
-        "playwright>=1.40", "yt-dlp>=2024.1", "imageio-ffmpeg>=0.4",
+        "playwright>=1.40", "yt-dlp>=2025.6.30", "imageio-ffmpeg>=0.4",
     ]
     assert conns["skool"]["needs_playwright_browser"] is True
     assert conns["skool"]["auth_capture"]["kind"] == "browser_session"
@@ -382,8 +382,8 @@ def test_install_commands_are_server_derived(setup_client):
     assert any("chromium" in label for label in labels)
     # Every argv starts with the running interpreter; no shell, no client strings.
     assert all(argv[0] == sys.executable for argv in argvs)
-    assert ["yt-dlp>=2024.1"] == [
-        r for label, argv in install_commands(reg.get("youtube")) for r in argv if r == "yt-dlp>=2024.1"
+    assert ["yt-dlp>=2025.6.30"] == [
+        r for label, argv in install_commands(reg.get("youtube")) for r in argv if r == "yt-dlp>=2025.6.30"
     ]
 
 
