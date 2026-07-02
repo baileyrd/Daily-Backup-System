@@ -384,8 +384,10 @@ class SkoolConnector(Connector):
         out: list[dict[str, Any]] = []
         lesson_dir = downloads / _safe(slug) / _safe(course_slug) / _safe(str(lesson.get("lessonId")))
         for res in lesson.get("resources") or []:
-            url = res.get("downloadUrl")
-            if not url or res.get("isExternal"):
+            if not isinstance(res, dict):
+                continue
+            url = res.get("downloadUrl") or res.get("download_url")
+            if not url or res.get("isExternal") or res.get("is_external"):
                 continue
             name = _safe(res.get("file_name") or res.get("title") or "resource")
             dest = lesson_dir / name
@@ -428,9 +430,27 @@ class SkoolConnector(Connector):
         outcome; when the sidecar says everything listed is already on disk,
         re-runs merge it and skip the page visit entirely. Returns a status
         key ("downloaded"/"cached"/"none"/"failed") for the community summary.
-        Best-effort: any failure leaves the lesson indexed with tree-level data
-        and no sidecar, so it retries next run.
+        Best-effort: any failure — including unexpected shape surprises from
+        Skool — leaves the lesson indexed with tree-level data and no sidecar,
+        so it retries next run; it never fails the whole backup.
         """
+        try:
+            return self._process_lesson_inner(
+                page, lesson, downloads, slug, course_slug, cfg, ctx
+            )
+        except (ConnectorAuthError, ConnectorConfigError):
+            raise  # operator problems abort the run, as everywhere else
+        except Exception as exc:  # noqa: BLE001 - one bad lesson must not kill the run
+            ctx.logger.warning(
+                "skool: processing lesson %s (%s) failed: %r",
+                lesson.get("lessonId"), lesson.get("title"), exc,
+            )
+            return "failed"
+
+    def _process_lesson_inner(
+        self, page: Any, lesson: dict[str, Any], downloads: Path,
+        slug: str, course_slug: str, cfg: SkoolConfig, ctx: RunContext,
+    ) -> str:
         if not lesson.get("lessonId"):
             ctx.logger.warning(
                 "skool: a lesson in %s/%s has no id — skipped (tree shape change?)",
@@ -557,16 +577,7 @@ class SkoolConnector(Connector):
                 lesson_id, lesson.get("title"),
             )
             return None
-        meta = node.get("metadata") or {}
-        video_link = meta.get("videoLink") or (node.get("video") or {}).get("url")
-        return (
-            {
-                "videoLink": video_link,
-                "videoId": meta.get("videoId"),
-                "resources": meta.get("resources") or [],
-            },
-            data,
-        )
+        return _lesson_fields(node), data
 
     def _sniff_hls_url(self, page: Any, next_data: Any, ctx: RunContext) -> str | None:
         """Signed ``.m3u8?token=`` URL for the CURRENT page's Mux video.
@@ -735,6 +746,45 @@ def _deep_find(obj: Any, key: str) -> Any:
         elif isinstance(cur, list):
             queue.extend(cur)
     return None
+
+
+def _json_field(value: Any) -> Any:
+    """Decode a Skool metadata value.
+
+    Skool's ``metadata`` map is string-valued: structured fields (``resources``,
+    ``video``) arrive **JSON-encoded as strings**. Decode when decodable;
+    anything else passes through unchanged.
+    """
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _lesson_fields(node: dict[str, Any]) -> dict[str, Any]:
+    """``videoLink``/``videoId``/``resources`` from a lesson payload node,
+    normalized so callers can rely on their types (the raw values may be
+    JSON-encoded strings, plain strings, or missing)."""
+    meta = node.get("metadata") or {}
+    video = _json_field(meta.get("video") if meta.get("video") is not None else node.get("video"))
+    if isinstance(video, dict):
+        video_url = video.get("url")
+    elif isinstance(video, str) and video.startswith("http"):
+        video_url = video
+    else:
+        video_url = None
+    resources = _json_field(meta.get("resources"))
+    if isinstance(resources, dict):
+        resources = [resources]
+    if not isinstance(resources, list):
+        resources = []
+    return {
+        "videoLink": meta.get("videoLink") or video_url,
+        "videoId": meta.get("videoId"),
+        "resources": [r for r in resources if isinstance(r, dict)],
+    }
 
 
 def _find_lesson_node(next_data: dict[str, Any], lesson_id: Any) -> dict[str, Any] | None:
@@ -920,17 +970,15 @@ def _parse_lessons(course_next_data: dict[str, Any]) -> list[dict[str, Any]]:
 
     def emit(payload: dict[str, Any], module_title: str | None) -> None:
         meta = payload.get("metadata") or {}
-        video_link = meta.get("videoLink") or (meta.get("video") or {}).get("url")
+        fields = _lesson_fields(payload)
         out.append(
             {
                 "lessonId": payload.get("id"),
                 "title": meta.get("title") or payload.get("name"),
                 "moduleTitle": module_title,
                 "updatedAt": meta.get("updatedAt") or payload.get("updatedAt"),
-                "hasVideo": bool(video_link or meta.get("videoId")),
-                "videoLink": video_link,
-                "videoId": meta.get("videoId"),
-                "resources": meta.get("resources") or [],
+                "hasVideo": bool(fields["videoLink"] or fields["videoId"]),
+                **fields,
             }
         )
 
