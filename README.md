@@ -267,64 +267,82 @@ store_media = true              # ...and pull the downloaded files into the DB
 `dbs backup courses` then fetches from Skool, catalogs the classroom structure,
 downloads the attached resources **and each lesson's video** — native (Mux)
 ones via player capture, external ones (YouTube/Vimeo/Loom) straight through
-yt-dlp (`download_videos`, on by default, with an auto-managed ffmpeg
-**and JS runtime** — see below; `video_quality` caps the variant, default
-1080) — and (with `store_media`) archives those files, so Skool content
-lands in the DB in one step. External videos sometimes need auth (YouTube:
-*"Sign in to confirm you're not a bot"*) — `video_cookies_file_env`
-(defaults to the YouTube connector's own `YOUTUBE_COOKIES_FILE`, reused
-automatically if you've already captured it) or `video_cookies_from_browser`
-supplies cookies for those downloads only. The captured cookie *file* always
-wins when both are set — it needs no live browser read, so it isn't
-affected by Chrome's Windows "App-Bound Encryption", which otherwise makes
-`video_cookies_from_browser` fail with *"Failed to decrypt with DPAPI"*.
+yt-dlp (`download_videos`, on by default, with an auto-managed ffmpeg;
+`video_quality` caps the variant, default 1080) — and (with `store_media`)
+archives those files, so Skool content lands in the DB in one step. External
+videos sometimes need auth (YouTube: *"Sign in to confirm you're not a
+bot"*) — `video_cookies_file_env` (defaults to the YouTube connector's own
+`YOUTUBE_COOKIES_FILE`, reused automatically if you've already captured it)
+or `video_cookies_from_browser` supplies cookies for those downloads only.
+The captured cookie *file* always wins when both are set — it needs no live
+browser read, so it isn't affected by Chrome's Windows "App-Bound
+Encryption", which otherwise makes `video_cookies_from_browser` fail with
+*"Failed to decrypt with DPAPI"*.
 
-**If *"Sign in to confirm you're not a bot"* persists even with valid,
-current cookies**: this almost always means yt-dlp couldn't run its JS
-challenge solver, not an auth problem — YouTube's obfuscation now requires
-solving a JS challenge via an external runtime, and without one, extraction
-silently falls back to demanding sign-in. The `skool`/`youtube`/`research`
-extras pull in `yt-dlp[default]` (bundles the solver scripts) and
-`nodejs-wheel` (an auto-managed portable Node.js binary — no separate
-system install); re-run `pip install -e ".[skool]"` on an existing install
-to pick these up. Confirmed live: the exact same video with the exact same
-cookies failed until this was in place, then succeeded with no other change.
+A permanently-gone video (deleted, made private, or the uploader's account
+was terminated) is recorded as such — `dbs` never retries it again, matching
+the reference tool ([skool-downloader](https://github.com/baileyrd/skool-downloader))'s
+own classification exactly, INCLUDING its most important call: **"Sign in to
+confirm you're not a bot" is treated as *transient*, not permanent** — it's
+YouTube's bot-check acting up, not evidence the video itself is gone, so
+it's retried on a later run rather than written off.
+
+**If *"Sign in to confirm you're not a bot"* persists across many runs**:
+the CONFIRMED root cause, verified live against a real failing account and
+video, is a `video_extractor_args` player-client restriction — e.g.
+`{ youtube = { player_client = ["web_embedded"] } }`, which an earlier
+version of this doc itself recommended as a fix. **If you have
+`video_extractor_args` set at all, remove it first, before anything else.**
+Pinning yt-dlp to one client prevents it from ever falling through to its
+own default multi-client list, which can include one that actually works
+(e.g. `android_vr`) — a restriction meant to help one stubborn video can end
+up *causing* the exact failure it was trying to fix. This is not a
+hypothetical: it's the confirmed fix for the case that motivated this whole
+section. skool-downloader, the reference tool this connector ports, never
+sets a player-client restriction at all and needs none.
 
 Before re-diagnosing a persistent failure, check the actual inputs yt-dlp got:
-each video download now logs a `skool: downloading ... — cookiefile=...
+each video download logs a `skool: downloading ... — cookiefile=...
 extractor_args=... js_runtimes=...` line (visible in `dbs backup`'s / `dbs
 serve`'s own terminal — every `ctx.logger.info(...)` call was silently
 dropped before this version, since nothing configured Python logging).
+`cookiefile` wins over `cookies_from_browser` whenever a `YOUTUBE_COOKIES_FILE`
+secret resolves (see above) — if you set `video_cookies_from_browser`
+expecting your *live* browser session to be used, check `cookiefile` isn't
+`True` here first, or you're silently getting a (possibly stale) captured
+file instead. Only reach for `video_extractor_args` again if the failure
+persists with it fully unset — i.e. yt-dlp's own default fallback across
+every client it tries has been exhausted, not as a first guess.
+
 `js_runtimes=none (nodejs-wheel not installed/found)` means the `[skool]`
 extra wasn't reinstalled (or the process wasn't restarted) after upgrading —
-`pip install -e ".[skool]"` then restart `dbs serve` picks it up. `cookiefile`
-wins over `cookies_from_browser` whenever a `YOUTUBE_COOKIES_FILE` secret
-resolves (see above) — if you set `video_cookies_from_browser` expecting your
-*live* browser session to be used, check `cookiefile` isn't `True` here
-first, or you're silently getting a (possibly stale) captured file instead.
+`pip install -e ".[skool]"` then restart `dbs serve` picks it up. Note this
+is a defensive measure for YouTube's JS obfuscation challenge, **not a
+confirmed fix** for "Sign in to confirm" — skool-downloader sets no JS
+runtime at all and needs none; keep this in mind before spending time
+chasing it as the cause.
 
-**If `extractor_args` shows a `player_client` restriction (e.g.
-`{ youtube = { player_client = ["web_embedded"] } }`) — try removing
-`video_extractor_args` from your config entirely FIRST**, before anything
-else. Confirmed live to be a real footgun, not just a hypothetical: pinning
-yt-dlp to one client prevents it from ever falling through to its own
-default multi-client list, which can include one that actually works (e.g.
-`android_vr`) — a restriction meant to help one stubborn video can end up
-*causing* the exact failure it was trying to fix. Only reach for
-`video_extractor_args` again if the failure persists with it fully unset —
-i.e. yt-dlp's own default fallback across every client it tries has been
-exhausted, not as a first guess.
-
-If cookies, JS runtime, AND an unrestricted client list all check out and it
+If `video_extractor_args` is confirmed unset, cookies are attached, AND it
 *still* fails: set `video_debug = true` to forward yt-dlp's full diagnostic
 chain into the log — which player client(s) it tried, and crucially whether
-an `n challenge solving failed` warning appears (resolved runtime, solver
-didn't work) versus the failure happening earlier, right after the player
-API response, with no JS-challenge line at all (the request was rejected
-before a challenge was even attempted — points at account/cookie trust or an
-IP-level flag rather than anything client-side). It's off by default (noisy
-across a whole course); flip it on for one troubleshooting run, then back
-off.
+an `n challenge solving failed` warning appears (a JS runtime resolved but
+the solver itself didn't work) versus the failure happening earlier, right
+after the player API response, with no JS-challenge line at all (the
+request was rejected before a challenge was even attempted — points at
+account/cookie trust or an IP-level flag rather than anything client-side).
+It's off by default (noisy across a whole course); flip it on for one
+troubleshooting run, then back off.
+
+**For a long-running/unattended install**, periodically run
+`pip install -U "yt-dlp[default]"` in the same environment (e.g. monthly,
+alongside your own maintenance cadence) — YouTube changes frequently enough
+that an aging yt-dlp eventually fails to extract some videos regardless of
+any other setting here. `pyproject.toml` only pins a *floor* version, which
+new installs pick up automatically but an already-installed environment
+won't refresh on its own. This mirrors skool-downloader's own documented
+practice (its `update-ytdlp` command, recommended weekly for unattended
+nightly archives) — `dbs` has no equivalent built-in command yet, so this is
+a manual step for now.
 
 ## Scheduling daily backups
 

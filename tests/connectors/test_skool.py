@@ -512,6 +512,14 @@ def test_ydl_opts_matches_skool_downloader_invocation(tmp_path):
     assert opts["concurrent_fragment_downloads"] == 8
     assert opts["postprocessor_args"]["ffmpeg"] == ["-movflags", "+faststart"]
     assert opts["ffmpeg_location"] == "/opt/ffmpeg"
+    # Exponential retry-sleep backoff (1s doubling to a 30s cap), ALWAYS set
+    # — matches skool-downloader's unconditional `--retry-sleep
+    # fragment:exp=1:30`/`http:exp=1:30`. Without this, yt-dlp's own default
+    # is no sleep at all between retries.
+    assert set(opts["retry_sleep_functions"]) == {"fragment", "http"}
+    assert opts["retry_sleep_functions"]["fragment"](0) == 1.0
+    assert opts["retry_sleep_functions"]["fragment"](4) == 16.0
+    assert opts["retry_sleep_functions"]["fragment"](10) == 30.0  # capped
     # quality 0 = yt-dlp's default pick; no ffmpeg_location when auto-manage is absent
     opts = _ydl_opts(dest, 0, None)
     assert "format_sort" not in opts and "format" not in opts
@@ -527,7 +535,9 @@ def test_ydl_opts_matches_skool_downloader_invocation(tmp_path):
     assert "extractor_args" not in _ydl_opts(dest, 0, None)
     opts = _ydl_opts(dest, 0, None, extractor_args={"youtube": {"player_client": ["android"]}})
     assert opts["extractor_args"] == {"youtube": {"player_client": ["android"]}}
-    # js_runtimes (the actual fix for YouTube's JS challenge / bot-check).
+    # js_runtimes (a defensive measure for YouTube's JS challenge; NOT
+    # confirmed necessary for "Sign in to confirm you're not a bot" — the
+    # confirmed cause was an extractor_args player_client pin instead).
     assert "js_runtimes" not in _ydl_opts(dest, 0, None)
     opts = _ydl_opts(dest, 0, None, js_runtimes={"node": {"path": "/opt/node"}})
     assert opts["js_runtimes"] == {"node": {"path": "/opt/node"}}
@@ -831,6 +841,76 @@ def test_download_hls_wires_ytdlp_logger_per_video_debug(tmp_path, monkeypatch):
     assert captured[-1]["logger"]._verbose is True
 
 
+def test_retry_sleep_functions_exponential_backoff_capped_at_30():
+    from dbs.connectors.skool import _retry_sleep_functions
+
+    fns = _retry_sleep_functions()
+    assert set(fns) == {"fragment", "http"}
+    for key in fns:
+        assert fns[key](0) == 1.0
+        assert fns[key](1) == 2.0
+        assert fns[key](2) == 4.0
+        assert fns[key](5) == 30.0  # 32 capped to the 30s ceiling
+        assert fns[key](20) == 30.0  # stays capped, never grows unbounded
+
+
+def test_classify_video_error_permanent_vs_transient():
+    # Mirrors skool-downloader's classifyVideoError/PERMANENT_VIDEO_ERROR
+    # exactly, including its most important case: "Sign in to confirm
+    # you're not a bot" is classified as TRANSIENT ('failed', retried on a
+    # future run), not permanent — confirmed against the reference tool's
+    # own test suite, which asserts the identical classification. It's
+    # YouTube's bot-check, not evidence the video is actually gone.
+    from dbs.connectors.skool import _classify_video_error
+
+    transient = [
+        "ERROR: [youtube] X: Sign in to confirm you’re not a bot. Use --cookies...",
+        "HTTP Error 500: Internal Server Error",
+        "urlopen error [Errno 110] Connection timed out",
+        "fragment not found; retrying",
+    ]
+    for msg in transient:
+        assert _classify_video_error(Exception(msg)) == "failed", msg
+
+    permanent = [
+        "ERROR: [youtube] X: Video unavailable",
+        "ERROR: This video has been removed by the uploader",
+        "ERROR: [youtube] X: This video is private",
+        "ERROR: [youtube] X: Video is no longer available",
+        "This video is no longer available because the YouTube account "
+        "associated with this video has been terminated",
+        "ERROR: [youtube] X: This video has been removed for violating "
+        "YouTube's Terms of Service",
+    ]
+    for msg in permanent:
+        assert _classify_video_error(Exception(msg)) == "unavailable", msg
+
+
+def test_download_hls_returns_unavailable_for_permanently_gone_videos(tmp_path, monkeypatch):
+    import yt_dlp
+
+    class _FakeYDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def download(self, urls):
+            raise Exception("ERROR: [youtube] X: Video unavailable")
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _FakeYDL)
+    conn = SkoolConnector()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path), video_cookies_file_env=None)
+    dest = tmp_path / "video.mp4"
+    assert conn._download_hls("https://youtu.be/x", dest, cfg, _ctx(cfg), external=True) \
+        == "unavailable"
+    assert not dest.exists()
+
+
 def _video_lesson(**kw):
     lesson = {"lessonId": "l1", "title": "Lesson 1", "moduleTitle": "Module 1"}
     lesson.update(kw)
@@ -842,11 +922,15 @@ class _LessonConn(SkoolConnector):
 
     def __init__(self, fields=None,
                  sniff_url="https://stream.video.skool.com/pb.m3u8?token=t",
-                 download_ok=True, enrich_fail=False):
+                 download_ok=True, download_status=None, enrich_fail=False):
         self._fields = fields if fields is not None else {
             "videoId": "mux1", "videoLink": None, "resources": []}
         self._sniff_url = sniff_url
         self._download_ok = download_ok
+        # Overrides the bool-derived status entirely — e.g. "unavailable" to
+        # simulate a permanently-gone video without needing a third ctor arg
+        # for every existing True/False call site.
+        self._download_status = download_status
         self._enrich_fail = enrich_fail
         self.enriched = 0
         self.sniffed = 0
@@ -866,9 +950,10 @@ class _LessonConn(SkoolConnector):
     def _download_hls(self, url, dest, cfg, ctx, external=False):
         self.downloaded.append(url)
         self.downloaded_external.append(external)
-        if self._download_ok:
+        status = self._download_status or ("ok" if self._download_ok else "failed")
+        if status == "ok":
             dest.write_bytes(b"video-bytes")
-        return self._download_ok
+        return status
 
 
 def _process(conn, tmp_path, lesson=None, cfg=None, page=None):
@@ -948,6 +1033,33 @@ def test_process_lesson_external_video_failure_retries(tmp_path):
     status, _ = _process(conn, tmp_path)
     assert status == "failed"
     assert not (tmp_path / "comm" / "course" / "l1" / ".meta.json").exists()  # retries
+
+
+def test_process_lesson_permanently_unavailable_video_settles_and_stops_retrying(tmp_path):
+    import json as _json
+
+    # Unlike a transient failure, a permanently-gone video (deleted/private/
+    # ToS-terminated — see _classify_video_error) is a SETTLED outcome, not
+    # a failure: it gets a sidecar written (so it's never re-attempted) and
+    # is recorded via videoUnavailable, matching skool-downloader's own
+    # classifyVideoError/PERMANENT_VIDEO_ERROR behavior. This field existed
+    # (_lesson_item read it) but nothing ever SET it before this wiring.
+    conn = _LessonConn(fields={"videoId": None, "videoLink": "https://youtu.be/deadvideo",
+                               "resources": []}, download_status="unavailable")
+    status, lesson = _process(conn, tmp_path)
+    assert status == "unavailable"
+    assert lesson["videoUnavailable"] is True
+    assert "_video_path" not in lesson
+    lesson_dir = tmp_path / "comm" / "course" / "l1"
+    assert not (lesson_dir / "l1.mp4").exists()
+    sidecar = _json.loads((lesson_dir / ".meta.json").read_text())
+    assert sidecar["video_unavailable"] is True
+    assert sidecar["video_downloaded"] is False
+    # Second run: settled, so no re-visit and no re-attempted download.
+    conn2 = _LessonConn()
+    status2, lesson2 = _process(conn2, tmp_path)
+    assert status2 == "cached" and conn2.enriched == 0
+    assert lesson2["videoUnavailable"] is True
 
 
 def test_process_lesson_truly_videoless_writes_marker_sidecar(tmp_path):
