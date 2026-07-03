@@ -333,6 +333,22 @@ account/cookie trust or an IP-level flag rather than anything client-side).
 It's off by default (noisy across a whole course); flip it on for one
 troubleshooting run, then back off.
 
+**If cookies, `js_runtimes`, and an unset `video_extractor_args` all check
+out and it STILL fails**: this can be a plain IP-level block by YouTube,
+unrelated to any of the above — confirmed on a real case by testing the
+*identical* request (same account, same cookies, same yt-dlp binary) from
+the same machine over a VPN, which succeeded immediately, including the JS
+challenge running cleanly. Every software-side avenue had already been
+ruled out first: dbs's connector, a bare `yt-dlp` CLI call, and even
+skool-downloader's own bundled binary and full pipeline all failed
+identically from the flagged network, and all succeeded identically once
+routed through a different IP. If you hit this: run `dbs backup` (or the
+relevant `yt-dlp` call) through a VPN or a different network — no config or
+code change needed. Repeatedly retrying the same failing video from the
+same IP is itself a plausible contributor to getting flagged in the first
+place, so avoid hammering one stuck video over and over from an unchanged
+network.
+
 **For a long-running/unattended install**, periodically run
 `pip install -U "yt-dlp[default]"` in the same environment (e.g. monthly,
 alongside your own maintenance cadence) — YouTube changes frequently enough

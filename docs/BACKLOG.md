@@ -82,3 +82,29 @@ implemented yet — noted here so they aren't rediscovered from scratch:
   install -U` for the current venv, or document it more prominently in
   `dbs doctor`/setup-hint style output) but wasn't implemented since it's a
   new CLI surface, not a bugfix.
+
+### Final resolution of the "Sign in to confirm you're not a bot" saga
+
+After all of the above (and PRs #39–#45), one specific case remained stuck.
+Live A/B testing conclusively isolated the cause to a **plain IP-level block
+by YouTube, not a code defect anywhere**: the identical request (same
+account, same cookies, same yt-dlp binary and version) was tested via —
+- dbs's connector (Python `yt_dlp` library) — failed
+- a bare `yt-dlp` CLI call from the same pip install — failed
+- skool-downloader's own bundled standalone binary, invoked directly — failed
+- skool-downloader's full, real, end-to-end pipeline — failed identically
+
+— all from the same network, and **all succeeded immediately once routed
+through a VPN**, including the JS challenge itself running and resolving
+cleanly. No config, no code, no cookie, no player-client, and no JS-runtime
+difference explained it; only the network did. Likely self-inflicted in
+part: repeatedly retrying the same handful of video IDs from the same IP
+across an extended debugging session is itself a plausible way to get an IP
+flagged by YouTube's rate-limiting.
+
+**Takeaway for future debugging of this error**: work through the
+diagnostic log line and the checks above FIRST (extractor_args, cookies,
+js_runtimes) since those have real, confirmed failure modes of their own —
+but if all of them check out and it still fails, test the same request over
+a different network before assuming there's a remaining code bug to find.
+There may not be one.
