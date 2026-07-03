@@ -815,11 +815,22 @@ class SkoolConnector(Connector):
         cookies_from_browser = (
             cfg.video_cookies_from_browser if external and not cookiefile else None
         )
+        js_runtimes = _js_runtime_opts()
         opts = _ydl_opts(
             dest, cfg.video_quality, _ffmpeg_location(),
             cookiefile=cookiefile, cookies_from_browser=cookies_from_browser,
             extractor_args=cfg.video_extractor_args if external else None,
-            js_runtimes=_js_runtime_opts(),
+            js_runtimes=js_runtimes,
+        )
+        # Diagnostic for "Sign in to confirm you're not a bot": that error can
+        # mean no cookies, or no JS runtime to solve YouTube's challenge (see
+        # _js_runtime_opts) — this line says which inputs yt-dlp actually got,
+        # so a failure report carries the answer instead of another guess.
+        ctx.logger.info(
+            "skool: downloading %s (external=%s) — cookiefile=%s "
+            "cookies_from_browser=%s js_runtimes=%s",
+            dest.name, external, bool(cookiefile), cookies_from_browser,
+            js_runtimes or "none (nodejs-wheel not installed/found)",
         )
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:

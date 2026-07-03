@@ -709,6 +709,44 @@ def test_download_hls_wires_js_runtime_opts_for_every_download(tmp_path, monkeyp
     assert "js_runtimes" not in captured[-1]
 
 
+def test_download_hls_logs_cookie_and_js_runtime_state(tmp_path, monkeypatch, caplog):
+    # "Sign in to confirm you're not a bot" can mean missing cookies OR a
+    # missing JS runtime (see _js_runtime_opts) — a failure report needs to
+    # say which inputs yt-dlp actually got so the next fix isn't another
+    # guess. This line must reach the user: it's logged at INFO because the
+    # CLI now configures the "dbs" logger for it (see test_cli.py) — assert
+    # it's actually emitted, not just that it wouldn't crash.
+    import yt_dlp
+    from dbs.connectors import skool as skool_mod
+
+    class _FakeYDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def download(self, urls):
+            pass
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _FakeYDL)
+    monkeypatch.setattr(skool_mod, "_js_runtime_opts",
+                        lambda: {"node": {"path": "/opt/node"}})
+    conn = SkoolConnector()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path), video_cookies_file_env=None)
+    ctx = _ctx(cfg)
+    dest = tmp_path / "video.mp4"
+    with caplog.at_level("INFO", logger="test"):
+        conn._download_hls("https://youtu.be/x", dest, cfg, ctx, external=True)
+    assert any(
+        "cookiefile=False" in r.message and "js_runtimes={'node'" in r.message
+        for r in caplog.records
+    )
+
+
 def _video_lesson(**kw):
     lesson = {"lessonId": "l1", "title": "Lesson 1", "moduleTitle": "Module 1"}
     lesson.update(kw)

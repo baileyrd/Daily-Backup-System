@@ -297,6 +297,16 @@ require one (a Skool-embedded video is normally embed-enabled). A persistent
 block after that means a PO token provider plugin is the durable fix (see
 yt-dlp's PO Token Guide).
 
+Before re-diagnosing a persistent failure, check the actual inputs yt-dlp got:
+each video download now logs a `skool: downloading ... — cookiefile=...
+js_runtimes=...` line (visible in `dbs backup`'s / `dbs serve`'s own
+terminal — every `ctx.logger.info(...)` call was silently dropped before this
+version, since nothing configured Python logging). `js_runtimes=none (nodejs-
+wheel not installed/found)` means the `[skool]` extra wasn't reinstalled (or
+the process wasn't restarted) after upgrading — `pip install -e ".[skool]"`
+then restart `dbs serve` picks it up; a resolved path there but the same
+error means a genuinely different cause (see above).
+
 ## Scheduling daily backups
 
 ```bash
