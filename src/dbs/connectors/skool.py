@@ -168,15 +168,29 @@ class SkoolConfig(BaseModel):
     # FILE (above) sidesteps that entirely, so it always wins when both are set.
     video_cookies_from_browser: str | None = None
     # Extra yt-dlp extractor-args for EXTERNAL videos, passed straight
-    # through. Rarely needed: "Sign in to confirm you're not a bot" with
-    # valid cookies almost always means yt-dlp couldn't run its JS challenge
-    # solver (see _js_runtime_opts, auto-managed via the nodejs-wheel dep —
-    # reinstall the `skool` extra to pick it up). If a SPECIFIC video still
-    # fails after that, YouTube's web/mweb/android/ios player clients now
-    # require a "PO token" that plain cookies can't satisfy; web_embedded
-    # does not (see yt-dlp's PO Token Guide), and a Skool-embedded video is
-    # normally embed-enabled: {"youtube": {"player_client": ["web_embedded"]}}
+    # through — e.g. {"youtube": {"player_client": ["web_embedded"]}} to pin
+    # a specific player client. LEAVE UNSET unless you've confirmed yt-dlp's
+    # own default multi-client fallback genuinely fails: pinning to one
+    # client PREVENTS it from ever trying another that might work (confirmed
+    # live: a leftover "web_embedded" pin locked out yt-dlp's own default
+    # "android_vr" attempt, which succeeded immediately once the pin was
+    # removed — a restriction meant to fix one video ended up CAUSING its
+    # failure; this is the CONFIRMED root cause of this connector's
+    # persistent "Sign in to confirm you're not a bot" reports, not a
+    # missing JS runtime or missing cookies — skool-downloader, the
+    # reference tool this connector ports, never restricts player_client at
+    # all and needs no special handling for this error whatsoever).
     video_extractor_args: dict[str, dict[str, list[str]]] | None = None
+    # Forward yt-dlp's FULL internal diagnostic chain into the run log — which
+    # player client(s) it tried, whether the JS challenge solver actually ran
+    # (a "[jsc:node] Solving JS challenges..." line means yes; an "n challenge
+    # solving failed" warning means no, even with a resolved js_runtimes path)
+    # — instead of only the final exception text. Off by default: this is
+    # genuinely noisy across a whole course's worth of lessons. Flip on
+    # temporarily when "Sign in to confirm you're not a bot" persists despite
+    # valid cookies AND a resolved js_runtimes path (see the `skool:
+    # downloading ...` log line), to see WHY instead of guessing again.
+    video_debug: bool = False
     # Write a markdown note of each lesson page (url2obs-convention frontmatter,
     # body converted from Skool's editor JSON, links to the downloaded media)
     # into the lesson's folder, next to its video and resources.
@@ -429,9 +443,10 @@ class SkoolConnector(Connector):
             # A silent zero must never hide again: say what happened per community.
             ctx.logger.info(
                 "skool: %s lessons — %d video(s) downloaded, %d cached, "
-                "%d without native video, %d failed (%d course(s) filtered out)",
+                "%d without native video, %d permanently unavailable, %d failed "
+                "(%d course(s) filtered out)",
                 slug, stats["downloaded"], stats["cached"], stats["none"],
-                stats["failed"], skipped_courses,
+                stats["unavailable"], stats["failed"], skipped_courses,
             )
 
     # -- browser helpers (thin; not unit-tested) ----------------------------
@@ -615,6 +630,7 @@ class SkoolConnector(Connector):
             lesson["videoId"] = sidecar.get("videoId")
             lesson["videoLink"] = sidecar.get("videoLink")
             lesson["hasVideo"] = bool(sidecar.get("videoId") or sidecar.get("videoLink"))
+            lesson["videoUnavailable"] = bool(sidecar.get("video_unavailable"))
             lesson["_resources"] = [
                 {"path": str(lesson_dir / r["filename"]), "filename": r["filename"],
                  "mime": r.get("mime")}
@@ -641,6 +657,7 @@ class SkoolConnector(Connector):
 
         status = "none"
         video_downloaded = False
+        video_unavailable = False
         video_failed = False
         # Native (Mux) videos are captured from the player; external ones
         # (YouTube/Vimeo/Loom videoLink) go straight to yt-dlp.
@@ -656,13 +673,22 @@ class SkoolConnector(Connector):
                     url = self._sniff_hls_url(page, page_data, fields.get("videoId"), ctx)
                 if url:
                     video_dest.parent.mkdir(parents=True, exist_ok=True)
-                    video_downloaded = self._download_hls(
+                    video_result = self._download_hls(
                         url, video_dest, cfg, ctx, external=is_external
                     )
+                    video_downloaded = video_result == "ok"
+                    video_unavailable = video_result == "unavailable"
                 if video_downloaded:
                     status = "downloaded"
                     ctx.logger.info(
                         "skool: downloaded video for %s -> %s", lesson.get("title"), video_dest
+                    )
+                elif video_unavailable:
+                    status = "unavailable"
+                    ctx.logger.info(
+                        "skool: video for lesson %s (%s) is permanently unavailable — "
+                        "indexed without the video, not retried.",
+                        lesson.get("lessonId"), lesson.get("title"),
                     )
                 else:
                     video_failed = True
@@ -675,6 +701,7 @@ class SkoolConnector(Connector):
                         )
             if video_downloaded:
                 lesson["_video_path"] = str(video_dest)
+            lesson["videoUnavailable"] = video_unavailable
 
         note_ok = True
         if cfg.write_markdown:
@@ -684,12 +711,16 @@ class SkoolConnector(Connector):
 
         # A failed video, failed resources, OR a failed note retries next run:
         # no sidecar (mirrors skool-downloader's videoFailed/resourceFailures gate).
+        # A permanently-unavailable video is NOT a failure here — like a
+        # genuinely videoless lesson, it's a settled outcome that gets a
+        # sidecar written so it stops being re-attempted every run.
         if not video_failed and not resource_failures and note_ok:
             _write_sidecar(lesson_dir / ".meta.json", {
                 "lessonId": lesson.get("lessonId"),  # anchors dir-rename migration
                 "videoId": fields.get("videoId"),
                 "videoLink": fields.get("videoLink"),
                 "video_downloaded": video_downloaded,
+                "video_unavailable": video_unavailable,
                 "no_native_video": not fields.get("videoId"),
                 "note": f"{lesson_dir.name}.md" if cfg.write_markdown else None,
                 "resources": [
@@ -720,6 +751,8 @@ class SkoolConnector(Connector):
             return True
         if not sidecar.get("videoId") and not sidecar.get("videoLink"):
             return True  # genuinely videoless lesson
+        if sidecar.get("video_unavailable"):
+            return True  # permanently gone — settled, never re-attempted again
         return (
             bool(sidecar.get("video_downloaded"))
             and video_dest.exists()
@@ -785,7 +818,7 @@ class SkoolConnector(Connector):
     def _download_hls(
         self, url: str, dest: Path, cfg: SkoolConfig, ctx: RunContext,
         external: bool = False,
-    ) -> bool:
+    ) -> str:
         """Download a video URL to ``dest`` via yt-dlp (yt-dlp seam).
 
         ``external`` marks a non-Skool host (a lesson's YouTube/Vimeo/Loom
@@ -794,6 +827,10 @@ class SkoolConnector(Connector):
         "Sign in to confirm you're not a bot"). The Referer/UA headers,
         unlike cookies, are sent unconditionally to every download, native
         or external, matching skool-downloader exactly.
+
+        Returns ``"ok"`` on success, ``"unavailable"`` when the video is
+        permanently gone (see ``_classify_video_error`` — never retried
+        again), or ``"failed"`` for anything else (retried on a future run).
         """
         try:
             import yt_dlp
@@ -802,7 +839,7 @@ class SkoolConnector(Connector):
                 "skool: yt-dlp is not installed — video downloads skipped. "
                 "Install with `pip install 'daily-backup-system[skool]'`."
             )
-            return False
+            return "failed"
         cookiefile = None
         if external and cfg.video_cookies_file_env:
             cookiefile = ctx.secrets.get_optional(cfg.video_cookies_file_env)
@@ -815,19 +852,45 @@ class SkoolConnector(Connector):
         cookies_from_browser = (
             cfg.video_cookies_from_browser if external and not cookiefile else None
         )
+        js_runtimes = _js_runtime_opts()
+        extractor_args = cfg.video_extractor_args if external else None
         opts = _ydl_opts(
             dest, cfg.video_quality, _ffmpeg_location(),
             cookiefile=cookiefile, cookies_from_browser=cookies_from_browser,
-            extractor_args=cfg.video_extractor_args if external else None,
-            js_runtimes=_js_runtime_opts(),
+            extractor_args=extractor_args,
+            js_runtimes=js_runtimes,
         )
+        # Diagnostic for "Sign in to confirm you're not a bot": that error can
+        # mean no cookies, no JS runtime to solve YouTube's challenge (see
+        # _js_runtime_opts), OR extractor_args restricting yt-dlp to a single
+        # player_client that then fails outright with no fallback to others
+        # (confirmed live: this is a real footgun, not a hypothetical — a
+        # user's leftover `player_client = ["web_embedded"]` from an earlier
+        # fix locked out yt-dlp's own default multi-client fallback, which
+        # succeeded immediately once unset). This line says which inputs
+        # yt-dlp actually got, so a failure report carries the answer instead
+        # of another guess.
+        ctx.logger.info(
+            "skool: downloading %s (external=%s) — cookiefile=%s "
+            "cookies_from_browser=%s extractor_args=%s js_runtimes=%s",
+            dest.name, external, bool(cookiefile), cookies_from_browser,
+            extractor_args, js_runtimes or "none (nodejs-wheel not installed/found)",
+        )
+        opts["logger"] = _YtdlpLogger(ctx.logger, cfg.video_debug)
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
         except Exception as exc:  # noqa: BLE001 - includes DownloadError; best-effort
-            ctx.logger.warning("skool: video download failed (%s): %s", dest.name, exc)
-            return False
-        return dest.exists() and dest.stat().st_size > 0
+            kind = _classify_video_error(exc)
+            if kind == "unavailable":
+                ctx.logger.info(
+                    "skool: video permanently unavailable (%s), not retrying: %s",
+                    dest.name, exc,
+                )
+            else:
+                ctx.logger.warning("skool: video download failed (%s): %s", dest.name, exc)
+            return kind
+        return "ok" if dest.exists() and dest.stat().st_size > 0 else "failed"
 
     def _goto(self, page: Any, url: str, ctx: RunContext) -> None:
         try:
@@ -1329,22 +1392,30 @@ def _ydl_opts(
     """yt-dlp options for downloading one video to an exact path.
 
     Mirrors skool-downloader's invocation VERBATIM (confirmed against its
-    ``buildVideoArgs``): the Skool ``Referer`` + a full, real-browser-shaped
-    Chrome UA are sent UNCONDITIONALLY — for native AND external (YouTube/
-    Vimeo/Loom) downloads alike, never gated by host. A prior version of this
-    code sent an incomplete UA (missing the AppleWebKit/Chrome/Safari tokens
-    — a dead giveaway of a non-browser client to a fingerprint check) and
-    stripped both headers entirely for external downloads; that divergence
-    was A cause of YouTube's bot-check rejecting downloads, but not THE
-    root one — see ``js_runtimes``. Also: format SORT (never a ``format``
-    selector — ``-S res:{q},vcodec:h264,acodec:m4a``; quality 0 = yt-dlp
-    default), mp4 merge with ``+faststart``, 8 concurrent fragments.
-    ``cookiefile``/``cookies_from_browser``/``extractor_args`` are only
-    meaningful for external downloads. ``js_runtimes`` (see
-    ``_js_runtime_opts``) is the actual fix for a persistent "Sign in to
-    confirm you're not a bot" with valid cookies: yt-dlp needs an external
-    JS runtime to solve YouTube's obfuscation challenge, and without one
-    silently falls back to demanding sign-in.
+    ``buildVideoArgs``, re-verified against the actual reference source): the
+    Skool ``Referer`` + a full, real-browser-shaped Chrome UA are sent
+    UNCONDITIONALLY — for native AND external (YouTube/Vimeo/Loom) downloads
+    alike, never gated by host. A prior version of this code sent an
+    incomplete UA (missing the AppleWebKit/Chrome/Safari tokens — a dead
+    giveaway of a non-browser client to a fingerprint check) and stripped
+    both headers entirely for external downloads; that divergence was A
+    cause of YouTube's bot-check rejecting downloads, but not THE root one —
+    the confirmed live root cause was a ``video_extractor_args`` player_client
+    pin (see ``SkoolConfig.video_extractor_args``), which the reference tool
+    never sets at all. Also: format SORT (never a ``format`` selector —
+    ``-S res:{q},vcodec:h264,acodec:m4a``; quality 0 = yt-dlp default), mp4
+    merge with ``+faststart``, 8 concurrent fragments, and exponential
+    retry-sleep backoff (see ``_retry_sleep_functions``) — this last one was
+    a genuine, confirmed gap: the reference always backs off 1s-30s on
+    fragment/http retries, this connector previously retried immediately
+    with no backoff at all. ``cookiefile``/``cookies_from_browser``/
+    ``extractor_args`` are only meaningful for external downloads.
+    ``js_runtimes`` (see ``_js_runtime_opts``) is a defensive, best-effort
+    measure for YouTube's JS obfuscation challenge — NOT confirmed to be
+    necessary for the "Sign in to confirm you're not a bot" symptom this
+    connector has chased (the reference tool never configures a JS runtime
+    at all and needs none), but harmless to keep wired since it costs
+    nothing when unavailable and may still matter for other clients/videos.
     """
     opts: dict[str, Any] = {
         "quiet": True,
@@ -1362,6 +1433,7 @@ def _ydl_opts(
         "socket_timeout": 30,
         "retries": 10,
         "fragment_retries": 10,
+        "retry_sleep_functions": _retry_sleep_functions(),
         "postprocessor_args": {"ffmpeg": ["-movflags", "+faststart"]},
     }
     if quality:
@@ -1379,6 +1451,23 @@ def _ydl_opts(
     return opts
 
 
+def _retry_sleep_functions() -> dict[str, Any]:
+    """Exponential backoff for yt-dlp's fragment/http retries: 1s, doubling,
+    capped at 30s — mirrors skool-downloader's ``--retry-sleep
+    fragment:exp=1:30``/``http:exp=1:30`` exactly (same formula yt-dlp's own
+    ``--retry-sleep`` CLI flag uses internally: ``min(start * 2**n, limit)``).
+
+    Confirmed gap: without this, yt-dlp's Python API default is NO sleep
+    between retries at all (the CLI default of ``{}`` means an empty
+    ``retry_sleep_functions`` dict, verified against yt-dlp's own
+    ``options.py``) — a transient/throttling response burns through all
+    retry attempts back-to-back in seconds instead of backing off, where
+    the reference tool waits it out.
+    """
+    backoff = lambda n: min(1.0 * (2.0 ** n), 30.0)  # noqa: E731 - trivial, not worth naming
+    return {"fragment": backoff, "http": backoff}
+
+
 def _ffmpeg_location() -> str | None:
     """Path to the auto-managed ffmpeg binary (imageio-ffmpeg), or ``None`` to
     let yt-dlp find one on the system PATH."""
@@ -1394,13 +1483,21 @@ def _js_runtime_opts() -> dict[str, dict[str, Any]] | None:
     """``js_runtimes`` option for yt-dlp: the auto-managed Node.js binary
     (nodejs-wheel), mirroring ``_ffmpeg_location``'s pattern.
 
-    yt-dlp needs an external JS runtime to solve YouTube's obfuscation
-    challenge; without one, extraction silently degrades to "Sign in to
-    confirm you're not a bot" regardless of cookies or headers (confirmed
-    live: the exact same video failed with valid cookies until a JS runtime
-    was available, then succeeded with the SAME cookies and no other
-    change). ``None`` lets yt-dlp fall back to its own detection (only
-    ``deno`` on PATH by default) when nodejs-wheel isn't installed.
+    yt-dlp CAN need an external JS runtime to solve YouTube's obfuscation
+    challenge for some player clients; without one, those specific clients
+    silently degrade to "Sign in to confirm you're not a bot" regardless of
+    cookies or headers. Note the scope of what was actually confirmed,
+    though: this was live-verified to matter for a `web_embedded`-pinned
+    request specifically (see ``SkoolConfig.video_extractor_args``'s
+    warning) — but the CONFIRMED root cause of the connector's persistent
+    real-world failure turned out to be that pin itself, not an absent JS
+    runtime; skool-downloader (the reference tool this connector ports) sets
+    NO js-runtime configuration at all and needs none, because it never
+    restricts which player client yt-dlp picks. Keeping this wired is still
+    reasonable defense-in-depth — it costs nothing when unavailable — but
+    treat it as "might help for some client/video combos," not as the fix.
+    ``None`` lets yt-dlp fall back to its own detection (only ``deno`` on
+    PATH by default) when nodejs-wheel isn't installed.
     """
     try:
         import os
@@ -1413,6 +1510,64 @@ def _js_runtime_opts() -> dict[str, dict[str, Any]] | None:
         return {"node": {"path": path}} if os.path.exists(path) else None
     except Exception:  # noqa: BLE001 - not installed; yt-dlp falls back to its own detection
         return None
+
+
+class _YtdlpLogger:
+    """Forwards yt-dlp's own diagnostic chain into ``ctx.logger``.
+
+    ``_ydl_opts``'s ``quiet``/``no_warnings`` only gate yt-dlp's *own*
+    screen/stderr printing — once a ``logger`` param is set instead, yt-dlp
+    forwards EVERY debug/warning/error message to it unconditionally (see
+    ``YoutubeDL.report_warning``/``to_screen``/``to_stderr``), bypassing those
+    flags entirely. Warnings/errors (an "n challenge solving failed" line,
+    auth failures) always reach ``ctx.logger.warning`` — that alone is the
+    single highest-value signal for "Sign in to confirm you're not a bot"
+    persisting despite valid cookies and a resolved ``js_runtimes`` path. The
+    full step-by-step chain (which player client was tried, whether the JS
+    solver actually ran) is genuinely noisy across a whole course, so it's
+    silent by default and only forwarded (as ``ctx.logger.info``, wired up in
+    ``_download_hls``) when ``SkoolConfig.video_debug`` is set.
+    """
+
+    def __init__(self, logger: Any, verbose: bool) -> None:
+        self._logger = logger
+        self._verbose = verbose
+
+    def debug(self, msg: str) -> None:
+        if self._verbose:
+            self._logger.info(msg)
+
+    def warning(self, msg: str) -> None:
+        self._logger.warning(msg)
+
+    def error(self, msg: str) -> None:
+        self._logger.warning(msg)  # the caller already logs/handles the raised exception
+
+
+# A video download failure is either permanent (the video is genuinely gone
+# — deleted/private/ToS-terminated; never retry) or transient (network,
+# throttling, a bot-check wall; retry on a future run). Mirrors
+# skool-downloader's classifyVideoError/PERMANENT_VIDEO_ERROR pattern
+# VERBATIM (confirmed against its actual source and its own test suite).
+# Deliberately does NOT match "Sign in to confirm you're not a bot": the
+# reference tool's own tests assert that error is classified as transient
+# ('failed', i.e. retryable) — it's YouTube's bot-check, not evidence the
+# video itself is gone, so a Python port matching the reference exactly
+# must keep retrying it too, not write it off as permanently unavailable.
+_PERMANENT_VIDEO_ERROR = re.compile(
+    r"video unavailable|has been removed|removed by the uploader|"
+    r"this video is private|private video|no longer available|"
+    r"account (?:has been |associated with this video has been )?terminated|"
+    r"violat(?:ing|ion)|removed for violating",
+    re.IGNORECASE,
+)
+
+
+def _classify_video_error(exc: Exception) -> str:
+    """``"unavailable"`` (the video is permanently gone, see
+    ``_PERMANENT_VIDEO_ERROR``) or ``"failed"`` (anything else — transient,
+    retried on a future run)."""
+    return "unavailable" if _PERMANENT_VIDEO_ERROR.search(str(exc)) else "failed"
 
 
 def _parse_memberships(next_data: dict[str, Any]) -> list[dict[str, Any]]:

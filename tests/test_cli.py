@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from typer.testing import CliRunner
 
 from dbs.cli import app
@@ -13,6 +15,32 @@ def test_version():
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert "daily-backup-system" in result.stdout
+
+
+def test_configure_logging_makes_dbs_info_logs_visible_and_is_idempotent():
+    # Nothing in this codebase ever called logging.basicConfig or attached a
+    # handler, so every connector's ctx.logger.info(...) status/diagnostic
+    # line (RunContext.logger is a child of "dbs") was silently dropped —
+    # invisible in both the CLI and dbs serve's own terminal. The CLI
+    # callback now fixes this once per process; assert it actually does, and
+    # that running it repeatedly (CliRunner reuses one process across many
+    # invocations) doesn't stack duplicate handlers and print each line twice.
+    dbs_logger = logging.getLogger("dbs")
+    for _ in range(3):
+        runner.invoke(app, ["version"])
+    # Only count our own handler type — a test harness's log capturing
+    # attaches its own (different) handler type to every existing logger,
+    # "dbs" included, for the duration of each test.
+    own_handlers = [h for h in dbs_logger.handlers if type(h) is logging.StreamHandler]
+    assert len(own_handlers) == 1
+    assert dbs_logger.getEffectiveLevel() == logging.INFO
+
+    import io
+
+    stream = io.StringIO()
+    own_handlers[0].stream = stream
+    dbs_logger.getChild("test-source").info("hello from a connector")
+    assert "hello from a connector" in stream.getvalue()
 
 
 def test_init_creates_config_env_and_db(tmp_path):

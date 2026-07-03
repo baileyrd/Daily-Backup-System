@@ -14,6 +14,7 @@ Exit codes (cron-friendly):
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sys
 import time
@@ -52,6 +53,39 @@ app.add_typer(research_app, name="research")
 _state: dict[str, str] = {"config": "dbs.toml"}
 
 
+_logging_configured = False
+
+
+def _configure_logging() -> None:
+    """Make every connector's ``ctx.logger.info``/``.warning`` calls visible.
+
+    Nothing in this codebase ever called ``logging.basicConfig`` or attached a
+    handler, so the "dbs" logger tree (``RunContext.logger``, see
+    ``core/service.py``) had no handler anywhere in its hierarchy: INFO
+    records were silently dropped, and WARNING+ only reached the terminal via
+    Python's bare last-resort fallback (message only, no level/name prefix) —
+    which is why connectors' many ``ctx.logger.info(...)`` status/diagnostic
+    lines (e.g. skool's per-community download summary) never actually
+    appeared anywhere. Scoped to the "dbs" logger specifically (not root), so
+    third-party libraries' own loggers (httpx's per-request INFO lines, etc.)
+    stay exactly as quiet as before. Idempotent via a module flag (not "any
+    handler present" — a test harness's log capturing can attach its own
+    handler to every existing logger, "dbs" included, which would otherwise
+    look like this was already configured): a CLI process only needs this
+    once, but this callback runs per-invocation.
+    """
+    global _logging_configured
+    if _logging_configured:
+        return
+    _logging_configured = True
+    dbs_logger = logging.getLogger("dbs")
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    dbs_logger.addHandler(handler)
+    dbs_logger.setLevel(logging.INFO)
+    dbs_logger.propagate = False
+
+
 @app.callback()
 def _main(
     config: str = typer.Option(
@@ -59,6 +93,7 @@ def _main(
         help="Path to the config file (TOML or YAML).",
     ),
 ) -> None:
+    _configure_logging()
     _state["config"] = config
 
 

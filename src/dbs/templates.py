@@ -72,13 +72,22 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 #   means yt-dlp couldn't run its JS challenge solver — this needs the
 #   `skool` extra's nodejs-wheel dependency (auto-managed, no system install;
 #   re-run `pip install -e ".[skool]"` on existing installs to pick it up).
-#   Still failing on one SPECIFIC video after that? YouTube's web/mweb/
-#   android/ios player clients now require a "PO token" plain cookies can't
-#   satisfy; web_embedded does not (see yt-dlp's PO Token Guide), and a
-#   Skool-embedded video is normally embed-enabled:
-#   video_extractor_args = { youtube = { player_client = ["web_embedded"] } }
-#   Still failing (embedding disabled on that video)? A PO token provider
-#   plugin is the durable fix — see yt-dlp's PO Token Guide.
+#   video_extractor_args pins yt-dlp to specific player client(s), e.g.
+#   { youtube = { player_client = ["web_embedded"] } } — leave this UNSET
+#   unless you've confirmed yt-dlp's own default multi-client fallback fails
+#   too. Confirmed live to be a real footgun: pinning to one client can
+#   PREVENT yt-dlp from ever trying another (e.g. android_vr) that would have
+#   worked — check the `skool: downloading ...` log line's extractor_args
+#   field and try removing this setting entirely before adding it.
+# video_extractor_args = { }         # only set after ruling out the default fallback
+#   Still stuck with cookies, a resolved js_runtimes path, AND no
+#   extractor_args restriction (check the `skool: downloading ...` log line
+#   for all three)? video_debug = true forwards yt-dlp's full diagnostic
+#   chain (which player client was tried, whether the JS solver actually
+#   ran) into the log instead of just the final error — see WHY rather than
+#   guess again. A persistent block after that likely needs a PO token
+#   provider plugin — see yt-dlp's PO Token Guide.
+# video_debug = false                # verbose yt-dlp diagnostics for a stubborn video
 # communities = ["your-community"]   # optional; OMIT to auto-detect every community you've joined
 # courses = ["your-community/Course Title"]  # optional; only these courses (title or slug;
 #                                    # "community/course" scopes it). While set, deletion
