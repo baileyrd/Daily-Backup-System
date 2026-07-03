@@ -168,14 +168,17 @@ class SkoolConfig(BaseModel):
     # FILE (above) sidesteps that entirely, so it always wins when both are set.
     video_cookies_from_browser: str | None = None
     # Extra yt-dlp extractor-args for EXTERNAL videos, passed straight
-    # through. Rarely needed: "Sign in to confirm you're not a bot" with
-    # valid cookies almost always means yt-dlp couldn't run its JS challenge
-    # solver (see _js_runtime_opts, auto-managed via the nodejs-wheel dep —
-    # reinstall the `skool` extra to pick it up). If a SPECIFIC video still
-    # fails after that, YouTube's web/mweb/android/ios player clients now
-    # require a "PO token" that plain cookies can't satisfy; web_embedded
-    # does not (see yt-dlp's PO Token Guide), and a Skool-embedded video is
-    # normally embed-enabled: {"youtube": {"player_client": ["web_embedded"]}}
+    # through — e.g. {"youtube": {"player_client": ["web_embedded"]}} to pin
+    # a specific player client. LEAVE UNSET unless you've confirmed yt-dlp's
+    # own default multi-client fallback genuinely fails: pinning to one
+    # client PREVENTS it from ever trying another that might work (confirmed
+    # live: a leftover "web_embedded" pin locked out yt-dlp's own default
+    # "android_vr" attempt, which succeeded immediately once the pin was
+    # removed — a restriction meant to fix one video ended up CAUSING its
+    # failure). "Sign in to confirm you're not a bot" with valid cookies
+    # almost always means yt-dlp couldn't run its JS challenge solver (see
+    # _js_runtime_opts, auto-managed via the nodejs-wheel dep — reinstall the
+    # `skool` extra to pick it up), not a player-client problem.
     video_extractor_args: dict[str, dict[str, list[str]]] | None = None
     # Forward yt-dlp's FULL internal diagnostic chain into the run log — which
     # player client(s) it tried, whether the JS challenge solver actually ran
@@ -826,21 +829,28 @@ class SkoolConnector(Connector):
             cfg.video_cookies_from_browser if external and not cookiefile else None
         )
         js_runtimes = _js_runtime_opts()
+        extractor_args = cfg.video_extractor_args if external else None
         opts = _ydl_opts(
             dest, cfg.video_quality, _ffmpeg_location(),
             cookiefile=cookiefile, cookies_from_browser=cookies_from_browser,
-            extractor_args=cfg.video_extractor_args if external else None,
+            extractor_args=extractor_args,
             js_runtimes=js_runtimes,
         )
         # Diagnostic for "Sign in to confirm you're not a bot": that error can
-        # mean no cookies, or no JS runtime to solve YouTube's challenge (see
-        # _js_runtime_opts) — this line says which inputs yt-dlp actually got,
-        # so a failure report carries the answer instead of another guess.
+        # mean no cookies, no JS runtime to solve YouTube's challenge (see
+        # _js_runtime_opts), OR extractor_args restricting yt-dlp to a single
+        # player_client that then fails outright with no fallback to others
+        # (confirmed live: this is a real footgun, not a hypothetical — a
+        # user's leftover `player_client = ["web_embedded"]` from an earlier
+        # fix locked out yt-dlp's own default multi-client fallback, which
+        # succeeded immediately once unset). This line says which inputs
+        # yt-dlp actually got, so a failure report carries the answer instead
+        # of another guess.
         ctx.logger.info(
             "skool: downloading %s (external=%s) — cookiefile=%s "
-            "cookies_from_browser=%s js_runtimes=%s",
+            "cookies_from_browser=%s extractor_args=%s js_runtimes=%s",
             dest.name, external, bool(cookiefile), cookies_from_browser,
-            js_runtimes or "none (nodejs-wheel not installed/found)",
+            extractor_args, js_runtimes or "none (nodejs-wheel not installed/found)",
         )
         opts["logger"] = _YtdlpLogger(ctx.logger, cfg.video_debug)
         try:

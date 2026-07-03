@@ -710,12 +710,15 @@ def test_download_hls_wires_js_runtime_opts_for_every_download(tmp_path, monkeyp
 
 
 def test_download_hls_logs_cookie_and_js_runtime_state(tmp_path, monkeypatch, caplog):
-    # "Sign in to confirm you're not a bot" can mean missing cookies OR a
-    # missing JS runtime (see _js_runtime_opts) — a failure report needs to
-    # say which inputs yt-dlp actually got so the next fix isn't another
-    # guess. This line must reach the user: it's logged at INFO because the
-    # CLI now configures the "dbs" logger for it (see test_cli.py) — assert
-    # it's actually emitted, not just that it wouldn't crash.
+    # "Sign in to confirm you're not a bot" can mean missing cookies, a
+    # missing JS runtime (see _js_runtime_opts), OR extractor_args pinning
+    # yt-dlp to a single player_client that fails with no fallback to others
+    # (confirmed live: a leftover player_client=["web_embedded"] locked out
+    # yt-dlp's own default multi-client fallback, which worked once unset —
+    # extractor_args belongs in this line for exactly that reason). This
+    # line must reach the user: it's logged at INFO because the CLI now
+    # configures the "dbs" logger for it (see test_cli.py) — assert it's
+    # actually emitted, not just that it wouldn't crash.
     import yt_dlp
     from dbs.connectors import skool as skool_mod
 
@@ -736,14 +739,24 @@ def test_download_hls_logs_cookie_and_js_runtime_state(tmp_path, monkeypatch, ca
     monkeypatch.setattr(skool_mod, "_js_runtime_opts",
                         lambda: {"node": {"path": "/opt/node"}})
     conn = SkoolConnector()
-    cfg = SkoolConfig(downloads_dir=str(tmp_path), video_cookies_file_env=None)
+    cfg = SkoolConfig(downloads_dir=str(tmp_path), video_cookies_file_env=None,
+                      video_extractor_args={"youtube": {"player_client": ["web_embedded"]}})
     ctx = _ctx(cfg)
     dest = tmp_path / "video.mp4"
     with caplog.at_level("INFO", logger="test"):
         conn._download_hls("https://youtu.be/x", dest, cfg, ctx, external=True)
     assert any(
-        "cookiefile=False" in r.message and "js_runtimes={'node'" in r.message
+        "cookiefile=False" in r.message
+        and "extractor_args={'youtube': {'player_client': ['web_embedded']}}" in r.message
+        and "js_runtimes={'node'" in r.message
         for r in caplog.records
+    )
+    # Native (Mux) downloads never get YouTube extractor_args, so the log
+    # line must say so too (not the config value, which stays external-only).
+    with caplog.at_level("INFO", logger="test"):
+        conn._download_hls("https://stream.video.skool.com/x.m3u8", dest, cfg, ctx, external=False)
+    assert any(
+        "extractor_args=None" in r.message for r in caplog.records
     )
 
 
