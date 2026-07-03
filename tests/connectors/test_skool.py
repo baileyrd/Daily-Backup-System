@@ -747,6 +747,77 @@ def test_download_hls_logs_cookie_and_js_runtime_state(tmp_path, monkeypatch, ca
     )
 
 
+def test_ytdlp_logger_forwards_warnings_always_debug_only_when_verbose():
+    # yt-dlp's own diagnostic chain (e.g. "n challenge solving failed" —
+    # a JS-runtime path resolved but the solver itself didn't work) is the
+    # only way to see WHY "Sign in to confirm" persists despite valid
+    # cookies and a resolved js_runtimes path; quiet/no_warnings never gate
+    # a message once a `logger` object is set (see YoutubeDL.report_warning/
+    # to_screen). Warnings/errors always surface; the noisier step-by-step
+    # chain only surfaces with video_debug=True.
+    from dbs.connectors.skool import _YtdlpLogger
+
+    class _FakeLogger:
+        def __init__(self):
+            self.calls = []
+
+        def info(self, msg):
+            self.calls.append(("info", msg))
+
+        def warning(self, msg):
+            self.calls.append(("warning", msg))
+
+    quiet = _FakeLogger()
+    _YtdlpLogger(quiet, False).debug("[jsc:node] Solving JS challenges using node")
+    assert quiet.calls == []  # silent by default
+
+    verbose = _FakeLogger()
+    ytdlp_logger = _YtdlpLogger(verbose, True)
+    ytdlp_logger.debug("[jsc:node] Solving JS challenges using node")
+    ytdlp_logger.warning("n challenge solving failed")
+    ytdlp_logger.error("Sign in to confirm you're not a bot")
+    assert verbose.calls == [
+        ("info", "[jsc:node] Solving JS challenges using node"),
+        ("warning", "n challenge solving failed"),
+        ("warning", "Sign in to confirm you're not a bot"),
+    ]
+
+
+def test_download_hls_wires_ytdlp_logger_per_video_debug(tmp_path, monkeypatch):
+    import yt_dlp
+    from dbs.connectors.skool import _YtdlpLogger
+
+    captured: list[dict] = []
+
+    class _FakeYDL:
+        def __init__(self, opts):
+            captured.append(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def download(self, urls):
+            pass
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _FakeYDL)
+    conn = SkoolConnector()
+    dest = tmp_path / "video.mp4"
+
+    cfg = SkoolConfig(downloads_dir=str(tmp_path), video_cookies_file_env=None)
+    conn._download_hls("https://youtu.be/x", dest, cfg, _ctx(cfg), external=True)
+    logger = captured[-1]["logger"]
+    assert isinstance(logger, _YtdlpLogger)
+    assert logger._verbose is False
+
+    cfg_debug = SkoolConfig(downloads_dir=str(tmp_path), video_cookies_file_env=None,
+                            video_debug=True)
+    conn._download_hls("https://youtu.be/x", dest, cfg_debug, _ctx(cfg_debug), external=True)
+    assert captured[-1]["logger"]._verbose is True
+
+
 def _video_lesson(**kw):
     lesson = {"lessonId": "l1", "title": "Lesson 1", "moduleTitle": "Module 1"}
     lesson.update(kw)

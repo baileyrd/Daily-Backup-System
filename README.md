@@ -304,8 +304,17 @@ terminal — every `ctx.logger.info(...)` call was silently dropped before this
 version, since nothing configured Python logging). `js_runtimes=none (nodejs-
 wheel not installed/found)` means the `[skool]` extra wasn't reinstalled (or
 the process wasn't restarted) after upgrading — `pip install -e ".[skool]"`
-then restart `dbs serve` picks it up; a resolved path there but the same
-error means a genuinely different cause (see above).
+then restart `dbs serve` picks it up.
+
+If that line shows a resolved `js_runtimes` path AND a cookiefile, but the
+error persists anyway: set `video_debug = true` to forward yt-dlp's full
+diagnostic chain into the log — which player client it tried, and crucially
+whether an `n challenge solving failed` warning appears (the JS runtime
+resolved but the solver itself didn't run/succeed) versus no such warning at
+all (the challenge was solved and something else — expired cookies, a
+PO-token-gated client, an IP-level flag — is blocking it instead). It's off
+by default (noisy across a whole course); flip it on for one troubleshooting
+run, then back off.
 
 ## Scheduling daily backups
 

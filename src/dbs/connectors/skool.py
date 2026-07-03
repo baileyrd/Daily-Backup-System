@@ -177,6 +177,16 @@ class SkoolConfig(BaseModel):
     # does not (see yt-dlp's PO Token Guide), and a Skool-embedded video is
     # normally embed-enabled: {"youtube": {"player_client": ["web_embedded"]}}
     video_extractor_args: dict[str, dict[str, list[str]]] | None = None
+    # Forward yt-dlp's FULL internal diagnostic chain into the run log — which
+    # player client(s) it tried, whether the JS challenge solver actually ran
+    # (a "[jsc:node] Solving JS challenges..." line means yes; an "n challenge
+    # solving failed" warning means no, even with a resolved js_runtimes path)
+    # — instead of only the final exception text. Off by default: this is
+    # genuinely noisy across a whole course's worth of lessons. Flip on
+    # temporarily when "Sign in to confirm you're not a bot" persists despite
+    # valid cookies AND a resolved js_runtimes path (see the `skool:
+    # downloading ...` log line), to see WHY instead of guessing again.
+    video_debug: bool = False
     # Write a markdown note of each lesson page (url2obs-convention frontmatter,
     # body converted from Skool's editor JSON, links to the downloaded media)
     # into the lesson's folder, next to its video and resources.
@@ -832,6 +842,7 @@ class SkoolConnector(Connector):
             dest.name, external, bool(cookiefile), cookies_from_browser,
             js_runtimes or "none (nodejs-wheel not installed/found)",
         )
+        opts["logger"] = _YtdlpLogger(ctx.logger, cfg.video_debug)
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
@@ -1424,6 +1435,38 @@ def _js_runtime_opts() -> dict[str, dict[str, Any]] | None:
         return {"node": {"path": path}} if os.path.exists(path) else None
     except Exception:  # noqa: BLE001 - not installed; yt-dlp falls back to its own detection
         return None
+
+
+class _YtdlpLogger:
+    """Forwards yt-dlp's own diagnostic chain into ``ctx.logger``.
+
+    ``_ydl_opts``'s ``quiet``/``no_warnings`` only gate yt-dlp's *own*
+    screen/stderr printing — once a ``logger`` param is set instead, yt-dlp
+    forwards EVERY debug/warning/error message to it unconditionally (see
+    ``YoutubeDL.report_warning``/``to_screen``/``to_stderr``), bypassing those
+    flags entirely. Warnings/errors (an "n challenge solving failed" line,
+    auth failures) always reach ``ctx.logger.warning`` — that alone is the
+    single highest-value signal for "Sign in to confirm you're not a bot"
+    persisting despite valid cookies and a resolved ``js_runtimes`` path. The
+    full step-by-step chain (which player client was tried, whether the JS
+    solver actually ran) is genuinely noisy across a whole course, so it's
+    silent by default and only forwarded (as ``ctx.logger.info``, wired up in
+    ``_download_hls``) when ``SkoolConfig.video_debug`` is set.
+    """
+
+    def __init__(self, logger: Any, verbose: bool) -> None:
+        self._logger = logger
+        self._verbose = verbose
+
+    def debug(self, msg: str) -> None:
+        if self._verbose:
+            self._logger.info(msg)
+
+    def warning(self, msg: str) -> None:
+        self._logger.warning(msg)
+
+    def error(self, msg: str) -> None:
+        self._logger.warning(msg)  # the caller already logs/handles the raised exception
 
 
 def _parse_memberships(next_data: dict[str, Any]) -> list[dict[str, Any]]:

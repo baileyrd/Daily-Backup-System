@@ -79,6 +79,12 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 #   video_extractor_args = { youtube = { player_client = ["web_embedded"] } }
 #   Still failing (embedding disabled on that video)? A PO token provider
 #   plugin is the durable fix — see yt-dlp's PO Token Guide.
+#   Still stuck after ALL of the above (valid cookies AND a resolved
+#   js_runtimes path — check the `skool: downloading ...` log line)?
+#   video_debug = true forwards yt-dlp's full diagnostic chain (which player
+#   client was tried, whether the JS solver actually ran) into the log
+#   instead of just the final error — see WHY rather than guess again.
+# video_debug = false                # verbose yt-dlp diagnostics for a stubborn video
 # communities = ["your-community"]   # optional; OMIT to auto-detect every community you've joined
 # courses = ["your-community/Course Title"]  # optional; only these courses (title or slug;
 #                                    # "community/course" scopes it). While set, deletion
