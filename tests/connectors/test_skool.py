@@ -553,6 +553,30 @@ def test_js_runtime_opts_degrades_gracefully_without_nodejs_wheel(monkeypatch):
     assert skool_mod._js_runtime_opts() is None  # no crash, yt-dlp uses its own detection
 
 
+def test_ffmpeg_location_degrades_gracefully_without_ffmpeg_downloader(monkeypatch):
+    import sys
+
+    from dbs.connectors import skool as skool_mod
+
+    monkeypatch.setitem(sys.modules, "ffmpeg_downloader", None)  # simulate not installed
+    assert skool_mod._ffmpeg_location() is None  # no crash, yt-dlp looks on system PATH
+
+
+def test_ffmpeg_location_requires_both_binaries_actually_fetched(monkeypatch):
+    import sys
+    import types
+
+    from dbs.connectors import skool as skool_mod
+
+    fake = types.SimpleNamespace(ffmpeg_dir="/opt/ffmpeg", installed=lambda name: False)
+    monkeypatch.setitem(sys.modules, "ffmpeg_downloader", fake)
+    # Package installed but `ffdl install -y` never run — no binaries on disk yet.
+    assert skool_mod._ffmpeg_location() is None
+
+    fake.installed = lambda name: True
+    assert skool_mod._ffmpeg_location() == "/opt/ffmpeg"
+
+
 def test_fetch_rejects_undeclared_video_cookies_file_env():
     from dbs.core.errors import ConnectorConfigError
 
