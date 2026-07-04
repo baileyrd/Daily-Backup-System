@@ -1469,12 +1469,23 @@ def _retry_sleep_functions() -> dict[str, Any]:
 
 
 def _ffmpeg_location() -> str | None:
-    """Path to the auto-managed ffmpeg binary (imageio-ffmpeg), or ``None`` to
-    let yt-dlp find one on the system PATH."""
-    try:
-        import imageio_ffmpeg
+    """Directory with the auto-managed ffmpeg AND ffprobe binaries
+    (ffmpeg-downloader), or ``None`` to let yt-dlp find them on the system
+    PATH.
 
-        return imageio_ffmpeg.get_ffmpeg_exe()
+    Was ``imageio-ffmpeg`` — it only ever bundles ``ffmpeg``, never
+    ``ffprobe``, on any platform. yt-dlp's HLS duration-fixup postprocessor
+    hard-requires ``ffprobe`` specifically (no ffmpeg-based fallback), so
+    every native-quality merge logged "ffprobe not found" and silently
+    skipped it. ffmpeg-downloader ships both; run ``ffdl install -y`` once
+    to fetch them (same one-time setup as ``playwright install chromium``).
+    """
+    try:
+        import ffmpeg_downloader as ffdl
+
+        if ffdl.installed("ffmpeg") and ffdl.installed("ffprobe"):
+            return ffdl.ffmpeg_dir
+        return None
     except Exception:  # noqa: BLE001 - not installed / no binary for this OS
         return None
 

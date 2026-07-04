@@ -27,7 +27,7 @@ exports** (JSON / NDJSON / CSV / Markdown / zip archive).
 > ```bash
 > pip install -e ".[reddit]" && playwright install chromium   # Reddit (Playwright)
 > pip install -e ".[youtube]"                                  # YouTube (yt-dlp)
-> pip install -e ".[skool]" && playwright install chromium    # Skool (Playwright)
+> pip install -e ".[skool]" && playwright install chromium && ffdl install -y   # Skool (Playwright + ffmpeg/ffprobe)
 > ```
 >
 > Skool reads each community's classroom pages with your captured session,
@@ -116,7 +116,7 @@ on by default — `dbs serve`) can do the setup for you:
 | Connector | Needs | In the UI |
 |---|---|---|
 | **raindrop** | `RAINDROP_TOKEN` | set it in *API keys* |
-| **skool** | `[skool]` extra + `playwright install chromium`; a logged-in session | **Install**, then **Skool login** — opens a browser on the host, you log in and close it; the session dir + `SKOOL_SESSION_DIR` are captured for you |
+| **skool** | `[skool]` extra + `playwright install chromium` + `ffdl install -y`; a logged-in session | **Install**, then **Skool login** — opens a browser on the host, you log in and close it; the session dir + `SKOOL_SESSION_DIR` are captured for you |
 | **reddit** | `[reddit]` extra + `playwright install chromium`; a logged-in session dir | **Install**, then **Reddit login** — opens a browser on the host, you log in and close it; the session dir + `REDDIT_SESSION_DIR` are captured for you. Make sure reddit.com shows you logged in before closing (with *Continue with Google*, finish the redirect back to reddit first). The account is auto-detected from the session — `username` in the source config is optional. If runs fail with HTTP 403 even after re-capturing, set `headless = false` for the source |
 | **youtube** | `[youtube]` extra; a `cookies.txt` *or* `cookies_from_browser` | **Install**, then **YouTube login** — captures a `cookies.txt` and sets `YOUTUBE_COOKIES_FILE`; or skip capture and set `cookies_from_browser` (e.g. `chrome`) in the source config |
 

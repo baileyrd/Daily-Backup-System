@@ -45,9 +45,10 @@ Implemented: lessons' native (Mux) videos are downloaded into `downloads_dir`
 (`download_videos = true` by default, `video_quality` caps the HLS variant).
 The signed `.m3u8?token=` URL is found via the `__NEXT_DATA__`
 playbackId/token reconstruct → player-click + resource-timeline sniff →
-shadow-DOM `<video>.src` ladder; yt-dlp downloads it with ffmpeg auto-managed
-via `imageio-ffmpeg` (system PATH fallback). External Vimeo/YouTube/Loom
-links remain references. Note: the sniff ladder can only be truly verified
+shadow-DOM `<video>.src` ladder; yt-dlp downloads it with ffmpeg+ffprobe
+auto-managed via `ffmpeg-downloader` (system PATH fallback; `imageio-ffmpeg`
+was dropped — it never bundled `ffprobe`, so HLS duration-fixup silently
+failed on every merge). External Vimeo/YouTube/Loom links remain references. Note: the sniff ladder can only be truly verified
 against a real, authenticated Skool account — if a Skool player change breaks
 it, lessons still index with a "could not capture a video URL" warning.
 
