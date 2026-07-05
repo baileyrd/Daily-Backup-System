@@ -91,6 +91,14 @@ def test_passthrough_and_garbage():
     # Non-strings and empties are empty.
     assert tiptap_markdown(None) == ""
     assert tiptap_markdown("") == ""
-    assert tiptap_markdown("[v2]" + json.dumps(["not", "a", "doc"])) == (
-        "[v2]" + json.dumps(["not", "a", "doc"])
-    )
+    # A list of genuine garbage (no dicts) renders as nothing, not a crash.
+    assert tiptap_markdown("[v2]" + json.dumps(["not", "a", "doc"])) == ""
+
+
+def test_bare_block_array_without_doc_wrapper():
+    # Some lessons store "[v2][{...}, {...}]" — a bare array of block nodes,
+    # not the usual {"type": "doc", "content": [...]} wrapper. Confirmed live
+    # against a real lesson description; used to fall through to the
+    # undecodable-payload branch and dump raw JSON into the note.
+    bare_array = [_p(_t("first")), _p(_t("second"))]
+    assert tiptap_markdown("[v2]" + json.dumps(bare_array)) == "first\n\nsecond"

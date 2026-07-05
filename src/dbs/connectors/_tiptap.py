@@ -30,6 +30,8 @@ def tiptap_markdown(desc: Any) -> str:
         doc = json.loads(payload)
     except ValueError:
         return desc if not text.startswith(_V2_PREFIX) else payload
+    if isinstance(doc, list):  # bare block array, no {"type": "doc", ...} wrapper
+        return _blocks(doc).strip()
     if not isinstance(doc, dict):
         return desc
     return _blocks(doc.get("content") or []).strip()

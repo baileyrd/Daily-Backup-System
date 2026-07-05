@@ -55,7 +55,7 @@ def _write_setup(tmp_path):
         "[sources.courses]\n"
         'type = "skool"\n'
         "enabled = true\n"
-        f'downloads_dir = "{tmp_path / "downloads"}"\n',
+        f'downloads_dir = "{(tmp_path / "downloads").as_posix()}"\n',
         encoding="utf-8",
     )
     return cfg
@@ -363,8 +363,12 @@ def test_connectors_expose_setup_hints(client):
     assert "RAINDROP_TOKEN" in conns["raindrop"]["setup_hint"]
 
 
-def test_capture_ready_reflects_playwright(setup_client):
-    # Playwright isn't installed in the test env -> capture_ready is False.
+def test_capture_ready_reflects_playwright(setup_client, monkeypatch):
+    # Force the "Playwright not installed" branch regardless of whether the
+    # extra actually happens to be installed in whatever env runs this suite.
+    from dbs.web import setup as setup_mod
+
+    monkeypatch.setattr(setup_mod, "playwright_present", lambda: False)
     conns = {c["type"]: c for c in setup_client.get("/api/connectors").json()}
     assert conns["reddit"]["capture_ready"] is False
     assert conns["skool"]["capture_ready"] is False  # has auth_capture; playwright absent
@@ -422,10 +426,17 @@ def test_setup_manager_marks_failure_on_bad_command():
     assert mgr.get(job.id)["status"] == "error"
 
 
-def test_browser_capture_runner_errors_without_playwright():
-    # Playwright isn't installed in the test env -> a clear, non-crashing error.
+def test_browser_capture_runner_errors_without_playwright(monkeypatch):
+    # Force the "Playwright not installed" branch regardless of whether the
+    # extra actually happens to be installed in whatever env runs this suite.
+    # Previously relied on ambient absence: when playwright WAS installed
+    # (e.g. via the skool/reddit extras), this silently launched a real,
+    # visible, non-headless browser against the placeholder "https://e/" URL.
+    import sys
+
     from dbs.web.setup import browser_capture_runner
 
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
     runner = browser_capture_runner("browser_session", "/tmp/x", "https://e/", lambda: None)
     with pytest.raises(RuntimeError, match="Playwright"):
         runner(lambda line: None)
