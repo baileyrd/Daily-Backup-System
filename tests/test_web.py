@@ -268,7 +268,7 @@ def test_connectors_report_readiness(client):
     # native video via yt-dlp with auto-managed ffmpeg + a JS runtime.
     assert conns["skool"]["pip_requirements"] == [
         "playwright>=1.40", "yt-dlp[default]>=2026.1.29", "nodejs-wheel>=22",
-        "imageio-ffmpeg>=0.4",
+        "ffmpeg-downloader>=0.5",
     ]
     assert conns["skool"]["needs_playwright_browser"] is True
     assert conns["skool"]["auth_capture"]["kind"] == "browser_session"

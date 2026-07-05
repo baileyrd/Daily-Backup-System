@@ -152,6 +152,49 @@ def test_courses_filter_suppresses_reconcile_marker():
     assert any(isinstance(e, BackupItem) for e in events)  # items still flow
 
 
+def test_communities_filter_alone_also_suppresses_reconcile_marker():
+    # Same partial-enumeration risk as `courses`, but via `communities` only
+    # — previously only `cfg.courses` was checked, so this alone would have
+    # let a ReconcileMarker through and soft-deleted every other community.
+    cfg = SkoolConfig(downloads_dir="/dl", communities=["comm-a"])
+    conn = _connector([_community(), _course(), _lesson("les1")])
+    events = list(conn.fetch(_ctx(cfg)))
+    assert [e for e in events if isinstance(e, ReconcileMarker)] == []
+    assert any(isinstance(e, BackupItem) for e in events)
+
+
+def test_partial_enumeration_marker_suppresses_reconcile_even_unfiltered():
+    # A course whose classroom page transiently failed to load leaves its
+    # lessons out of live_ids for reasons that have nothing to do with any
+    # configured filter — a plain ReconcileMarker here would still wrongly
+    # soft-delete that course's lessons.
+    cfg = SkoolConfig(downloads_dir="/dl")  # no communities/courses filter
+    conn = _connector([_community(), {"_kind": "_partial_enumeration"}, _lesson("les1")])
+    events = list(conn.fetch(_ctx(cfg)))
+    assert [e for e in events if isinstance(e, ReconcileMarker)] == []
+    assert any(isinstance(e, BackupItem) for e in events)
+
+
+def test_discover_communities_raises_instead_of_silent_zero_item_backup(tmp_path):
+    # A degraded session that resolves the home page but never redirects to
+    # /login (so _require_login sees nothing wrong) used to just warn and
+    # return [] — completing a "successful" 0-item backup with no real
+    # diagnostic. Auto-detection finding zero communities is now loud.
+    class _NoCommunities(SkoolConnector):
+        def _load_next_data(self, page, url, ctx):
+            return {"props": {"pageProps": {}}}
+
+        def _require_login(self, page, ctx):
+            pass
+
+        def _dump_debug(self, data, downloads, name, ctx):
+            pass
+
+    conn = _NoCommunities()
+    with pytest.raises(ConnectorAuthError, match="could not auto-detect"):
+        conn._discover_communities(object(), tmp_path, _ctx())
+
+
 def test_include_kinds_filter_keeps_excluded_ids_live():
     cfg = SkoolConfig(downloads_dir="/dl", include_kinds=["lesson"])
     conn = _connector([_community(), _course(), _lesson("les1")])
@@ -670,9 +713,18 @@ class _FakeStreamCtx:
         return False
 
 
-def test_download_github_zips_fetches_dedups_and_skips_existing(tmp_path, monkeypatch):
+def _dl(tmp_path, body, rate_limited=False, saved=None, gone_this_run=None, token=None):
     from dbs.connectors import skool as skool_mod
 
+    return skool_mod._download_github_zips(
+        tmp_path, body, _ctx(), rate_limited,
+        saved if saved is not None else {},
+        gone_this_run if gone_this_run is not None else set(),
+        token,
+    )
+
+
+def test_download_github_zips_fetches_dedups_and_skips_existing(tmp_path, monkeypatch):
     calls = []
 
     def fake_stream(method, url, **kwargs):
@@ -684,34 +736,28 @@ def test_download_github_zips_fetches_dedups_and_skips_existing(tmp_path, monkey
         "See [github.com/pjeby/hot-reload](http://github.com/pjeby/hot-reload) "
         "and again https://github.com/pjeby/hot-reload for good measure."
     )
-    ok, rl = skool_mod._download_github_zips(tmp_path, body, _ctx(), False)
+    ok, rl = _dl(tmp_path, body)
     assert ok is True and rl is False
     assert calls == ["https://api.github.com/repos/pjeby/hot-reload/zipball"]  # deduped
     dest = tmp_path / "pjeby-hot-reload.zip"
     assert dest.read_bytes() == b"zip-bytes"
 
-    ok, rl = skool_mod._download_github_zips(tmp_path, body, _ctx(), False)
+    ok, rl = _dl(tmp_path, body)
     assert ok is True
     assert len(calls) == 1  # already on disk: no second request
 
 
 def test_download_github_zips_failure_is_best_effort(tmp_path, monkeypatch):
-    from dbs.connectors import skool as skool_mod
-
     def fake_stream(method, url, **kwargs):
         raise OSError("network down")
 
     monkeypatch.setattr("httpx.stream", fake_stream)
-    ok, rl = skool_mod._download_github_zips(
-        tmp_path, "https://github.com/a/b", _ctx(), False
-    )
+    ok, rl = _dl(tmp_path, "https://github.com/a/b")
     assert ok is False and rl is False
     assert not (tmp_path / "a-b.zip").exists()  # no crash, nothing half-written
 
 
 def test_download_github_zips_404_is_permanent_never_retried(tmp_path, monkeypatch):
-    from dbs.connectors import skool as skool_mod
-
     calls = []
 
     def fake_stream(method, url, **kwargs):
@@ -719,20 +765,16 @@ def test_download_github_zips_404_is_permanent_never_retried(tmp_path, monkeypat
         return _FakeStreamCtx(_FakeStreamResp(status_code=404))
 
     monkeypatch.setattr("httpx.stream", fake_stream)
-    ok, rl = skool_mod._download_github_zips(
-        tmp_path, "https://github.com/dead/repo", _ctx(), False
-    )
+    ok, rl = _dl(tmp_path, "https://github.com/dead/repo")
     assert ok is True and rl is False  # "confirmed gone" counts as resolved
     assert (tmp_path / ".dead-repo.zip.gone").exists()
 
     # Next call skips the API entirely — no second request for a known-dead repo.
-    skool_mod._download_github_zips(tmp_path, "https://github.com/dead/repo", _ctx(), False)
+    _dl(tmp_path, "https://github.com/dead/repo")
     assert calls == ["https://api.github.com/repos/dead/repo/zipball"]
 
 
 def test_download_github_zips_rate_limit_stops_the_rest_of_the_pass(tmp_path, monkeypatch):
-    from dbs.connectors import skool as skool_mod
-
     calls = []
 
     def fake_stream(method, url, **kwargs):
@@ -741,14 +783,88 @@ def test_download_github_zips_rate_limit_stops_the_rest_of_the_pass(tmp_path, mo
 
     monkeypatch.setattr("httpx.stream", fake_stream)
     body = "https://github.com/a/b and https://github.com/c/d"
-    ok, rl = skool_mod._download_github_zips(tmp_path, body, _ctx(), False)
+    ok, rl = _dl(tmp_path, body)
     assert ok is False and rl is True
     assert len(calls) == 1  # bailed after the first 403, never tried the second repo
 
     # Once rate_limited=True is threaded in, no further attempts at all.
-    ok2, rl2 = skool_mod._download_github_zips(tmp_path, body, _ctx(), True)
+    ok2, rl2 = _dl(tmp_path, body, rate_limited=True)
     assert ok2 is False and rl2 is True
     assert len(calls) == 1
+
+
+def test_download_github_zips_dedups_across_lessons_via_shared_cache(tmp_path, monkeypatch):
+    # Two lessons in different folders link the same repo — the second
+    # should get a local file copy, not a second GitHub API call.
+    calls = []
+
+    def fake_stream(method, url, **kwargs):
+        calls.append(url)
+        return _FakeStreamCtx(_FakeStreamResp())
+
+    monkeypatch.setattr("httpx.stream", fake_stream)
+    body = "https://github.com/pjeby/hot-reload"
+    saved, gone = {}, set()
+    lesson_a, lesson_b = tmp_path / "a", tmp_path / "b"
+    lesson_a.mkdir()
+    lesson_b.mkdir()
+
+    ok1, _ = _dl(lesson_a, body, saved=saved, gone_this_run=gone)
+    ok2, _ = _dl(lesson_b, body, saved=saved, gone_this_run=gone)
+    assert ok1 is True and ok2 is True
+    assert len(calls) == 1  # only the first lesson hit the network
+    assert (lesson_a / "pjeby-hot-reload.zip").read_bytes() == b"zip-bytes"
+    assert (lesson_b / "pjeby-hot-reload.zip").read_bytes() == b"zip-bytes"
+
+
+def test_download_github_zips_dedups_404_across_lessons_in_one_pass(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_stream(method, url, **kwargs):
+        calls.append(url)
+        return _FakeStreamCtx(_FakeStreamResp(status_code=404))
+
+    monkeypatch.setattr("httpx.stream", fake_stream)
+    body = "https://github.com/dead/repo"
+    saved, gone = {}, set()
+    lesson_a, lesson_b = tmp_path / "a", tmp_path / "b"
+    lesson_a.mkdir()
+    lesson_b.mkdir()
+
+    _dl(lesson_a, body, saved=saved, gone_this_run=gone)
+    _dl(lesson_b, body, saved=saved, gone_this_run=gone)
+    assert len(calls) == 1  # confirmed-gone this run: no second API call either
+    assert (lesson_a / ".dead-repo.zip.gone").exists()
+    assert (lesson_b / ".dead-repo.zip.gone").exists()
+
+
+def test_download_github_zips_sends_token_as_bearer_header(tmp_path, monkeypatch):
+    seen_headers = {}
+
+    def fake_stream(method, url, **kwargs):
+        seen_headers.update(kwargs.get("headers") or {})
+        return _FakeStreamCtx(_FakeStreamResp())
+
+    monkeypatch.setattr("httpx.stream", fake_stream)
+    _dl(tmp_path, "https://github.com/a/b", token="ghp_secret123")
+    assert seen_headers == {"Authorization": "Bearer ghp_secret123"}
+
+
+def test_download_github_zips_no_token_sends_no_auth_header(tmp_path, monkeypatch):
+    seen_headers = {"sentinel": "unset"}
+
+    def fake_stream(method, url, **kwargs):
+        seen_headers.clear()
+        seen_headers.update(kwargs.get("headers") or {})
+        return _FakeStreamCtx(_FakeStreamResp())
+
+    monkeypatch.setattr("httpx.stream", fake_stream)
+    _dl(tmp_path, "https://github.com/a/b")
+    assert seen_headers == {}
+
+
+def _note_source(lesson_id):
+    return f'source: "https://www.skool.com/g/classroom/c?md={lesson_id}"\n'
 
 
 def test_finalize_lesson_notes_resolves_cross_references(tmp_path):
@@ -756,14 +872,15 @@ def test_finalize_lesson_notes_resolves_cross_references(tmp_path):
 
     target_dir = tmp_path / "Part 1"
     target_dir.mkdir()
-    (target_dir / "Part 1.md").write_text("# Part 1\n", encoding="utf-8")
+    (target_dir / "Part 1.md").write_text(_note_source("aaaa") + "# Part 1\n", encoding="utf-8")
     _sidecar(target_dir, "aaaa", "Part 1.md")
 
     src_dir = tmp_path / "Part 2"
     src_dir.mkdir()
     note = src_dir / "Part 2.md"
     note.write_text(
-        "See https://www.skool.com/chase-ai/classroom/xyz?md=aaaa for the setup.\n",
+        _note_source("bbbb")
+        + "See https://www.skool.com/chase-ai/classroom/xyz?md=aaaa for the setup.\n",
         encoding="utf-8",
     )
     _sidecar(src_dir, "bbbb", "Part 2.md")
@@ -787,11 +904,12 @@ def test_finalize_lesson_notes_never_self_links_or_touches_unresolved(tmp_path):
     lesson_dir.mkdir()
     note = lesson_dir / "L1.md"
     original = (
-        "Self: https://www.skool.com/g/classroom/x?md=self1\n"
-        "Unknown: https://www.skool.com/g/classroom/x?md=ffff\n"
+        _note_source("5e1f0001")
+        + "Self: https://www.skool.com/g/classroom/x?md=5e1f0001\n"
+        "Unknown: https://www.skool.com/g/classroom/x?md=ffff0000\n"
     )
     note.write_text(original, encoding="utf-8")
-    _sidecar(lesson_dir, "self1", "L1.md")
+    _sidecar(lesson_dir, "5e1f0001", "L1.md")
 
     skool_mod._finalize_lesson_notes(tmp_path, _ctx(), False)
     assert note.read_text(encoding="utf-8") == original  # unchanged: no targets to link
@@ -804,11 +922,11 @@ def test_finalize_lesson_notes_repairs_stale_v2_body(tmp_path):
     lesson_dir.mkdir()
     note = lesson_dir / "L1.md"
     note.write_text(
-        '---\ntitle: "L1"\n---\n\n'
+        '---\ntitle: "L1"\n' + _note_source("1d000001") + '---\n\n'
         '[v2][{"type":"paragraph","content":[{"type":"text","text":"hello"}]}]\n',
         encoding="utf-8",
     )
-    _sidecar(lesson_dir, "id1", "L1.md")
+    _sidecar(lesson_dir, "1d000001", "L1.md")
 
     skool_mod._finalize_lesson_notes(tmp_path, _ctx(), False)
     text = note.read_text(encoding="utf-8")
@@ -822,8 +940,8 @@ def test_finalize_lesson_notes_skips_already_final_notes(tmp_path, monkeypatch):
     lesson_dir = tmp_path / "L1"
     note = lesson_dir / "L1.md"
     note.parent.mkdir(parents=True, exist_ok=True)
-    note.write_text("plain note, nothing to resolve\n", encoding="utf-8")
-    _sidecar(lesson_dir, "id1", "L1.md")
+    note.write_text(_note_source("1d000001") + "plain note, nothing to resolve\n", encoding="utf-8")
+    _sidecar(lesson_dir, "1d000001", "L1.md")
 
     calls = []
     monkeypatch.setattr(
@@ -834,6 +952,29 @@ def test_finalize_lesson_notes_skips_already_final_notes(tmp_path, monkeypatch):
 
     skool_mod._finalize_lesson_notes(tmp_path, _ctx(), False)
     assert len(calls) == 1  # second pass: lesson count unchanged, skipped entirely
+
+
+def test_finalize_lesson_notes_resolves_even_without_a_complete_sidecar(tmp_path):
+    # The target lesson's video is still failing (no .meta.json at all yet)
+    # — its note was written regardless, and its links must still resolve.
+    from dbs.connectors import skool as skool_mod
+
+    target_dir = tmp_path / "Part 1"
+    target_dir.mkdir()
+    (target_dir / "Part 1.md").write_text(_note_source("aaaa") + "# Part 1\n", encoding="utf-8")
+    # deliberately no _sidecar(...) here — the lesson isn't "complete"
+
+    src_dir = tmp_path / "Part 2"
+    src_dir.mkdir()
+    note = src_dir / "Part 2.md"
+    note.write_text(
+        _note_source("bbbb") + "See https://www.skool.com/g/classroom/x?md=aaaa\n",
+        encoding="utf-8",
+    )
+    _sidecar(src_dir, "bbbb", "Part 2.md")
+
+    skool_mod._finalize_lesson_notes(tmp_path, _ctx(), False)
+    assert "- [[Part 1]]" in note.read_text(encoding="utf-8")
 
 
 def test_fetch_rejects_undeclared_video_cookies_file_env():
@@ -1871,3 +2012,80 @@ def test_process_lesson_unexpected_error_never_kills_the_run(tmp_path, caplog):
         status, _ = _process(_Exploding(), tmp_path)
     assert status == "failed"  # degraded to a summary count, not a crash
     assert any("processing lesson" in r.message for r in caplog.records)
+
+
+def _cross_ref_next_data(course_slug=None):
+    if course_slug is None:
+        return {"props": {"pageProps": {
+            "currentGroup": {"name": "chase-ai", "metadata": {"displayName": "Chase AI+"}},
+            "allCourses": [{"id": "cid-b", "name": "course-b",
+                            "metadata": {"title": "Course B"}}],
+        }}}
+    return {"props": {"pageProps": {"course": {"children": [
+        {"course": {"id": "bbbb", "metadata": {"title": "Lesson B"}}, "children": []},
+    ]}}}}
+
+
+class _CrossRefConn(_LessonConn):
+    def _classroom_next_data(self, page, slug, ctx, course_slug=None):
+        return _cross_ref_next_data(course_slug)
+
+
+def test_fetch_cross_referenced_lessons_fetches_out_of_scope_target(tmp_path):
+    known_dir = tmp_path / "chase-ai" / "Course A" / "01 - A"
+    known_dir.mkdir(parents=True)
+    (known_dir / "01 - A.md").write_text(
+        "See https://www.skool.com/chase-ai/classroom/course-b?md=bbbb for more.\n",
+        encoding="utf-8",
+    )
+    _sidecar(known_dir, "aaaa", "01 - A.md")
+
+    conn = _CrossRefConn()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path))
+    items = list(conn._fetch_cross_referenced_lessons(object(), cfg, tmp_path, _ctx(cfg)))
+
+    assert len(items) == 1
+    assert items[0]["_course_name"] == "Course B"
+    assert items[0]["_group_name"] == "Chase AI+"
+    lesson_dir = tmp_path / "chase-ai" / "Course B" / "01 - Lesson B"
+    assert (lesson_dir / "01 - Lesson B.md").exists()  # _process_lesson actually ran
+
+
+def test_fetch_cross_referenced_lessons_skips_already_known_targets(tmp_path):
+    src_dir = tmp_path / "chase-ai" / "Course A" / "01 - A"
+    src_dir.mkdir(parents=True)
+    (src_dir / "01 - A.md").write_text(
+        "See https://www.skool.com/chase-ai/classroom/course-b?md=bbbb\n",
+        encoding="utf-8",
+    )
+    _sidecar(src_dir, "aaaa", "01 - A.md")
+    # bbbb is already downloaded (e.g. it's in-scope this run too).
+    dst_dir = tmp_path / "chase-ai" / "Course B" / "01 - Lesson B"
+    dst_dir.mkdir(parents=True)
+    _sidecar(dst_dir, "bbbb", "01 - Lesson B.md")
+
+    class _Exploding(_CrossRefConn):
+        def _classroom_next_data(self, page, slug, ctx, course_slug=None):
+            raise AssertionError("must not fetch an already-known lesson")
+
+    conn = _Exploding()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path))
+    items = list(conn._fetch_cross_referenced_lessons(object(), cfg, tmp_path, _ctx(cfg)))
+    assert items == []
+
+
+def test_fetch_cross_referenced_lessons_missing_course_is_best_effort(tmp_path, caplog):
+    known_dir = tmp_path / "chase-ai" / "Course A" / "01 - A"
+    known_dir.mkdir(parents=True)
+    (known_dir / "01 - A.md").write_text(
+        "See https://www.skool.com/chase-ai/classroom/no-such-course?md=ffff0000\n",
+        encoding="utf-8",
+    )
+    _sidecar(known_dir, "aaaa", "01 - A.md")
+
+    conn = _CrossRefConn()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path))
+    with caplog.at_level("WARNING", logger="test"):
+        items = list(conn._fetch_cross_referenced_lessons(object(), cfg, tmp_path, _ctx(cfg)))
+    assert items == []  # no crash, nothing yielded
+    assert any("not found" in r.message for r in caplog.records)
