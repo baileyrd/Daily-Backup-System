@@ -44,7 +44,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -78,11 +78,25 @@ _BASE = "https://www.skool.com"
 _LESSON_URL_RE = re.compile(
     re.escape(_BASE) + r"/[\w-]+/classroom/[\w-]+\?md=([0-9a-fA-F]+)"
 )
+# Same URL, but capturing the community + course too — enough to fetch a
+# cross-referenced lesson directly, outside whatever community/course filter
+# scoped the current run (see SkoolConnector._fetch_cross_referenced_lessons).
+_LESSON_URL_FULL_RE = re.compile(
+    re.escape(_BASE) + r"/([\w-]+)/classroom/([\w-]+)\?md=([0-9a-fA-F]+)"
+)
 _GITHUB_REPO_RE = re.compile(
     r"https?://(?:www\.)?github\.com/([\w.-]+)/([\w.-]+?)(?:\.git)?(?=[/?#)\s]|$)"
 )
 _CROSS_REF_RE = re.compile(
     r"\n?<!-- skool:cross-refs -->\n.*?\n<!-- /skool:cross-refs -->\n?", re.DOTALL,
+)
+# A note's own lessonId, from its frontmatter `source:` line — read directly
+# instead of via its lesson's .meta.json, which only exists once the WHOLE
+# lesson (video included) succeeds. A lesson stuck retrying its video
+# otherwise never gets its already-written note's links resolved.
+_NOTE_SOURCE_RE = re.compile(
+    r'^source: "' + re.escape(_BASE) + r'/[\w-]+/classroom/[\w-]+\?md=([0-9a-fA-F]+)"',
+    re.MULTILINE,
 )
 # Reads document.getElementById('__NEXT_DATA__') from the current page and
 # returns the parsed JSON (or null if the element is absent).
@@ -147,25 +161,53 @@ class SkoolConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Where downloaded resource files (and, in phase 2, videos) are written.
-    downloads_dir: str
+    downloads_dir: str = Field(
+        description="Where downloaded resource files, videos, and notes are written."
+    )
     # Community slugs (or full classroom URLs) to back up. Empty = auto-discover
     # the communities the logged-in account has joined.
-    communities: list[str] = []
+    communities: list[str] = Field(
+        default=[],
+        description="Community slugs to back up. Empty = auto-discover every "
+                     "community the logged-in account has joined.",
+    )
     # Only back up these courses (titles or Skool URL slugs, case-insensitive).
     # Prefix with a community slug to scope: "chase-ai/Claude Code Masterclass".
     # Empty = all courses. While set, enumeration is partial, so the deletion
     # sweep is skipped — nothing already backed up gets marked deleted.
-    courses: list[str] = []
-    include_kinds: list[str] = list(_KINDS)
-    checkpoint_every: int = Field(default=200, ge=1)
-    headless: bool = True
+    courses: list[str] = Field(
+        default=[],
+        description='Only back up these courses (title or slug; "community/course" '
+                     "scopes it). Empty = all courses. While set, deletion detection "
+                     "is skipped (enumeration is necessarily partial).",
+    )
+    include_kinds: list[str] = Field(
+        default=list(_KINDS),
+        description="Which item kinds to record: community, course, lesson.",
+    )
+    checkpoint_every: int = Field(
+        default=200, ge=1, description="Items processed between checkpoint saves."
+    )
+    headless: bool = Field(
+        default=True,
+        description="Run the backing browser headless. Set false if Skool blocks "
+                     "the automated browser.",
+    )
     # Download each lesson's video into downloads_dir — native (Mux) ones via
     # player capture, external ones (a YouTube/Vimeo/Loom videoLink) straight
     # through yt-dlp (installed by the [skool] extra); ffmpeg is auto-managed
     # via imageio-ffmpeg with a system-PATH fallback. Off = metadata/links only.
-    download_videos: bool = True
+    download_videos: bool = Field(
+        default=True,
+        description="Download each lesson's video (native or external via yt-dlp). "
+                     "Off = catalog metadata/links only.",
+    )
     # Cap the selected HLS variant's height (e.g. 1080, 720). 0 = best available.
-    video_quality: int = Field(default=1080, ge=0)
+    video_quality: int = Field(
+        default=1080, ge=0,
+        description="Cap the selected HLS variant's height (e.g. 1080, 720). "
+                     "0 = best available.",
+    )
     # Cookies for downloading EXTERNAL videos (a lesson's YouTube/Vimeo/Loom
     # videoLink) via yt-dlp — YouTube in particular refuses some downloads
     # without a signed-in session ("Sign in to confirm you're not a bot").
@@ -173,13 +215,23 @@ class SkoolConfig(BaseModel):
     # you've already captured YOUTUBE_COOKIES_FILE for that source it's
     # reused here automatically; set to null to send no cookies. Never used
     # for native (Mux) video — only for external links.
-    video_cookies_file_env: str | None = "YOUTUBE_COOKIES_FILE"
+    video_cookies_file_env: str | None = Field(
+        default="YOUTUBE_COOKIES_FILE",
+        description="Env var holding a cookies.txt path for EXTERNAL (YouTube/"
+                     "Vimeo/Loom) video downloads. Reuses the youtube connector's "
+                     "secret by default; set null to send no cookies.",
+    )
     # Fallback ONLY: used when video_cookies_file_env resolves to nothing.
     # Reads a local browser's cookies directly (e.g. "chrome"), no secret
     # needed — but on Windows, Chrome's "App-Bound Encryption" makes yt-dlp's
     # live read fail with "Failed to decrypt with DPAPI"; a captured cookie
     # FILE (above) sidesteps that entirely, so it always wins when both are set.
-    video_cookies_from_browser: str | None = None
+    video_cookies_from_browser: str | None = Field(
+        default=None,
+        description="Fallback for video_cookies_file_env: read cookies straight "
+                     'from a local browser (e.g. "chrome"). Often fails on Windows '
+                     "(DPAPI) — a captured cookie file always wins if both are set.",
+    )
     # Extra yt-dlp extractor-args for EXTERNAL videos, passed straight
     # through — e.g. {"youtube": {"player_client": ["web_embedded"]}} to pin
     # a specific player client. LEAVE UNSET unless you've confirmed yt-dlp's
@@ -193,7 +245,13 @@ class SkoolConfig(BaseModel):
     # missing JS runtime or missing cookies — skool-downloader, the
     # reference tool this connector ports, never restricts player_client at
     # all and needs no special handling for this error whatsoever).
-    video_extractor_args: dict[str, dict[str, list[str]]] | None = None
+    video_extractor_args: dict[str, dict[str, list[str]]] | None = Field(
+        default=None,
+        description="Extra yt-dlp extractor-args for external videos. Leave unset "
+                     "unless yt-dlp's own multi-client fallback has confirmed failed "
+                     "— pinning one player client can prevent it from ever trying "
+                     "another that would have worked.",
+    )
     # Forward yt-dlp's FULL internal diagnostic chain into the run log — which
     # player client(s) it tried, whether the JS challenge solver actually ran
     # (a "[jsc:node] Solving JS challenges..." line means yes; an "n challenge
@@ -203,19 +261,36 @@ class SkoolConfig(BaseModel):
     # temporarily when "Sign in to confirm you're not a bot" persists despite
     # valid cookies AND a resolved js_runtimes path (see the `skool:
     # downloading ...` log line), to see WHY instead of guessing again.
-    video_debug: bool = False
+    video_debug: bool = Field(
+        default=False,
+        description="Forward yt-dlp's full diagnostic chain into the run log. "
+                     "Noisy — enable only while debugging a stubborn video.",
+    )
     # Write a markdown note of each lesson page (url2obs-convention frontmatter,
     # body converted from Skool's editor JSON, links to the downloaded media)
     # into the lesson's folder, next to its video and resources.
-    write_markdown: bool = True
+    write_markdown: bool = Field(
+        default=True,
+        description="Write a markdown note of each lesson page (url2obs-style "
+                     "frontmatter + body) into the lesson's folder.",
+    )
     # Fetch a zip of every GitHub repo linked from a lesson note (best-effort;
     # skipped once a repo's zip is already on disk or confirmed gone/rate-
     # limited). On by default; set false if you don't want arbitrary
     # third-party zips landing in the backup.
-    download_github_repos: bool = True
+    download_github_repos: bool = Field(
+        default=True,
+        description="Fetch a zip of every GitHub repo linked from a lesson note. "
+                     "Set false to skip — some setups won't want arbitrary "
+                     "third-party zips landing in the backup.",
+    )
     # Name of the env var holding the path to the Playwright persistent-context
     # directory (your logged-in Skool session). Mirrors reddit's session_dir_env.
-    session_dir_env: str = "SKOOL_SESSION_DIR"
+    session_dir_env: str = Field(
+        default="SKOOL_SESSION_DIR",
+        description="Env var holding the path to your logged-in Skool browser "
+                     "session directory.",
+    )
 
 
 class SkoolConnector(Connector):
@@ -242,12 +317,12 @@ class SkoolConnector(Connector):
     # YOUTUBE_COOKIES_FILE is optional here — only read if video_cookies_file_env
     # points at it (the default) and it's actually set; external video downloads
     # simply go cookie-less otherwise.
-    secret_keys = ("SKOOL_SESSION_DIR", "YOUTUBE_COOKIES_FILE")
+    secret_keys = ("SKOOL_SESSION_DIR", "YOUTUBE_COOKIES_FILE", "GITHUB_TOKEN")
     wants_managed_http = False
     schema_version = 1
     pip_requirements = (
         "playwright>=1.40", "yt-dlp[default]>=2026.1.29", "nodejs-wheel>=22",
-        "imageio-ffmpeg>=0.4",
+        "ffmpeg-downloader>=0.5",
     )
     runtime_imports = ("playwright", "yt_dlp")
     needs_playwright_browser = True
@@ -284,8 +359,12 @@ class SkoolConnector(Connector):
         live_ids: set[str] = set()
         cursor: dict[str, Any] = {}
         seen = 0
+        partial = bool(cfg.communities or cfg.courses)
 
         for raw in self._acquire(ctx):
+            if raw.get("_kind") == "_partial_enumeration":
+                partial = True
+                continue
             item = self._to_item(raw)
             if item is None:
                 continue
@@ -301,13 +380,15 @@ class SkoolConnector(Connector):
 
         cursor["items_seen"] = seen
         yield Checkpoint(Cursor(dict(cursor)), note="final")
-        if cfg.courses:
-            # A course filter makes the walk a partial enumeration: anything
-            # outside it never shows up in live_ids, so a reconcile sweep would
-            # soft-delete every unselected course/lesson. Skip it instead.
+        if partial:
+            # A communities/courses filter — or a transient per-course fetch
+            # failure this run (see "_partial_enumeration" above) — makes the
+            # walk a partial enumeration: anything outside it never shows up
+            # in live_ids, so a reconcile sweep would soft-delete every
+            # unselected/unreached course or lesson. Skip it instead.
             ctx.logger.info(
-                "skool: `courses` filter active — deletion detection skipped "
-                "(partial enumeration)"
+                "skool: partial enumeration this run (communities/courses "
+                "filter, or a course failed to load) — deletion detection skipped"
             )
         else:
             yield ReconcileMarker(live_ids=live_ids)
@@ -348,6 +429,9 @@ class SkoolConnector(Connector):
                 try:
                     page = context.new_page()
                     yield from self._walk(page, cfg, downloads, ctx)
+                    yield from self._fetch_cross_referenced_lessons(
+                        page, cfg, downloads, ctx
+                    )
                 finally:
                     context.close()
         finally:
@@ -424,7 +508,7 @@ class SkoolConnector(Connector):
                     "__NEXT_DATA__ written under %s/_debug/ for diagnosis.",
                     slug, sorted(props.keys()), downloads,
                 )
-            community_dir = downloads / _safe(slug)
+            community_dir = downloads / _fit_dir_name(downloads, _safe(slug))
             used_course_dirs: set[str] = set()
             skipped_courses = 0
             for course in courses:
@@ -444,12 +528,19 @@ class SkoolConnector(Connector):
                     "groupName": group_name,
                 }
                 # Human-titled course dir; adopt a legacy slug-named one in place.
-                course_dir = community_dir / _course_dir_name(
-                    course, str(course_slug), used_course_dirs
+                course_dir = community_dir / _fit_dir_name(
+                    community_dir,
+                    _course_dir_name(course, str(course_slug), used_course_dirs),
                 )
                 _adopt_dir(course_dir, community_dir / _safe(str(course_slug)), ctx)
                 cdata = self._classroom_next_data(page, slug, ctx, course_slug=course_slug)
                 if cdata is None:
+                    # A transient fetch failure, not "this course has no
+                    # lessons" — its lessons are simply absent from this
+                    # run's live_ids, same shape of gap as a communities/
+                    # courses filter. Told to fetch() so it skips deletion
+                    # detection instead of reconciling against incomplete data.
+                    yield {"_kind": "_partial_enumeration"}
                     continue
                 for idx, lesson in enumerate(_parse_lessons(cdata), 1):
                     lesson["_kind"] = "lesson"
@@ -479,6 +570,117 @@ class SkoolConnector(Connector):
                 stats["unavailable"], stats["failed"], skipped_courses,
             )
 
+    def _fetch_cross_referenced_lessons(
+        self, page: Any, cfg: SkoolConfig, downloads: Path, ctx: RunContext,
+    ) -> Iterator[dict[str, Any]]:
+        """Fetch every lesson another lesson's note links to but isn't on
+        disk yet — because the current ``communities``/``courses`` filter
+        excluded its course, or a transient failure skipped it earlier in
+        this same run.
+
+        A Skool classroom URL embeds the community and course id directly
+        (``/{community}/classroom/{course_id}?md={lesson_id}``), so each one
+        can be fetched on its own, outside whatever scoped the main crawl —
+        unlike ``_finalize_lesson_notes`` (filesystem-only, runs after the
+        browser closes), this needs the live page and so runs here instead,
+        right after the normal crawl and before the context closes.
+        """
+        if not downloads.exists():
+            return
+        known: set[str] = set()
+        wanted: dict[str, tuple[str, str]] = {}  # lessonId -> (community, course_id)
+        for meta_path in downloads.rglob(".meta.json"):
+            meta = _load_sidecar(meta_path) or {}
+            lesson_id = meta.get("lessonId")
+            if lesson_id:
+                known.add(str(lesson_id))
+            note = meta.get("note")
+            if not note:
+                continue
+            try:
+                text = (meta_path.parent / note).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for m in _LESSON_URL_FULL_RE.finditer(text):
+                community, course_id, lid = m.group(1), m.group(2), m.group(3)
+                wanted.setdefault(lid, (community, course_id))
+
+        for lesson_id, (community, course_id) in wanted.items():
+            if lesson_id in known:
+                continue
+            try:
+                lesson = self._fetch_one_cross_referenced_lesson(
+                    page, community, course_id, lesson_id, downloads, cfg, ctx,
+                )
+            except (ConnectorAuthError, ConnectorConfigError):
+                raise  # operator problems abort the run, as everywhere else
+            except Exception as exc:  # noqa: BLE001 - one bad cross-ref must not kill the run
+                ctx.logger.warning(
+                    "skool: fetching cross-referenced lesson %s (%s/%s) failed: %r",
+                    lesson_id, community, course_id, exc,
+                )
+                continue
+            if lesson is not None:
+                known.add(lesson_id)
+                yield lesson
+
+    def _fetch_one_cross_referenced_lesson(
+        self, page: Any, community: str, course_id: str, lesson_id: str,
+        downloads: Path, cfg: SkoolConfig, ctx: RunContext,
+    ) -> dict[str, Any] | None:
+        data = self._classroom_next_data(page, community, ctx)
+        if data is None:
+            return None
+        course = next(
+            (c for c in _parse_courses(data)
+             if str(c.get("slug") or c.get("id")) == course_id),
+            None,
+        )
+        if course is None:
+            ctx.logger.warning(
+                "skool: cross-referenced course %s/%s not found (no access, "
+                "or moved)", community, course_id,
+            )
+            return None
+        cdata = self._classroom_next_data(page, community, ctx, course_slug=course_id)
+        if cdata is None:
+            return None
+        hit = next(
+            ((i, lesson) for i, lesson in enumerate(_parse_lessons(cdata), 1)
+             if str(lesson.get("lessonId")) == lesson_id),
+            None,
+        )
+        if hit is None:
+            ctx.logger.warning(
+                "skool: cross-referenced lesson %s not found in %s/%s (moved "
+                "or deleted?)", lesson_id, community, course_id,
+            )
+            return None
+        idx, lesson = hit
+        props = (data.get("props") or {}).get("pageProps") or {}
+        render = props.get("renderData") or {}
+        group = props.get("currentGroup") or render.get("currentGroup") or {}
+        lesson["_kind"] = "lesson"
+        lesson["_group_name"] = _group_name(group) or community
+        lesson["_course_name"] = course.get("title") or course_id
+
+        community_dir = downloads / _fit_dir_name(downloads, _safe(community))
+        used = (
+            {p.name for p in community_dir.iterdir() if p.is_dir()}
+            if community_dir.exists() else set()
+        )
+        course_dir = community_dir / _fit_dir_name(
+            community_dir, _course_dir_name(course, course_id, used)
+        )
+        lesson_dir = course_dir / _fit_dir_name(course_dir, _lesson_dir_name(idx, lesson))
+        ctx.logger.info(
+            "skool: fetching cross-referenced lesson %r (%s/%s), outside the "
+            "current communities/courses filter",
+            lesson.get("title"), community, course_id,
+        )
+        self._process_lesson(page, lesson, lesson_dir, community, course_id, cfg, ctx)
+        return lesson
+
     # -- browser helpers (thin; not unit-tested) ----------------------------
 
     def _discover_communities(self, page: Any, downloads: Path, ctx: RunContext) -> list[str]:
@@ -493,13 +695,17 @@ class SkoolConnector(Connector):
         if not members:
             props = ((data or {}).get("props") or {}).get("pageProps") or {}
             self._dump_debug(data, downloads, "home", ctx)
-            ctx.logger.warning(
-                "skool: could not auto-detect any joined communities. pageProps "
-                "keys seen: %s. Raw __NEXT_DATA__ written under %s/_debug/ for "
-                "diagnosis. You can also set `communities` explicitly.",
-                sorted(props.keys()), downloads,
+            # _require_login only catches a redirect to /login — a session
+            # that's degraded some *other* way (still resolves the home page,
+            # but with no self.allGroups) would otherwise silently "succeed"
+            # with a 0-item backup instead of surfacing the real problem.
+            raise ConnectorAuthError(
+                "skool: could not auto-detect any joined communities — pageProps "
+                f"keys seen: {sorted(props.keys())}. Raw __NEXT_DATA__ written "
+                f"under {downloads}/_debug/ for diagnosis. If the session is "
+                "actually fine and the account has joined communities, set "
+                "`communities` explicitly instead of relying on auto-detection."
             )
-            return []
         ctx.logger.info(
             "skool: discovered %d joined communit%s: %s",
             len(members), "y" if len(members) == 1 else "ies",
@@ -1087,9 +1293,9 @@ def _group_name(group: dict[str, Any]) -> str | None:
 
 def _deep_find(obj: Any, key: str) -> Any:
     """First value stored under ``key`` anywhere in a nested dict/list (BFS)."""
-    queue: list[Any] = [obj]
+    queue: deque[Any] = deque([obj])  # list.pop(0) is O(n); this stays O(1)
     while queue:
-        cur = queue.pop(0)
+        cur = queue.popleft()
         if isinstance(cur, dict):
             if key in cur:
                 return cur[key]
@@ -1439,6 +1645,8 @@ def _repair_v2_bodies(text: str) -> str:
 
 def _download_github_zips(
     lesson_dir: Path, body: str, ctx: RunContext, rate_limited: bool,
+    saved: dict[tuple[str, str], Path], gone_this_run: set[tuple[str, str]],
+    token: str | None,
 ) -> tuple[bool, bool]:
     """Best-effort zip download for every GitHub repo linked from a note body.
 
@@ -1448,25 +1656,57 @@ def _download_github_zips(
     runs. ``rate_limited`` short-circuits every further attempt for the rest
     of this pass once GitHub's per-IP quota is confirmed exhausted — the
     quota is shared across the whole run, not per-repo, so there's no point
-    burning through every remaining link once it's gone.
+    burning through every remaining link once it's gone. ``token`` (from the
+    optional ``GITHUB_TOKEN`` secret) raises that quota from 60/hr to
+    5000/hr when set — this connector's own live runs have hit the
+    unauthenticated limit mid-pass more than once.
+
+    ``saved`` caches the first successful download's path per (owner, repo)
+    across the whole ``_finalize_lesson_notes`` pass — the same repo linked
+    from N lessons used to mean N separate downloads (N GitHub API calls,
+    the exact scarce resource rate-limiting already made obvious); now only
+    the first lesson hits the network, the rest get a local file copy.
     """
     repos = dict.fromkeys(_GITHUB_REPO_RE.findall(body))  # de-dup, keep order
     if not repos:
         return True, rate_limited
     if rate_limited:
         return False, rate_limited
+    import shutil
+
     import httpx
 
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     all_saved = True
     for owner, repo in repos:
         dest = lesson_dir / f"{owner}-{repo}.zip"
         gone = lesson_dir / f".{owner}-{repo}.zip.gone"
-        if dest.exists() or gone.exists():
+        if gone.exists():
+            continue
+        if (owner, repo) in gone_this_run:
+            try:
+                gone.write_text("", encoding="utf-8")
+            except OSError:
+                pass
+            continue
+        if dest.exists():
+            continue
+        cached = saved.get((owner, repo))
+        if cached is not None and cached.exists():
+            try:
+                shutil.copyfile(cached, dest)
+            except OSError as exc:
+                ctx.logger.warning(
+                    "skool: could not copy cached GitHub zip to %s: %s", dest, exc)
+                all_saved = False
             continue
         url = f"https://api.github.com/repos/{owner}/{repo}/zipball"
         try:
-            with httpx.stream("GET", url, follow_redirects=True, timeout=60) as resp:
+            with httpx.stream(
+                "GET", url, follow_redirects=True, timeout=60, headers=headers
+            ) as resp:
                 if resp.status_code == 404:
+                    gone_this_run.add((owner, repo))
                     try:
                         gone.write_text("", encoding="utf-8")
                     except OSError:
@@ -1488,6 +1728,7 @@ def _download_github_zips(
                 with dest.open("wb") as f:
                     for chunk in resp.iter_bytes():
                         f.write(chunk)
+                saved[(owner, repo)] = dest
         except Exception as exc:  # noqa: BLE001 - best-effort, retried next run
             ctx.logger.warning(
                 "skool: could not download GitHub repo %s/%s: %s", owner, repo, exc)
@@ -1507,10 +1748,18 @@ def _finalize_lesson_notes(downloads: Path, ctx: RunContext, download_repos: boo
       - a GitHub repo link -> fetch a zip of the repo alongside the note.
       - another lesson's classroom link -> that lesson may not exist locally
         yet at write time (crawl order isn't guaranteed, and it can live in
-        a different course), so cross-references are resolved here instead,
-        against every ``.meta.json`` sidecar found on disk.
+        a different course), so cross-references are resolved here instead.
     Never mutates a note's own prose — only regenerates a delimited block at
     the end, so repeat runs are idempotent instead of appending duplicates.
+
+    Discovers notes directly (``*.md``, ``lessonId`` read from each note's
+    own frontmatter via ``_NOTE_SOURCE_RE``) rather than via ``.meta.json`` —
+    that sidecar only exists once the WHOLE lesson (video included)
+    succeeds, so a lesson stuck retrying its video would otherwise never get
+    its already-written note's links resolved. The skip-optimization below
+    still needs a real, matching sidecar to cache into; a lesson lacking one
+    just gets rechecked every run instead — cheap, and self-limiting to
+    lessons genuinely stuck failing.
 
     A note is skipped entirely once its sidecar's ``links_final_at`` matches
     the current total lesson count: GitHub links never need re-checking once
@@ -1520,22 +1769,29 @@ def _finalize_lesson_notes(downloads: Path, ctx: RunContext, download_repos: boo
     """
     if not downloads.exists():
         return
-    metas = list(downloads.rglob(".meta.json"))
     index: dict[str, str] = {}
-    for meta_path in metas:
-        meta = _load_sidecar(meta_path) or {}
-        lesson_id, note = meta.get("lessonId"), meta.get("note")
-        if lesson_id and note:
-            index[str(lesson_id)] = (meta_path.parent / note).stem
+    lesson_ids: dict[Path, str] = {}
+    for note_path in downloads.rglob("*.md"):
+        try:
+            text = note_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        m = _NOTE_SOURCE_RE.search(text)
+        if m:
+            lesson_ids[note_path] = m.group(1)
+            index[m.group(1)] = note_path.stem
     lesson_count = len(index)
 
     rate_limited = False
-    for meta_path in metas:
+    saved_repos: dict[tuple[str, str], Path] = {}
+    gone_repos: set[tuple[str, str]] = set()
+    github_token = ctx.secrets.get_optional("GITHUB_TOKEN") if download_repos else None
+    for note_path in lesson_ids:
+        meta_path = note_path.parent / ".meta.json"
         meta = _load_sidecar(meta_path) or {}
-        note = meta.get("note")
-        if not note or meta.get("links_final_at") == lesson_count:
+        has_sidecar = meta.get("note") == note_path.name
+        if has_sidecar and meta.get("links_final_at") == lesson_count:
             continue
-        note_path = meta_path.parent / note
         try:
             original = note_path.read_text(encoding="utf-8")
         except OSError:
@@ -1546,7 +1802,8 @@ def _finalize_lesson_notes(downloads: Path, ctx: RunContext, download_repos: boo
         github_ok = True
         if download_repos:
             github_ok, rate_limited = _download_github_zips(
-                note_path.parent, base, ctx, rate_limited,
+                note_path.parent, base, ctx, rate_limited, saved_repos, gone_repos,
+                github_token,
             )
 
         found_ids = dict.fromkeys(_LESSON_URL_RE.findall(base))
@@ -1566,7 +1823,7 @@ def _finalize_lesson_notes(downloads: Path, ctx: RunContext, download_repos: boo
             except OSError as exc:
                 ctx.logger.warning("skool: could not update %s: %s", note_path, exc)
                 continue
-        if github_ok and refs_resolved:
+        if github_ok and refs_resolved and has_sidecar:
             meta["links_final_at"] = lesson_count
             _write_sidecar(meta_path, meta, ctx)
 
