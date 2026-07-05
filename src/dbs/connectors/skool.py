@@ -71,6 +71,18 @@ from ..core import (
 
 _KINDS = ("community", "course", "lesson")
 _BASE = "https://www.skool.com"
+# A lesson's description can link to another lesson's classroom page (e.g.
+# "see Part 1 here") or to a GitHub repo (e.g. a companion plugin). Matched
+# against the rendered note body, not the raw TipTap JSON.
+_LESSON_URL_RE = re.compile(
+    re.escape(_BASE) + r"/[\w-]+/classroom/[\w-]+\?md=([0-9a-fA-F]+)"
+)
+_GITHUB_REPO_RE = re.compile(
+    r"https?://(?:www\.)?github\.com/([\w.-]+)/([\w.-]+?)(?:\.git)?(?=[/?#)\s]|$)"
+)
+_CROSS_REF_RE = re.compile(
+    r"\n?<!-- skool:cross-refs -->\n.*?\n<!-- /skool:cross-refs -->\n?", re.DOTALL,
+)
 # Reads document.getElementById('__NEXT_DATA__') from the current page and
 # returns the parsed JSON (or null if the element is absent).
 _NEXT_DATA_JS = (
@@ -331,6 +343,8 @@ class SkoolConnector(Connector):
                 yield from self._walk(page, cfg, downloads, ctx)
             finally:
                 context.close()
+
+        _finalize_lesson_notes(downloads, ctx)
 
     @staticmethod
     def _launch_context(pw: Any, cfg: SkoolConfig, session_dir: Path) -> Any:
@@ -1344,6 +1358,88 @@ def _write_lesson_note(
                            lesson_dir, exc)
         return False
     return True
+
+
+def _download_github_zips(lesson_dir: Path, body: str, ctx: RunContext) -> None:
+    """Best-effort zip download for every GitHub repo linked from a note body."""
+    repos = dict.fromkeys(_GITHUB_REPO_RE.findall(body))  # de-dup, keep order
+    if not repos:
+        return
+    import httpx
+
+    for owner, repo in repos:
+        dest = lesson_dir / f"{owner}-{repo}.zip"
+        if dest.exists():
+            continue
+        try:
+            resp = httpx.get(
+                f"https://api.github.com/repos/{owner}/{repo}/zipball",
+                follow_redirects=True, timeout=60,
+            )
+            resp.raise_for_status()
+        except Exception as exc:  # noqa: BLE001 - best-effort, retried next run
+            ctx.logger.warning(
+                "skool: could not download GitHub repo %s/%s: %s", owner, repo, exc)
+            continue
+        try:
+            dest.write_bytes(resp.content)
+        except OSError as exc:
+            ctx.logger.warning("skool: could not save GitHub repo zip %s: %s", dest, exc)
+
+
+def _finalize_lesson_notes(downloads: Path, ctx: RunContext) -> None:
+    """Whole-tree, idempotent pass run once at the end of every backup.
+
+    Two things a lesson's rendered note can reference that the per-lesson
+    fast path (skipped entirely once a lesson's sidecar is "complete") never
+    revisits on later runs:
+      - a GitHub repo link -> fetch a zip of the repo alongside the note.
+      - another lesson's classroom link -> that lesson may not exist locally
+        yet at write time (crawl order isn't guaranteed, and it can live in
+        a different course), so cross-references are resolved here instead,
+        against every ``.meta.json`` sidecar found on disk.
+    Never mutates a note's own prose — only regenerates a delimited block at
+    the end, so repeat runs are idempotent instead of appending duplicates.
+    """
+    if not downloads.exists():
+        return
+    index: dict[str, str] = {}
+    for meta_path in downloads.rglob(".meta.json"):
+        meta = _load_sidecar(meta_path) or {}
+        lesson_id, note = meta.get("lessonId"), meta.get("note")
+        if lesson_id and note:
+            index[str(lesson_id)] = (meta_path.parent / note).stem
+
+    for meta_path in downloads.rglob(".meta.json"):
+        meta = _load_sidecar(meta_path) or {}
+        note = meta.get("note")
+        if not note:
+            continue
+        note_path = meta_path.parent / note
+        try:
+            text = note_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        base = _CROSS_REF_RE.sub("", text).rstrip("\n")
+
+        _download_github_zips(note_path.parent, base, ctx)
+
+        targets = dict.fromkeys(
+            index[m] for m in _LESSON_URL_RE.findall(base) if m in index
+        )
+        targets.pop(note_path.stem, None)  # never self-link
+        new_text = base + "\n"
+        if targets:
+            block = "\n".join(f"- [[{t}]]" for t in targets)
+            new_text += (
+                f"\n<!-- skool:cross-refs -->\n## Related lessons\n{block}\n"
+                f"<!-- /skool:cross-refs -->\n"
+            )
+        if new_text != text:
+            try:
+                note_path.write_text(new_text, encoding="utf-8")
+            except OSError as exc:
+                ctx.logger.warning("skool: could not update %s: %s", note_path, exc)
 
 
 def _load_sidecar(path: Path) -> dict[str, Any] | None:

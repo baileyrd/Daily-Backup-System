@@ -9,6 +9,8 @@ exercised through fabricated blobs and a fake page (mirroring reddit's
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from dbs.core.engine import Engine
@@ -575,6 +577,99 @@ def test_ffmpeg_location_requires_both_binaries_actually_fetched(monkeypatch):
 
     fake.installed = lambda name: True
     assert skool_mod._ffmpeg_location() == "/opt/ffmpeg"
+
+
+def _sidecar(lesson_dir, lesson_id, note_name):
+    lesson_dir.mkdir(parents=True, exist_ok=True)
+    (lesson_dir / ".meta.json").write_text(
+        json.dumps({"lessonId": lesson_id, "note": note_name}), encoding="utf-8"
+    )
+
+
+def test_download_github_zips_fetches_dedups_and_skips_existing(tmp_path, monkeypatch):
+    from dbs.connectors import skool as skool_mod
+
+    calls = []
+
+    class _Resp:
+        content = b"zip-bytes"
+
+        def raise_for_status(self):
+            pass
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        return _Resp()
+
+    monkeypatch.setattr("httpx.get", fake_get)
+    body = (
+        "See [github.com/pjeby/hot-reload](http://github.com/pjeby/hot-reload) "
+        "and again https://github.com/pjeby/hot-reload for good measure."
+    )
+    skool_mod._download_github_zips(tmp_path, body, _ctx())
+    assert calls == ["https://api.github.com/repos/pjeby/hot-reload/zipball"]  # deduped
+    dest = tmp_path / "pjeby-hot-reload.zip"
+    assert dest.read_bytes() == b"zip-bytes"
+
+    skool_mod._download_github_zips(tmp_path, body, _ctx())
+    assert len(calls) == 1  # already on disk: no second request
+
+
+def test_download_github_zips_failure_is_best_effort(tmp_path, monkeypatch):
+    from dbs.connectors import skool as skool_mod
+
+    def fake_get(url, **kwargs):
+        raise OSError("network down")
+
+    monkeypatch.setattr("httpx.get", fake_get)
+    skool_mod._download_github_zips(tmp_path, "https://github.com/a/b", _ctx())
+    assert not (tmp_path / "a-b.zip").exists()  # no crash, nothing half-written
+
+
+def test_finalize_lesson_notes_resolves_cross_references(tmp_path):
+    from dbs.connectors import skool as skool_mod
+
+    target_dir = tmp_path / "Part 1"
+    target_dir.mkdir()
+    (target_dir / "Part 1.md").write_text("# Part 1\n", encoding="utf-8")
+    _sidecar(target_dir, "aaaa", "Part 1.md")
+
+    src_dir = tmp_path / "Part 2"
+    src_dir.mkdir()
+    note = src_dir / "Part 2.md"
+    note.write_text(
+        "See https://www.skool.com/chase-ai/classroom/xyz?md=aaaa for the setup.\n",
+        encoding="utf-8",
+    )
+    _sidecar(src_dir, "bbbb", "Part 2.md")
+
+    skool_mod._finalize_lesson_notes(tmp_path, _ctx())
+    text = note.read_text(encoding="utf-8")
+    assert "## Related lessons" in text
+    assert "- [[Part 1]]" in text
+
+    # Re-running is idempotent: no duplicate block, no growth.
+    skool_mod._finalize_lesson_notes(tmp_path, _ctx())
+    text2 = note.read_text(encoding="utf-8")
+    assert text2 == text
+    assert text2.count("## Related lessons") == 1
+
+
+def test_finalize_lesson_notes_never_self_links_or_touches_unresolved(tmp_path):
+    from dbs.connectors import skool as skool_mod
+
+    lesson_dir = tmp_path / "L1"
+    lesson_dir.mkdir()
+    note = lesson_dir / "L1.md"
+    original = (
+        "Self: https://www.skool.com/g/classroom/x?md=self1\n"
+        "Unknown: https://www.skool.com/g/classroom/x?md=ffff\n"
+    )
+    note.write_text(original, encoding="utf-8")
+    _sidecar(lesson_dir, "self1", "L1.md")
+
+    skool_mod._finalize_lesson_notes(tmp_path, _ctx())
+    assert note.read_text(encoding="utf-8") == original  # unchanged: no targets to link
 
 
 def test_fetch_rejects_undeclared_video_cookies_file_env():
