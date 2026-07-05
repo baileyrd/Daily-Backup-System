@@ -10,6 +10,7 @@ exercised through fabricated blobs and a fake page (mirroring reddit's
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -314,6 +315,26 @@ def test_lesson_dir_name_index_prefix_and_fallback():
     assert _lesson_dir_name(3, {"lessonId": "fffacde8"}) == "fffacde8"  # untitled
 
 
+def test_fit_dir_name_leaves_short_names_alone():
+    from dbs.connectors.skool import _fit_dir_name
+
+    base = Path("C:/Users/me/skool-backup/community/course")
+    assert _fit_dir_name(base, "01 - Short Title") == "01 - Short Title"
+
+
+def test_fit_dir_name_truncates_and_disambiguates_past_max_path():
+    from dbs.connectors.skool import _fit_dir_name
+
+    base = Path("C:/Users/me/skool-backup/community/course")
+    long_a = "01 - " + "A" * 300
+    long_b = "01 - " + "A" * 299 + "B"  # differs only in the very last char
+
+    fitted_a = _fit_dir_name(base, long_a)
+    fitted_b = _fit_dir_name(base, long_b)
+    assert len(str(base / fitted_a)) <= 240
+    assert fitted_a != fitted_b  # truncating naively would collide the two
+
+
 # --- auth / resource-fetch seam (fake page) --------------------------------
 
 
@@ -421,6 +442,41 @@ def test_resolve_download_url_success_and_refusal():
     refused = _FakePage(download_urls={"f1": {"success": False, "error": "HTTP 403"}})
     assert conn._resolve_download_url(refused, "f1", _ctx()) is None
     assert conn._resolve_download_url(_FakePage(), "unknown", _ctx()) is None
+
+
+def test_fetch_bytes_with_retries_recovers_from_transient_failures(monkeypatch):
+    import base64
+    import time
+
+    conn = SkoolConnector()
+    calls = {"n": 0}
+
+    class _FlakyPage:
+        def evaluate(self, js, arg=None):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return {"status": 500}
+            return {"status": 200, "b64": base64.b64encode(b"ok").decode()}
+
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    data = conn._fetch_bytes_with_retries(_FlakyPage(), "https://x/f", _ctx())
+    assert data == b"ok" and calls["n"] == 3  # succeeded on the 3rd attempt
+
+
+def test_fetch_bytes_with_retries_gives_up_after_max_attempts(monkeypatch):
+    import time
+
+    conn = SkoolConnector()
+    calls = {"n": 0}
+
+    class _AlwaysFailsPage:
+        def evaluate(self, js, arg=None):
+            calls["n"] += 1
+            return {"status": 500}
+
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    data = conn._fetch_bytes_with_retries(_AlwaysFailsPage(), "https://x/f", _ctx(), attempts=2)
+    assert data is None and calls["n"] == 2  # no more than the attempt cap
     assert conn._resolve_download_url(object(), "f1", _ctx()) is None  # evaluate blows up
 
 
@@ -508,7 +564,7 @@ def test_ydl_opts_matches_skool_downloader_invocation(tmp_path):
     assert opts["http_headers"]["Referer"] == "https://www.skool.com/"
     assert opts["http_headers"]["User-Agent"] == (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     )
     assert opts["merge_output_format"] == "mp4"
     assert opts["concurrent_fragment_downloads"] == 8
@@ -586,44 +642,113 @@ def _sidecar(lesson_dir, lesson_id, note_name):
     )
 
 
+class _FakeStreamResp:
+    def __init__(self, status_code=200, chunks=(b"zip-bytes",), body=b""):
+        self.status_code = status_code
+        self._chunks = chunks
+        self._body = body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def iter_bytes(self):
+        yield from self._chunks
+
+    def read(self):
+        return self._body
+
+
+class _FakeStreamCtx:
+    def __init__(self, resp):
+        self._resp = resp
+
+    def __enter__(self):
+        return self._resp
+
+    def __exit__(self, *exc_info):
+        return False
+
+
 def test_download_github_zips_fetches_dedups_and_skips_existing(tmp_path, monkeypatch):
     from dbs.connectors import skool as skool_mod
 
     calls = []
 
-    class _Resp:
-        content = b"zip-bytes"
-
-        def raise_for_status(self):
-            pass
-
-    def fake_get(url, **kwargs):
+    def fake_stream(method, url, **kwargs):
         calls.append(url)
-        return _Resp()
+        return _FakeStreamCtx(_FakeStreamResp())
 
-    monkeypatch.setattr("httpx.get", fake_get)
+    monkeypatch.setattr("httpx.stream", fake_stream)
     body = (
         "See [github.com/pjeby/hot-reload](http://github.com/pjeby/hot-reload) "
         "and again https://github.com/pjeby/hot-reload for good measure."
     )
-    skool_mod._download_github_zips(tmp_path, body, _ctx())
+    ok, rl = skool_mod._download_github_zips(tmp_path, body, _ctx(), False)
+    assert ok is True and rl is False
     assert calls == ["https://api.github.com/repos/pjeby/hot-reload/zipball"]  # deduped
     dest = tmp_path / "pjeby-hot-reload.zip"
     assert dest.read_bytes() == b"zip-bytes"
 
-    skool_mod._download_github_zips(tmp_path, body, _ctx())
+    ok, rl = skool_mod._download_github_zips(tmp_path, body, _ctx(), False)
+    assert ok is True
     assert len(calls) == 1  # already on disk: no second request
 
 
 def test_download_github_zips_failure_is_best_effort(tmp_path, monkeypatch):
     from dbs.connectors import skool as skool_mod
 
-    def fake_get(url, **kwargs):
+    def fake_stream(method, url, **kwargs):
         raise OSError("network down")
 
-    monkeypatch.setattr("httpx.get", fake_get)
-    skool_mod._download_github_zips(tmp_path, "https://github.com/a/b", _ctx())
+    monkeypatch.setattr("httpx.stream", fake_stream)
+    ok, rl = skool_mod._download_github_zips(
+        tmp_path, "https://github.com/a/b", _ctx(), False
+    )
+    assert ok is False and rl is False
     assert not (tmp_path / "a-b.zip").exists()  # no crash, nothing half-written
+
+
+def test_download_github_zips_404_is_permanent_never_retried(tmp_path, monkeypatch):
+    from dbs.connectors import skool as skool_mod
+
+    calls = []
+
+    def fake_stream(method, url, **kwargs):
+        calls.append(url)
+        return _FakeStreamCtx(_FakeStreamResp(status_code=404))
+
+    monkeypatch.setattr("httpx.stream", fake_stream)
+    ok, rl = skool_mod._download_github_zips(
+        tmp_path, "https://github.com/dead/repo", _ctx(), False
+    )
+    assert ok is True and rl is False  # "confirmed gone" counts as resolved
+    assert (tmp_path / ".dead-repo.zip.gone").exists()
+
+    # Next call skips the API entirely — no second request for a known-dead repo.
+    skool_mod._download_github_zips(tmp_path, "https://github.com/dead/repo", _ctx(), False)
+    assert calls == ["https://api.github.com/repos/dead/repo/zipball"]
+
+
+def test_download_github_zips_rate_limit_stops_the_rest_of_the_pass(tmp_path, monkeypatch):
+    from dbs.connectors import skool as skool_mod
+
+    calls = []
+
+    def fake_stream(method, url, **kwargs):
+        calls.append(url)
+        return _FakeStreamCtx(_FakeStreamResp(status_code=403, body=b"API rate limit exceeded"))
+
+    monkeypatch.setattr("httpx.stream", fake_stream)
+    body = "https://github.com/a/b and https://github.com/c/d"
+    ok, rl = skool_mod._download_github_zips(tmp_path, body, _ctx(), False)
+    assert ok is False and rl is True
+    assert len(calls) == 1  # bailed after the first 403, never tried the second repo
+
+    # Once rate_limited=True is threaded in, no further attempts at all.
+    ok2, rl2 = skool_mod._download_github_zips(tmp_path, body, _ctx(), True)
+    assert ok2 is False and rl2 is True
+    assert len(calls) == 1
 
 
 def test_finalize_lesson_notes_resolves_cross_references(tmp_path):
@@ -643,13 +768,13 @@ def test_finalize_lesson_notes_resolves_cross_references(tmp_path):
     )
     _sidecar(src_dir, "bbbb", "Part 2.md")
 
-    skool_mod._finalize_lesson_notes(tmp_path, _ctx())
+    skool_mod._finalize_lesson_notes(tmp_path, _ctx(), False)
     text = note.read_text(encoding="utf-8")
     assert "## Related lessons" in text
     assert "- [[Part 1]]" in text
 
     # Re-running is idempotent: no duplicate block, no growth.
-    skool_mod._finalize_lesson_notes(tmp_path, _ctx())
+    skool_mod._finalize_lesson_notes(tmp_path, _ctx(), False)
     text2 = note.read_text(encoding="utf-8")
     assert text2 == text
     assert text2.count("## Related lessons") == 1
@@ -668,8 +793,47 @@ def test_finalize_lesson_notes_never_self_links_or_touches_unresolved(tmp_path):
     note.write_text(original, encoding="utf-8")
     _sidecar(lesson_dir, "self1", "L1.md")
 
-    skool_mod._finalize_lesson_notes(tmp_path, _ctx())
+    skool_mod._finalize_lesson_notes(tmp_path, _ctx(), False)
     assert note.read_text(encoding="utf-8") == original  # unchanged: no targets to link
+
+
+def test_finalize_lesson_notes_repairs_stale_v2_body(tmp_path):
+    from dbs.connectors import skool as skool_mod
+
+    lesson_dir = tmp_path / "L1"
+    lesson_dir.mkdir()
+    note = lesson_dir / "L1.md"
+    note.write_text(
+        '---\ntitle: "L1"\n---\n\n'
+        '[v2][{"type":"paragraph","content":[{"type":"text","text":"hello"}]}]\n',
+        encoding="utf-8",
+    )
+    _sidecar(lesson_dir, "id1", "L1.md")
+
+    skool_mod._finalize_lesson_notes(tmp_path, _ctx(), False)
+    text = note.read_text(encoding="utf-8")
+    assert "[v2]" not in text
+    assert "hello" in text
+
+
+def test_finalize_lesson_notes_skips_already_final_notes(tmp_path, monkeypatch):
+    from dbs.connectors import skool as skool_mod
+
+    lesson_dir = tmp_path / "L1"
+    note = lesson_dir / "L1.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("plain note, nothing to resolve\n", encoding="utf-8")
+    _sidecar(lesson_dir, "id1", "L1.md")
+
+    calls = []
+    monkeypatch.setattr(
+        skool_mod, "_repair_v2_bodies", lambda text: calls.append(1) or text
+    )
+    skool_mod._finalize_lesson_notes(tmp_path, _ctx(), False)
+    assert len(calls) == 1  # first pass: processed once, then marked final
+
+    skool_mod._finalize_lesson_notes(tmp_path, _ctx(), False)
+    assert len(calls) == 1  # second pass: lesson count unchanged, skipped entirely
 
 
 def test_fetch_rejects_undeclared_video_cookies_file_env():

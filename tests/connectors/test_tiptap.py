@@ -33,6 +33,13 @@ def test_paragraphs_headings_and_marks():
     )
 
 
+def test_link_text_with_brackets_is_escaped():
+    # An unescaped "]" in the link text closes the markdown link early and
+    # mangles everything after it.
+    desc = _doc(_p(_t("See [this]", {"type": "link", "attrs": {"href": "https://x.dev"}})))
+    assert tiptap_markdown(desc) == "[See [this\\]](https://x.dev)"
+
+
 def test_lists_code_blocks_and_quotes():
     desc = _doc(
         {"type": "bulletList", "content": [
