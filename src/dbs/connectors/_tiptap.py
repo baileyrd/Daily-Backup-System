@@ -15,6 +15,12 @@ from typing import Any
 _V2_PREFIX = "[v2]"
 
 
+def _md_link_text(text: str) -> str:
+    """Escape ``]`` in markdown link text — unescaped, it closes the link
+    early and mangles everything after it in the rendered note."""
+    return text.replace("]", "\\]")
+
+
 def tiptap_markdown(desc: Any) -> str:
     """Markdown for a Skool lesson description, best-effort.
 
@@ -129,9 +135,9 @@ def _inline(nodes: list[Any]) -> str:
             elif kind == "link":
                 link = (mark.get("attrs") or {}).get("href")
         if link:
-            text = f"[{text}]({link})"
+            text = f"[{_md_link_text(text)}]({link})"
         parts.append(text)
     return "".join(parts)
 
 
-__all__ = ["tiptap_markdown"]
+__all__ = ["tiptap_markdown", "_md_link_text"]

@@ -41,6 +41,7 @@ importable without the optional ``dbs[skool]`` extra.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections import Counter
@@ -50,7 +51,7 @@ from typing import Any, Iterator
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ._tiptap import tiptap_markdown
+from ._tiptap import _md_link_text, tiptap_markdown
 
 from ..core import (
     AuthCapture,
@@ -207,6 +208,11 @@ class SkoolConfig(BaseModel):
     # body converted from Skool's editor JSON, links to the downloaded media)
     # into the lesson's folder, next to its video and resources.
     write_markdown: bool = True
+    # Fetch a zip of every GitHub repo linked from a lesson note (best-effort;
+    # skipped once a repo's zip is already on disk or confirmed gone/rate-
+    # limited). On by default; set false if you don't want arbitrary
+    # third-party zips landing in the backup.
+    download_github_repos: bool = True
     # Name of the env var holding the path to the Playwright persistent-context
     # directory (your logged-in Skool session). Mirrors reddit's session_dir_env.
     session_dir_env: str = "SKOOL_SESSION_DIR"
@@ -336,15 +342,23 @@ class SkoolConnector(Connector):
             )
         downloads = Path(cfg.downloads_dir).expanduser()
 
-        with sync_playwright() as pw:
-            context = self._launch_context(pw, cfg, session_dir)
+        try:
+            with sync_playwright() as pw:
+                context = self._launch_context(pw, cfg, session_dir)
+                try:
+                    page = context.new_page()
+                    yield from self._walk(page, cfg, downloads, ctx)
+                finally:
+                    context.close()
+        finally:
+            # Best-effort: must run even if the crawl above raised, so
+            # lessons downloaded earlier in this run (or a prior one) still
+            # get their cross-references/GitHub zips resolved. Never masks
+            # a genuine crawl failure with an error of its own.
             try:
-                page = context.new_page()
-                yield from self._walk(page, cfg, downloads, ctx)
-            finally:
-                context.close()
-
-        _finalize_lesson_notes(downloads, ctx)
+                _finalize_lesson_notes(downloads, ctx, cfg.download_github_repos)
+            except Exception as exc:  # noqa: BLE001
+                ctx.logger.warning("skool: could not finalize lesson notes: %s", exc)
 
     @staticmethod
     def _launch_context(pw: Any, cfg: SkoolConfig, session_dir: Path) -> Any:
@@ -441,7 +455,9 @@ class SkoolConnector(Connector):
                     lesson["_kind"] = "lesson"
                     lesson["_group_name"] = group_name
                     lesson["_course_name"] = course.get("title") or course_slug
-                    lesson_dir = course_dir / _lesson_dir_name(idx, lesson)
+                    lesson_dir = course_dir / _fit_dir_name(
+                        course_dir, _lesson_dir_name(idx, lesson)
+                    )
                     stats[self._process_lesson(
                         page, lesson, lesson_dir, slug, course_slug, cfg, ctx
                     )] += 1
@@ -553,7 +569,7 @@ class SkoolConnector(Connector):
                     )
                     failures += 1
                     continue
-            data = self._fetch_bytes(page, url, ctx)
+            data = self._fetch_bytes_with_retries(page, url, ctx)
             if data is None:
                 failures += 1
                 continue
@@ -576,6 +592,26 @@ class SkoolConnector(Connector):
             )
             return None
         return payload.get("url") or None
+
+    def _fetch_bytes_with_retries(
+        self, page: Any, url: str, ctx: RunContext, attempts: int = 3,
+    ) -> bytes | None:
+        """``_fetch_bytes`` with a short linear backoff.
+
+        Native resources previously got exactly one attempt each, then gave
+        up until the next scheduled run — a much thinner safety margin than
+        video downloads, which got a whole dedicated exponential-backoff
+        mechanism (``_retry_sleep_functions``) for the identical class of
+        transient network flakiness.
+        """
+        import time
+
+        for attempt in range(1, attempts + 1):
+            data = self._fetch_bytes(page, url, ctx)
+            if data is not None or attempt == attempts:
+                return data
+            time.sleep(attempt)  # 1s, 2s, ...
+        return None
 
     def _fetch_bytes(self, page: Any, url: str, ctx: RunContext) -> bytes | None:
         import base64
@@ -1196,6 +1232,26 @@ def _lesson_dir_name(index: int, lesson: dict[str, Any]) -> str:
     return _safe(f"{index:02d} - {title}")
 
 
+# Windows' MAX_PATH is 260; leave headroom for the lesson dir's own trailing
+# "\<name>.mp4"/"\<name>.md" filename (the dir name is reused as the stem).
+_MAX_PATH = 240
+
+
+def _fit_dir_name(base: Path, name: str) -> str:
+    """Truncate ``name`` if ``base / name`` would blow past Windows' MAX_PATH.
+
+    A community/course/lesson title chain can get long enough that plain
+    sanitization (``_safe``) never catches it — no length limit was ever
+    applied anywhere in the naming chain. A short, stable hash suffix keeps
+    two names that truncate to the same prefix from colliding.
+    """
+    overflow = len(str(base / name)) - _MAX_PATH
+    if overflow <= 0:
+        return name
+    suffix = f"~{hashlib.sha1(name.encode('utf-8', 'surrogatepass')).hexdigest()[:8]}"
+    return name[: max(1, len(name) - overflow - len(suffix))].rstrip("._ ") + suffix
+
+
 def _adopt_dir(new_dir: Path, legacy_dir: Path, ctx: RunContext) -> bool:
     """Rename an existing download directory to its new name (best-effort),
     so layout changes never re-download anything."""
@@ -1344,7 +1400,7 @@ def _write_lesson_note(
         lines.append("## Resources")
         lines += [f"- [[{r['filename']}]]" for r in local]
         lines += [
-            f"- [{r.get('title') or r['downloadUrl']}]({r['downloadUrl']})"
+            f"- [{_md_link_text(r.get('title') or r['downloadUrl'])}]({r['downloadUrl']})"
             for r in external
         ]
         lines.append("")
@@ -1360,39 +1416,94 @@ def _write_lesson_note(
     return True
 
 
-def _download_github_zips(lesson_dir: Path, body: str, ctx: RunContext) -> None:
-    """Best-effort zip download for every GitHub repo linked from a note body."""
+def _repair_v2_bodies(text: str) -> str:
+    """Re-render any note line still holding a raw, unparsed TipTap payload.
+
+    Notes written before the bare-block-array fix in ``_tiptap.py`` got the
+    raw ``"[v2][...]"`` payload dumped verbatim as their body — the sidecar
+    already existed by the time the fix landed, so the per-lesson fast path
+    never revisited them to pick it up. The raw payload survives verbatim in
+    the note itself (``_write_lesson_note`` always writes it as one line), so
+    this repairs it in place without needing the original DB record.
+    """
+    lines = text.split("\n")
+    changed = False
+    for i, line in enumerate(lines):
+        if line.startswith("[v2]"):
+            rendered = tiptap_markdown(line)
+            if rendered != line:
+                lines[i] = rendered
+                changed = True
+    return "\n".join(lines) if changed else text
+
+
+def _download_github_zips(
+    lesson_dir: Path, body: str, ctx: RunContext, rate_limited: bool,
+) -> tuple[bool, bool]:
+    """Best-effort zip download for every GitHub repo linked from a note body.
+
+    Returns ``(all_saved, rate_limited)``. ``all_saved`` is True once every
+    linked repo's zip is on disk (or confirmed permanently gone) — the
+    caller uses it to mark a note's links "final" and skip it on future
+    runs. ``rate_limited`` short-circuits every further attempt for the rest
+    of this pass once GitHub's per-IP quota is confirmed exhausted — the
+    quota is shared across the whole run, not per-repo, so there's no point
+    burning through every remaining link once it's gone.
+    """
     repos = dict.fromkeys(_GITHUB_REPO_RE.findall(body))  # de-dup, keep order
     if not repos:
-        return
+        return True, rate_limited
+    if rate_limited:
+        return False, rate_limited
     import httpx
 
+    all_saved = True
     for owner, repo in repos:
         dest = lesson_dir / f"{owner}-{repo}.zip"
-        if dest.exists():
+        gone = lesson_dir / f".{owner}-{repo}.zip.gone"
+        if dest.exists() or gone.exists():
             continue
+        url = f"https://api.github.com/repos/{owner}/{repo}/zipball"
         try:
-            resp = httpx.get(
-                f"https://api.github.com/repos/{owner}/{repo}/zipball",
-                follow_redirects=True, timeout=60,
-            )
-            resp.raise_for_status()
+            with httpx.stream("GET", url, follow_redirects=True, timeout=60) as resp:
+                if resp.status_code == 404:
+                    try:
+                        gone.write_text("", encoding="utf-8")
+                    except OSError:
+                        pass
+                    ctx.logger.warning(
+                        "skool: GitHub repo %s/%s no longer exists, not retrying",
+                        owner, repo,
+                    )
+                    continue
+                if resp.status_code == 403 and "rate limit" in resp.read().decode(
+                    "utf-8", "replace"
+                ).lower():
+                    ctx.logger.warning(
+                        "skool: GitHub API rate limit hit, skipping remaining "
+                        "repos this run")
+                    rate_limited, all_saved = True, False
+                    break
+                resp.raise_for_status()
+                with dest.open("wb") as f:
+                    for chunk in resp.iter_bytes():
+                        f.write(chunk)
         except Exception as exc:  # noqa: BLE001 - best-effort, retried next run
             ctx.logger.warning(
                 "skool: could not download GitHub repo %s/%s: %s", owner, repo, exc)
-            continue
-        try:
-            dest.write_bytes(resp.content)
-        except OSError as exc:
-            ctx.logger.warning("skool: could not save GitHub repo zip %s: %s", dest, exc)
+            dest.unlink(missing_ok=True)  # no half-written zip
+            all_saved = False
+    return all_saved, rate_limited
 
 
-def _finalize_lesson_notes(downloads: Path, ctx: RunContext) -> None:
+def _finalize_lesson_notes(downloads: Path, ctx: RunContext, download_repos: bool) -> None:
     """Whole-tree, idempotent pass run once at the end of every backup.
 
-    Two things a lesson's rendered note can reference that the per-lesson
-    fast path (skipped entirely once a lesson's sidecar is "complete") never
+    Three things a lesson's rendered note can need that the per-lesson fast
+    path (skipped entirely once a lesson's sidecar is "complete") never
     revisits on later runs:
+      - a body still holding a raw, unparsed TipTap payload from before the
+        bare-block-array fix (see ``_repair_v2_bodies``).
       - a GitHub repo link -> fetch a zip of the repo alongside the note.
       - another lesson's classroom link -> that lesson may not exist locally
         yet at write time (crawl order isn't guaranteed, and it can live in
@@ -1400,33 +1511,47 @@ def _finalize_lesson_notes(downloads: Path, ctx: RunContext) -> None:
         against every ``.meta.json`` sidecar found on disk.
     Never mutates a note's own prose — only regenerates a delimited block at
     the end, so repeat runs are idempotent instead of appending duplicates.
+
+    A note is skipped entirely once its sidecar's ``links_final_at`` matches
+    the current total lesson count: GitHub links never need re-checking once
+    saved (or confirmed gone), and a dangling cross-reference can only
+    become resolvable if the tree has grown since, so count-unchanged means
+    nothing new to do. Growth invalidates the marker automatically.
     """
     if not downloads.exists():
         return
+    metas = list(downloads.rglob(".meta.json"))
     index: dict[str, str] = {}
-    for meta_path in downloads.rglob(".meta.json"):
+    for meta_path in metas:
         meta = _load_sidecar(meta_path) or {}
         lesson_id, note = meta.get("lessonId"), meta.get("note")
         if lesson_id and note:
             index[str(lesson_id)] = (meta_path.parent / note).stem
+    lesson_count = len(index)
 
-    for meta_path in downloads.rglob(".meta.json"):
+    rate_limited = False
+    for meta_path in metas:
         meta = _load_sidecar(meta_path) or {}
         note = meta.get("note")
-        if not note:
+        if not note or meta.get("links_final_at") == lesson_count:
             continue
         note_path = meta_path.parent / note
         try:
-            text = note_path.read_text(encoding="utf-8")
+            original = note_path.read_text(encoding="utf-8")
         except OSError:
             continue
+        text = _repair_v2_bodies(original)
         base = _CROSS_REF_RE.sub("", text).rstrip("\n")
 
-        _download_github_zips(note_path.parent, base, ctx)
+        github_ok = True
+        if download_repos:
+            github_ok, rate_limited = _download_github_zips(
+                note_path.parent, base, ctx, rate_limited,
+            )
 
-        targets = dict.fromkeys(
-            index[m] for m in _LESSON_URL_RE.findall(base) if m in index
-        )
+        found_ids = dict.fromkeys(_LESSON_URL_RE.findall(base))
+        refs_resolved = all(lid in index for lid in found_ids)
+        targets = dict.fromkeys(index[lid] for lid in found_ids if lid in index)
         targets.pop(note_path.stem, None)  # never self-link
         new_text = base + "\n"
         if targets:
@@ -1435,11 +1560,15 @@ def _finalize_lesson_notes(downloads: Path, ctx: RunContext) -> None:
                 f"\n<!-- skool:cross-refs -->\n## Related lessons\n{block}\n"
                 f"<!-- /skool:cross-refs -->\n"
             )
-        if new_text != text:
+        if new_text != original:
             try:
                 note_path.write_text(new_text, encoding="utf-8")
             except OSError as exc:
                 ctx.logger.warning("skool: could not update %s: %s", note_path, exc)
+                continue
+        if github_ok and refs_resolved:
+            meta["links_final_at"] = lesson_count
+            _write_sidecar(meta_path, meta, ctx)
 
 
 def _load_sidecar(path: Path) -> dict[str, Any] | None:
@@ -1519,9 +1648,16 @@ def _ydl_opts(
         "outtmpl": str(dest),
         "http_headers": {
             "Referer": "https://www.skool.com/",
+            # ponytail: hardcoded, mirrors skool-downloader's own reference
+            # value verbatim — but an ancient version number is itself a
+            # bot-detection signal (this project's own recurring problem),
+            # so bump it periodically rather than leaving it to go stale
+            # for years. Wire to the browser's own detected Chrome version
+            # (see ``_launch_context``'s ``navigator.userAgent`` probe) if
+            # this becomes a recurring pain point.
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
             ),
         },
         "merge_output_format": "mp4",
