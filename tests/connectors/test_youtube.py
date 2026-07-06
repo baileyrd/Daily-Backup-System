@@ -141,3 +141,22 @@ def test_volatile_capture_and_views_do_not_spawn_revisions(storage):
     assert r2.updated == 0
     revs = storage.conn.execute("SELECT COUNT(*) FROM item_revisions").fetchone()[0]
     assert revs == 1
+
+
+def test_duplicate_video_within_one_list_yielded_once():
+    """A playlist can contain the same video twice; only the first occurrence
+    is yielded (stable revisions), and a duplicate at the list boundary must
+    not swallow the checkpoint."""
+    conn = _connector([
+        _entry("aaa", "playlist:PL1"),
+        _entry("bbb", "playlist:PL1"),
+        _entry("aaa", "playlist:PL1", position=3, list_end=True),  # dup ends list
+    ])
+    events = list(conn.fetch(_ctx()))
+    items = [e for e in events if isinstance(e, BackupItem)]
+    assert [i.external_id for i in items] == ["playlist:PL1:aaa", "playlist:PL1:bbb"]
+
+    boundary_notes = [
+        e.note for e in events if isinstance(e, Checkpoint) and e.note.startswith("after list")
+    ]
+    assert boundary_notes == ["after list playlist:PL1"]

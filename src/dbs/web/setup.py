@@ -7,7 +7,8 @@ that contained:
 * every executed command is **derived server-side** from a connector's declared,
   trusted metadata (:attr:`Connector.pip_requirements` /
   ``needs_playwright_browser``) — never from client-supplied strings;
-* actions are gated behind ``dbs serve --allow-setup`` (off unless asked for);
+* actions are enabled by default (``dbs serve --allow-setup``, the default)
+  and can be turned off with ``dbs serve --no-setup``;
 * like the rest of the UI it is meant for **localhost, single-user** use.
 
 Jobs run in a background thread and stream log lines over the same SSE machinery

@@ -2089,3 +2089,29 @@ def test_fetch_cross_referenced_lessons_missing_course_is_best_effort(tmp_path, 
         items = list(conn._fetch_cross_referenced_lessons(object(), cfg, tmp_path, _ctx(cfg)))
     assert items == []  # no crash, nothing yielded
     assert any("not found" in r.message for r in caplog.records)
+
+
+# --- download folder resolution (download_root fallback) --------------------
+
+
+def test_downloads_root_explicit_dir_wins():
+    cfg = SkoolConfig(downloads_dir="~/explicit")
+    ctx = make_ctx(source_id=1, run_id=1, config=cfg,
+                   download_dir=Path("/root/fallback"))
+    assert SkoolConnector._downloads_root(cfg, ctx) == Path("~/explicit").expanduser()
+
+
+def test_downloads_root_falls_back_to_ctx_download_dir():
+    cfg = SkoolConfig()  # downloads_dir omitted — now optional
+    ctx = make_ctx(source_id=1, run_id=1, config=cfg,
+                   download_dir=Path("/root/downloads/skool"))
+    assert SkoolConnector._downloads_root(cfg, ctx) == Path("/root/downloads/skool")
+
+
+def test_downloads_root_neither_set_errors():
+    from dbs.core.errors import ConnectorConfigError
+
+    cfg = SkoolConfig()
+    ctx = make_ctx(source_id=1, run_id=1, config=cfg)  # no download_dir
+    with pytest.raises(ConnectorConfigError, match="download folder"):
+        SkoolConnector._downloads_root(cfg, ctx)

@@ -7,6 +7,7 @@ import json
 import pytest
 
 from dbs.core.models import Cursor
+from dbs.export.base import ExportQuery
 from dbs.storage.base import PreparedItem
 from dbs.storage.sqlite import SqliteStorage
 
@@ -148,3 +149,122 @@ def test_delete_source_cascades(storage):
 
 def test_integrity_check_ok(storage):
     assert storage.integrity_check() == "ok"
+
+
+# --- browse / metrics (web UI) ----------------------------------------------
+
+
+def test_browse_items_paginates_and_counts(storage):
+    src, run = _setup(storage)
+    storage.upsert_items(src.id, run, [_item(str(i), f"h{i}") for i in range(5)])
+    items, total = storage.browse_items(ExportQuery(), limit=2, offset=0)
+    assert total == 5
+    assert len(items) == 2
+    items2, total2 = storage.browse_items(ExportQuery(), limit=2, offset=4)
+    assert total2 == 5
+    assert len(items2) == 1
+
+
+def test_browse_items_filters_by_kind_and_deleted(storage):
+    src, run = _setup(storage)
+    storage.upsert_items(src.id, run, [
+        _item("1", "h1", kind="note"),
+        _item("2", "h2", kind="task", deleted=True),
+    ])
+    items, total = storage.browse_items(ExportQuery(item_types=["note"]))
+    assert total == 1 and items[0]["external_id"] == "1"
+    _, total_all = storage.browse_items(ExportQuery(include_deleted=True))
+    assert total_all == 2
+    _, total_live = storage.browse_items(ExportQuery())
+    assert total_live == 1  # deleted excluded by default, matching ExportQuery
+
+
+def test_browse_items_text_search_escapes_wildcards(storage):
+    src, run = _setup(storage)
+    it1 = _item("1", "h1")
+    it1.title = "Hello World"
+    it2 = _item("2", "h2")
+    it2.title = "Something else"
+    storage.upsert_items(src.id, run, [it1, it2])
+    items, total = storage.browse_items(ExportQuery(), text="hello")
+    assert total == 1 and items[0]["external_id"] == "1"
+    # A literal '%'/'_' in the query must not act as a SQL LIKE wildcard.
+    _, total_wild = storage.browse_items(ExportQuery(), text="%")
+    assert total_wild == 0
+
+
+def test_browse_items_row_shape_omits_raw(storage):
+    src, run = _setup(storage)
+    storage.upsert_items(src.id, run, [_item("1", "h1")])
+    items, _ = storage.browse_items(ExportQuery())
+    row = items[0]
+    assert "raw" not in row
+    assert row["media_count"] == 0
+    assert isinstance(row["id"], int)
+
+
+def test_get_item_returns_raw_and_media(storage):
+    src, run = _setup(storage)
+    it = _item("1", "h1")
+    it.media = [{
+        "url": "https://x/img.png", "kind": "image",
+        "filename": "img.png", "mime": "image/png", "data": b"PNGDATA",
+    }]
+    storage.upsert_items(src.id, run, [it], store_media=True)
+    item_id = storage.conn.execute(
+        "SELECT id FROM items WHERE external_id='1'"
+    ).fetchone()["id"]
+
+    item = storage.get_item(item_id)
+    assert item["id"] == item_id
+    assert item["raw"]["hash"] == "h1"
+    assert len(item["media"]) == 1
+    assert item["media"][0]["has_data"] is True
+    assert item["media"][0]["mime"] == "image/png"
+
+    blob = storage.get_media_blob(item["media"][0]["id"])
+    assert bytes(blob["data"]) == b"PNGDATA"
+    assert blob["filename"] == "img.png"
+
+    assert storage.get_item(999999) is None
+    assert storage.get_media_blob(999999) is None
+
+
+def test_metrics_aggregates_by_source_and_kind(storage):
+    src, run = _setup(storage)
+    storage.upsert_items(src.id, run, [
+        _item("1", "h1", kind="note"),
+        _item("2", "h2", kind="note", deleted=True),
+        _item("3", "h3", kind="task"),
+    ])
+    m = storage.metrics()
+    by = {(r["source"], r["kind"]): r for r in m["by_source_kind"]}
+    assert by[("s", "note")] == {"source": "s", "kind": "note", "total": 2, "live": 1, "deleted": 1}
+    assert by[("s", "task")]["total"] == 1
+    assert m["revision_count"] == 3
+    assert m["media_count"] == 0
+    assert m["media_bytes"] == 0
+
+
+def test_duplicate_external_id_within_one_batch_upserts(tmp_path):
+    """A batch may carry the same external_id twice (e.g. a YouTube playlist
+    containing one video twice) — the second occurrence must update, not crash
+    on the unique index."""
+    storage = SqliteStorage(tmp_path / "d.sqlite3")
+    storage.migrate()
+    src, run = _setup(storage)
+
+    res = storage.upsert_items(
+        src.id, run, [_item("dup", "h1"), _item("dup", "h1"), _item("dup", "h2")]
+    )
+    assert res.created == 1
+    assert res.unchanged == 1   # identical duplicate
+    assert res.updated == 1     # changed duplicate takes the update path
+    rows = storage.conn.execute(
+        "SELECT content_hash, revision FROM items WHERE source_id=? AND external_id='dup'",
+        (src.id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["content_hash"] == "h2"
+    assert rows[0]["revision"] == 2
+    storage.close()

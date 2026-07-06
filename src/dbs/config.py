@@ -12,6 +12,7 @@ Config shape (TOML)::
     [dbs]
     database = "dbs.sqlite3"
     export_dir = "exports"
+    download_root = "downloads"    # per-source folders are created under this
     default_overlap_seconds = 300
 
     [sources.raindrop-personal]
@@ -73,6 +74,10 @@ class Config(BaseModel):
 
     database: str = "dbs.sqlite3"
     export_dir: str = "exports"
+    # Root under which each source gets its own download folder
+    # (<download_root>/<source-name>); connectors may still override it with
+    # an explicit per-source dir (e.g. skool's downloads_dir).
+    download_root: str = "downloads"
     default_overlap_seconds: int = 300
     sources: dict[str, SourceConfig] = {}
     connectors: dict[str, ConnectorOverride] = {}
@@ -92,6 +97,14 @@ class Config(BaseModel):
     @property
     def export_path(self) -> Path:
         return self._resolve(self.export_dir)
+
+    @property
+    def download_root_path(self) -> Path:
+        return self._resolve(self.download_root)
+
+    def download_dir_for(self, source_name: str) -> Path:
+        """Per-source download folder: ``<download_root>/<source-name>``."""
+        return self.download_root_path / source_name
 
     def registry_override(self) -> dict[str, str]:
         """Translate ``[connectors.<type>]`` blocks into a registry override map."""
@@ -152,6 +165,7 @@ def load_config(path: str | Path) -> Config:
         return Config(
             database=dbs_section.get("database", "dbs.sqlite3"),
             export_dir=dbs_section.get("export_dir", "exports"),
+            download_root=dbs_section.get("download_root", "downloads"),
             default_overlap_seconds=int(dbs_section.get("default_overlap_seconds", 300)),
             sources=sources,
             connectors=connectors,

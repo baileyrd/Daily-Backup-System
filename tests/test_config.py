@@ -34,6 +34,24 @@ def test_load_toml_splits_reserved_and_options(tmp_path):
     assert cfg.database_path == (tmp_path / "data/x.sqlite3")
 
 
+def test_download_root_default_and_per_source_dir(tmp_path):
+    p = tmp_path / "dbs.toml"
+    p.write_text(TOML_OK)
+    cfg = load_config(p)
+    assert cfg.download_root == "downloads"
+    assert cfg.download_root_path == tmp_path / "downloads"
+    assert cfg.download_dir_for("raindrop-personal") == (
+        tmp_path / "downloads" / "raindrop-personal"
+    )
+
+
+def test_download_root_absolute_override(tmp_path):
+    p = tmp_path / "dbs.toml"
+    p.write_text('[dbs]\ndownload_root = "/mnt/media/dbs"\n')
+    cfg = load_config(p)
+    assert cfg.download_dir_for("skool").as_posix() == "/mnt/media/dbs/skool"
+
+
 def test_env_expansion(tmp_path, monkeypatch):
     monkeypatch.setenv("MY_DB", "envdb.sqlite3")
     p = tmp_path / "dbs.toml"

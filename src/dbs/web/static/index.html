@@ -15,6 +15,7 @@
   <nav id="tabs">
     <button data-tab="sources" class="active">Sources</button>
     <button data-tab="history">History</button>
+    <button data-tab="browse">Browse</button>
     <button data-tab="connectors">Connectors</button>
     <button data-tab="secrets">API keys</button>
     <button data-tab="add">Add source</button>
@@ -82,6 +83,37 @@
         </thead>
         <tbody></tbody>
       </table>
+    </section>
+
+    <!-- Browse (what's actually stored) -->
+    <section id="tab-browse" class="tab hidden">
+      <div class="row between">
+        <h2>Browse</h2>
+        <button id="refresh-browse">Refresh</button>
+      </div>
+      <div id="browse-metrics"></div>
+      <form id="browse-filters" class="row" style="flex-wrap:wrap;gap:0.6rem;margin-bottom:0.75rem;">
+        <label>Source <input id="browse-source" placeholder="comma,separated" /></label>
+        <label>Type <input id="browse-type" placeholder="comma,separated" /></label>
+        <label>Search <input id="browse-q" placeholder="title / body contains…" /></label>
+        <label>Since <input id="browse-since" placeholder="YYYY-MM-DD" /></label>
+        <label>Until <input id="browse-until" placeholder="YYYY-MM-DD" /></label>
+        <label class="check"><input type="checkbox" id="browse-deleted" /> Include deleted</label>
+        <button type="submit" class="primary">Filter</button>
+      </form>
+      <table id="browse-table">
+        <thead>
+          <tr><th>Source</th><th>Type</th><th>Title</th><th>Created</th><th>Updated</th><th>Rev</th><th>Media</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="browse-pager" class="row between" style="margin-top:0.6rem;">
+        <span id="browse-count" class="muted"></span>
+        <div>
+          <button id="browse-prev" class="small">‹ Prev</button>
+          <button id="browse-next" class="small">Next ›</button>
+        </div>
+      </div>
     </section>
 
     <!-- Connectors -->
@@ -225,6 +257,15 @@
       <div id="verify-result"></div>
     </section>
   </main>
+
+  <!-- Item detail drawer (opened from the Browse tab) -->
+  <div id="item-drawer" class="drawer hidden">
+    <div class="drawer-head row between">
+      <strong id="item-drawer-title">Item</strong>
+      <button id="item-drawer-close" class="small">Close</button>
+    </div>
+    <div id="item-drawer-body"></div>
+  </div>
 
   <div id="toast" class="toast hidden"></div>
 

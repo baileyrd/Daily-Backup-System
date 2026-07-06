@@ -207,6 +207,33 @@ class Storage(ABC):
         """Return (total, live, deleted) item counts for a source."""
 
     @abstractmethod
+    def browse_items(
+        self, query: "ExportQuery", *, text: str | None = None, limit: int = 50, offset: int = 0
+    ) -> tuple[list[ItemRow], int]:
+        """Paginated item listing for the web UI. Returns (rows, total_matching).
+
+        Rows are the lighter "browse" shape (id/title/url/kind/created/updated/
+        deleted + a media count) -- not the full raw payload; use :meth:`get_item`
+        for that. ``text`` matches against title/body, in addition to ``query``'s
+        source/type/date/deleted filters.
+        """
+
+    @abstractmethod
+    def get_item(self, item_id: int) -> ItemRow | None:
+        """Full detail for one item (raw payload + its media list), by internal id."""
+
+    @abstractmethod
+    def get_media_blob(self, media_id: int) -> dict[str, Any] | None:
+        """Fetch one archived media blob (bytes + mime/filename) by id.
+
+        ``None`` if the media row doesn't exist or its bytes were never archived.
+        """
+
+    @abstractmethod
+    def metrics(self) -> dict[str, Any]:
+        """Aggregate item/media/revision counts for the web UI's metrics strip."""
+
+    @abstractmethod
     def integrity_check(self) -> str: ...
 
 

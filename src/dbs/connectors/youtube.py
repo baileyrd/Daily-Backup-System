@@ -125,12 +125,19 @@ class YouTubeConnector(Connector):
 
         for list_label, raw in self._acquire(ctx):
             item = self._to_item(list_label, raw)
-            if item is None:
-                continue
-            live_ids.add(item.external_id)
-            yield item
+            if item is not None:
+                # A playlist can contain the same video twice; keep the first
+                # occurrence so the stored revision is stable across runs.
+                if item.external_id in live_ids:
+                    ctx.logger.info(
+                        "youtube: skipping duplicate entry %s", item.external_id
+                    )
+                else:
+                    live_ids.add(item.external_id)
+                    yield item
             # Checkpoint once per list boundary so a failure partway leaves the
-            # already-fetched lists durable.
+            # already-fetched lists durable. Must happen even when the boundary
+            # record itself was unmappable or a duplicate.
             if raw.get("__list_end__"):
                 seen_lists += 1
                 cursor["lists_done"] = seen_lists

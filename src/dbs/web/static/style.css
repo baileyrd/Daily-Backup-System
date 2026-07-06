@@ -174,3 +174,23 @@ code { background: var(--panel-2); padding: 0.05rem 0.3rem; border-radius: 4px; 
 }
 .toast.err { border-color: var(--red); }
 .toast.ok { border-color: var(--green); }
+
+/* browse tab */
+.metrics-strip { gap: 1.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.stat { text-align: center; }
+.stat-num { font-size: 1.35rem; font-weight: 600; }
+.stat-label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+.metrics-table { max-width: 480px; margin-bottom: 1rem; }
+.metrics-table th, .metrics-table td { padding: 0.3rem 0.6rem; font-size: 0.82rem; }
+#browse-table tbody tr { cursor: pointer; }
+
+/* item detail drawer */
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(480px, 92vw);
+  background: var(--panel); border-left: 1px solid var(--border);
+  box-shadow: -8px 0 24px rgba(0,0,0,0.4);
+  padding: 1rem; overflow-y: auto; z-index: 20;
+}
+.drawer-head { margin-bottom: 0.75rem; }
+.media-list { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.6rem 0; }
+.media-thumb { max-width: 140px; max-height: 140px; border-radius: 6px; border: 1px solid var(--border); object-fit: cover; }

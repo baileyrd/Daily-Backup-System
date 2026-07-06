@@ -3,7 +3,7 @@
 A modular, extensible system for making **incremental daily backups** of your
 data from many sources — Reddit, YouTube, Raindrop, and anything else you write a
 connector for — into a single local **SQLite** database, with **portable
-exports** (JSON / NDJSON / CSV / Markdown / zip archive).
+exports** (JSON / NDJSON / CSV / Markdown / Obsidian vault / zip archive).
 
 - **Incremental** — each run fetches only what changed since the last run, using
   a per-source cursor. Re-runs are idempotent.
@@ -70,16 +70,17 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 
 | Command | Description |
 |---|---|
-| `dbs init` | Create config + `.env.example` and initialize the DB (idempotent). |
-| `dbs backup [SOURCE] [--all] [--force-full] [--reconcile] [--dry-run] [--progress/--no-progress]` | Run an incremental backup. `auto` mode picks incremental vs. reconcile. A live status line (running item counter + per-source `[i/N]` position) shows automatically on a TTY; force it with `--progress` or silence it with `--no-progress`. |
+| `dbs init [--force]` | Create config + `.env.example` and initialize the DB (idempotent; `--force` overwrites an existing config). |
+| `dbs backup [SOURCE] [--all] [--only-due] [--force-full] [--reconcile] [--dry-run] [--progress/--no-progress]` | Run an incremental backup. `auto` mode picks incremental vs. reconcile. `--only-due` skips sources backed up within the last 20h (for `--all` runs more than once a day). A live status line (running item counter + per-source `[i/N]` position) shows automatically on a TTY; force it with `--progress` or silence it with `--no-progress`. |
 | `dbs status [SOURCE] [--json]` | Per-source item counts, last run, cursor watermark, warnings. |
 | `dbs history [SOURCE] [-n N] [--json]` | Recent backup runs and their stats. |
-| `dbs export --format FMT --out PATH [filters]` | Export to `json`/`ndjson`/`csv`/`markdown`/`archive`. |
-| `dbs sources list \| add \| check` | Manage and validate configured sources. |
-| `dbs connectors list [--verbose] \| describe TYPE` | Inspect installed connectors (incl. load failures). |
+| `dbs export --format FMT --out PATH [filters]` | Export to `json`/`ndjson`/`csv`/`markdown`/`obsidian`/`archive`. |
+| `dbs sources list [--json] \| add NAME --type TYPE [--set k=v] \| check` | Manage and validate configured sources. |
+| `dbs connectors list [--verbose] [--json] \| describe TYPE` | Inspect installed connectors (incl. load failures). |
 | `dbs verify [SOURCE]` | Database + per-source integrity self-check. |
-| `dbs schedule` | Print ready-to-use cron / systemd snippets. |
+| `dbs schedule [--interval daily\|hourly]` | Print ready-to-use cron / systemd snippets. |
 | `dbs serve [--host H] [--port P] [--no-setup]` | Launch the web management UI (needs the `[web]` extra). In-UI setup (dependency install + browser-login capture) is on by default; `--no-setup` disables it. |
+| `dbs research youtube TOPIC [...]` \| `dbs research youtube-backup TOPIC [...]` | Ad-hoc YouTube research: search (or reuse a backed-up list), synthesize via NotebookLM, write a markdown report. See [docs/research.md](docs/research.md). |
 | `dbs version` | Tool + core API version. |
 
 Export filters: `--source`, `--type`, `--since`, `--until`, `--include-deleted`,
@@ -99,13 +100,20 @@ it you can:
 - see per-source **status** and recent **run history**;
 - **run a backup** (one source or all) and watch a **live progress bar** —
   it streams the engine's progress events over Server-Sent Events;
+- **browse what's actually stored** (the *Browse* tab) — filter items by
+  source/type/date/text search, page through the results, and open a detail
+  drawer with the raw payload and any archived media; a metrics strip shows
+  item/revision/media counts per source and kind;
 - browse installed **connectors** (capabilities, config schema, readiness);
 - **install** a connector's optional dependencies and run reddit's one-time
   **browser login** — see *Getting connectors working* below;
 - **add a source** (validated against the connector schema);
 - set **API keys / tokens** (the *API keys* tab) — written to your `.env`, never
-  to the config, and never shown back; see below;
-- **export** a bundle and **verify** database integrity.
+  to the config, and never shown back (and can be cleared again); see below;
+- **export** a bundle and **verify** database integrity;
+- run ad-hoc **YouTube research** (the *Research* tab) — search a topic or reuse
+  a backed-up list, synthesize with NotebookLM, and read/download the resulting
+  markdown report; see [docs/research.md](docs/research.md).
 
 ### Getting connectors working
 
@@ -116,7 +124,7 @@ on by default — `dbs serve`) can do the setup for you:
 | Connector | Needs | In the UI |
 |---|---|---|
 | **raindrop** | `RAINDROP_TOKEN` | set it in *API keys* |
-| **skool** | `[skool]` extra + `playwright install chromium` + `ffdl install -y`; a logged-in session | **Install**, then **Skool login** — opens a browser on the host, you log in and close it; the session dir + `SKOOL_SESSION_DIR` are captured for you |
+| **skool** | `[skool]` extra + `playwright install chromium` + `ffdl install -y`; a logged-in session; optionally `GITHUB_TOKEN` (see below) | **Install**, then **Skool login** — opens a browser on the host, you log in and close it; the session dir + `SKOOL_SESSION_DIR` are captured for you |
 | **reddit** | `[reddit]` extra + `playwright install chromium`; a logged-in session dir | **Install**, then **Reddit login** — opens a browser on the host, you log in and close it; the session dir + `REDDIT_SESSION_DIR` are captured for you. Make sure reddit.com shows you logged in before closing (with *Continue with Google*, finish the redirect back to reddit first). The account is auto-detected from the session — `username` in the source config is optional. If runs fail with HTTP 403 even after re-capturing, set `headless = false` for the source |
 | **youtube** | `[youtube]` extra; a `cookies.txt` *or* `cookies_from_browser` | **Install**, then **YouTube login** — captures a `cookies.txt` and sets `YOUTUBE_COOKIES_FILE`; or skip capture and set `cookies_from_browser` (e.g. `chrome`) in the source config |
 
@@ -266,11 +274,28 @@ store_media = true              # ...and pull the downloaded files into the DB
 
 `dbs backup courses` then fetches from Skool, catalogs the classroom structure,
 downloads the attached resources **and each lesson's video** — native (Mux)
-ones via player capture, external ones (YouTube/Vimeo/Loom) straight through
-yt-dlp (`download_videos`, on by default, with an auto-managed ffmpeg;
-`video_quality` caps the variant, default 1080) — and (with `store_media`)
-archives those files, so Skool content lands in the DB in one step. External
-videos sometimes need auth (YouTube: *"Sign in to confirm you're not a
+ones via player capture, external ones (YouTube/Vimeo/Loom) **downloaded, not
+just referenced**, straight through yt-dlp (`download_videos`, on by default,
+with an auto-managed ffmpeg via `ffmpeg-downloader`; `video_quality` caps the
+variant, default 1080) — and (with `store_media`) archives those files, so
+Skool content lands in the DB in one step.
+
+Two more artifacts land in `downloads_dir` next to each lesson's video/resources,
+both on by default:
+
+- **`write_markdown`** — an Obsidian/`url2obs`-style markdown note per lesson
+  (frontmatter + the lesson body converted from Skool's editor JSON), with
+  cross-references between lessons resolved into links.
+- **`download_github_repos`** — a zip of every GitHub repo linked from a
+  lesson's note, skipped once already on disk or confirmed gone/rate-limited.
+  Set the `GITHUB_TOKEN` secret (any personal access token, no special scopes
+  needed) to raise GitHub's API rate limit from 60/hr to 5000/hr if you hit it
+  across a large course catalog; omit it and this still works, just slower.
+
+Set either to `false` to skip it — e.g. if you don't want arbitrary
+third-party zips landing in the backup.
+
+External videos sometimes need auth (YouTube: *"Sign in to confirm you're not a
 bot"*) — `video_cookies_file_env` (defaults to the YouTube connector's own
 `YOUTUBE_COOKIES_FILE`, reused automatically if you've already captured it)
 or `video_cookies_from_browser` supplies cookies for those downloads only.
@@ -383,9 +408,10 @@ Full guide: [docs/writing-a-connector.md](docs/writing-a-connector.md).
 
 ```bash
 pip install -e ".[dev,yaml,web]"
-pytest            # 130+ tests, no network (Raindrop mocks httpx.MockTransport; the
+pytest            # 370+ tests, no network (Raindrop mocks httpx.MockTransport; the
                   # browser/file connectors stub their acquisition step; the web
-                  # tier drives a real backup via the offline skool connector)
+                  # tier drives a real backup via the offline skool connector;
+                  # the research pipeline mocks yt-dlp/NotebookLM)
 ```
 
 ## Project layout
@@ -394,12 +420,13 @@ pytest            # 130+ tests, no network (Raindrop mocks httpx.MockTransport; 
 src/dbs/
   core/        # the public plugin API + engine + service (UI-agnostic)
   storage/     # Storage ABC + SQLite implementation + migrations
-  export/      # Exporter ABC + json/ndjson/csv/markdown/archive
+  export/      # Exporter ABC + json/ndjson/csv/markdown/obsidian/archive
   connectors/  # built-in connectors (raindrop, reddit, youtube, skool)
+  research/    # ad-hoc YouTube research pipeline (optional `[research]` extra)
   web/         # optional FastAPI UI (thin renderer over BackupService) + static SPA
   config.py    # TOML/YAML config loading
   cli.py       # Typer CLI (the only module that prints/exits)
-docs/          # architecture, connector guide, scheduling
+docs/          # architecture, connector guide, scheduling, research
 tests/         # pytest suite
 ```
 

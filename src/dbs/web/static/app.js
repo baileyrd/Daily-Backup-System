@@ -162,6 +162,143 @@ async function loadHistory() {
 LOADERS.history = loadHistory;
 $("#refresh-history").addEventListener("click", loadHistory);
 
+// --- browse (paginated item listing + metrics + detail drawer) -------------
+
+const BROWSE_LIMIT = 50;
+let browseOffset = 0;
+
+function fmtBytes(n) {
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(i > 0 && v < 10 ? 1 : 0)} ${units[i]}`;
+}
+
+function statTile(value, label) {
+  return el("div", { className: "stat" },
+    el("div", { className: "stat-num", textContent: String(value) }),
+    el("div", { className: "stat-label", textContent: label }));
+}
+
+async function loadBrowseMetrics() {
+  const box = $("#browse-metrics");
+  box.innerHTML = "";
+  let m;
+  try { m = await api("/api/metrics"); } catch (e) { toast(e.message, "err"); return; }
+  const totals = m.by_source_kind.reduce(
+    (acc, r) => ({ total: acc.total + r.total, live: acc.live + r.live, deleted: acc.deleted + r.deleted }),
+    { total: 0, live: 0, deleted: 0 },
+  );
+  box.append(el("div", { className: "metrics-strip row" },
+    statTile(num(totals.total), "items"),
+    statTile(num(totals.live), "live"),
+    statTile(num(totals.deleted), "deleted"),
+    statTile(num(m.revision_count), "revisions"),
+    statTile(num(m.media_count), "media files"),
+    statTile(fmtBytes(m.media_bytes), "media stored"),
+  ));
+  if (m.by_source_kind.length) {
+    const tbody = el("tbody");
+    m.by_source_kind.forEach((r) => tbody.append(el("tr", {},
+      el("td", { textContent: r.source }),
+      el("td", { className: "tag", textContent: r.kind }),
+      el("td", { textContent: num(r.live) }),
+      el("td", { textContent: num(r.deleted) }),
+    )));
+    box.append(el("table", { className: "metrics-table" },
+      el("thead", {}, el("tr", {},
+        el("th", { textContent: "Source" }), el("th", { textContent: "Kind" }),
+        el("th", { textContent: "Live" }), el("th", { textContent: "Deleted" }))),
+      tbody,
+    ));
+  }
+}
+
+function browseParams() {
+  const qs = new URLSearchParams();
+  const csv = (id, key) => $(id).value.split(",").map((s) => s.trim()).filter(Boolean).forEach((v) => qs.append(key, v));
+  csv("#browse-source", "source");
+  csv("#browse-type", "type");
+  if ($("#browse-q").value.trim()) qs.set("q", $("#browse-q").value.trim());
+  if ($("#browse-since").value.trim()) qs.set("since", $("#browse-since").value.trim());
+  if ($("#browse-until").value.trim()) qs.set("until", $("#browse-until").value.trim());
+  if ($("#browse-deleted").checked) qs.set("include_deleted", "true");
+  qs.set("limit", BROWSE_LIMIT);
+  qs.set("offset", browseOffset);
+  return qs;
+}
+
+async function loadBrowse() {
+  const tbody = $("#browse-table tbody");
+  tbody.innerHTML = "";
+  let data;
+  try { data = await api("/api/items?" + browseParams()); }
+  catch (e) { toast(e.message, "err"); return; }
+  if (!data.items.length) {
+    tbody.append(el("tr", {}, el("td", { colSpan: 7, className: "muted", textContent: "No items match these filters." })));
+  } else {
+    data.items.forEach((it) => {
+      const row = el("tr", { className: it.deleted ? "muted" : "" },
+        el("td", { textContent: it.source }),
+        el("td", { className: "tag", textContent: it.item_kind }),
+        el("td", { textContent: it.title || "(untitled)" }),
+        el("td", { className: "mono", textContent: (it.created_at || "").replace("T", " ").slice(0, 19) }),
+        el("td", { className: "mono", textContent: (it.updated_at || "").replace("T", " ").slice(0, 19) }),
+        el("td", { textContent: it.revision }),
+        el("td", { textContent: it.media_count || "" }),
+      );
+      row.addEventListener("click", () => openItemDrawer(it.id));
+      tbody.append(row);
+    });
+  }
+  $("#browse-count").textContent = data.total
+    ? `${data.offset + 1}–${Math.min(data.offset + data.items.length, data.total)} of ${num(data.total)}`
+    : "0 results";
+  $("#browse-prev").disabled = data.offset <= 0;
+  $("#browse-next").disabled = data.offset + data.items.length >= data.total;
+}
+LOADERS.browse = () => { loadBrowseMetrics(); loadBrowse(); };
+$("#refresh-browse").addEventListener("click", () => { loadBrowseMetrics(); loadBrowse(); });
+$("#browse-filters").addEventListener("submit", (e) => { e.preventDefault(); browseOffset = 0; loadBrowse(); });
+$("#browse-prev").addEventListener("click", () => { browseOffset = Math.max(0, browseOffset - BROWSE_LIMIT); loadBrowse(); });
+$("#browse-next").addEventListener("click", () => { browseOffset += BROWSE_LIMIT; loadBrowse(); });
+
+async function openItemDrawer(id) {
+  const drawer = $("#item-drawer");
+  const body = $("#item-drawer-body");
+  body.innerHTML = "Loading…";
+  drawer.classList.remove("hidden");
+  let item;
+  try { item = await api(`/api/items/${id}`); }
+  catch (e) { body.textContent = e.message; return; }
+  $("#item-drawer-title").textContent = item.title || item.external_id;
+  body.innerHTML = "";
+  body.append(el("div", { className: "tag" },
+    document.createTextNode(`${item.source} · ${item.item_kind} · rev ${item.revision}` + (item.deleted ? " · deleted" : ""))));
+  if (item.url) {
+    body.append(el("div", { style: "margin-top:0.4rem;" },
+      el("a", { href: item.url, target: "_blank", rel: "noopener", textContent: item.url })));
+  }
+  if (item.media && item.media.length) {
+    const mediaBox = el("div", { className: "media-list" });
+    item.media.forEach((m) => {
+      const isImage = m.has_data && (m.mime || "").startsWith("image/");
+      if (isImage) {
+        mediaBox.append(el("img", { src: `/api/media/${m.id}`, alt: m.filename || "", className: "media-thumb" }));
+      } else {
+        const label = `${m.filename || m.kind} (${m.byte_size != null ? fmtBytes(m.byte_size) : "not stored"})`;
+        mediaBox.append(m.has_data
+          ? el("a", { href: `/api/media/${m.id}`, textContent: label, className: "small" })
+          : el("span", { className: "tag", textContent: label }));
+      }
+    });
+    body.append(mediaBox);
+  }
+  body.append(el("pre", { className: "log", style: "max-height:24rem;", textContent: JSON.stringify(item.raw, null, 2) }));
+}
+$("#item-drawer-close").addEventListener("click", () => $("#item-drawer").classList.add("hidden"));
+
 // --- connectors ------------------------------------------------------------
 
 async function loadConnectors() {

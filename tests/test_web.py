@@ -170,8 +170,9 @@ def test_add_duplicate_source_rejected(client, tmp_path):
 
 
 def test_add_source_invalid_options_rejected(client):
-    # Missing required downloads_dir for skool.
-    r = client.post("/api/sources", json={"name": "bad", "type": "skool", "options": {}})
+    # Unknown option for skool (its config model forbids extras).
+    r = client.post("/api/sources", json={"name": "bad", "type": "skool",
+                                          "options": {"bogus_option": True}})
     assert r.status_code == 400
 
 
@@ -248,6 +249,75 @@ def test_export_download_after_backup(client):
 
 def test_export_unknown_format_400(client):
     assert client.get("/api/export", params={"format": "nope"}).status_code == 400
+
+
+# --- browse (items / detail / media / metrics) -----------------------------
+
+
+def test_items_lists_after_backup(client):
+    job = client.post("/api/backup", json={"source": "courses"}).json()
+    _wait_done(client, job["id"])
+    data = client.get("/api/items").json()
+    assert data["total"] == 1
+    row = data["items"][0]
+    assert row["external_id"] == "community:mycommunity"
+    assert row["source"] == "courses"
+    assert row["item_kind"] == "community"
+    assert "raw" not in row  # the listing is the light "browse" shape
+
+
+def test_items_empty_before_any_backup(client):
+    assert client.get("/api/items").json() == {"items": [], "total": 0, "limit": 50, "offset": 0}
+
+
+def test_items_filters_by_type_and_search(client):
+    job = client.post("/api/backup", json={"source": "courses"}).json()
+    _wait_done(client, job["id"])
+    assert client.get("/api/items", params={"type": "lesson"}).json()["total"] == 0
+    assert client.get("/api/items", params={"type": "community"}).json()["total"] == 1
+    assert client.get("/api/items", params={"q": "My Community"}).json()["total"] == 1
+    assert client.get("/api/items", params={"q": "no-such-text"}).json()["total"] == 0
+
+
+def test_items_pagination(client):
+    job = client.post("/api/backup", json={"source": "courses"}).json()
+    _wait_done(client, job["id"])
+    data = client.get("/api/items", params={"limit": 1, "offset": 1}).json()
+    assert data["items"] == []
+    assert data["total"] == 1
+    assert data["offset"] == 1
+
+
+def test_item_detail_includes_raw_and_media(client):
+    job = client.post("/api/backup", json={"source": "courses"}).json()
+    _wait_done(client, job["id"])
+    item_id = client.get("/api/items").json()["items"][0]["id"]
+    detail = client.get(f"/api/items/{item_id}").json()
+    assert detail["raw"]["slug"] == "mycommunity"
+    assert detail["media"] == []
+
+
+def test_item_detail_404(client):
+    assert client.get("/api/items/999999").status_code == 404
+
+
+def test_media_blob_404_when_missing_or_unarchived(client):
+    assert client.get("/api/media/999999").status_code == 404
+
+
+def test_metrics_after_backup(client):
+    job = client.post("/api/backup", json={"source": "courses"}).json()
+    _wait_done(client, job["id"])
+    m = client.get("/api/metrics").json()
+    assert {"source": "courses", "kind": "community", "total": 1, "live": 1, "deleted": 0} in m["by_source_kind"]
+    assert m["revision_count"] == 1
+    assert m["media_count"] == 0
+    assert m["media_bytes"] == 0
+
+
+def test_metrics_empty_before_any_backup(client):
+    m = client.get("/api/metrics").json()
+    assert m == {"by_source_kind": [], "revision_count": 0, "media_count": 0, "media_bytes": 0}
 
 
 # --- connector readiness + setup actions -----------------------------------

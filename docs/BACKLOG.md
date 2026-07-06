@@ -4,40 +4,32 @@ Deferred work and future ideas, captured so they aren't lost between sessions.
 Each entry notes existing code to reuse so a future implementer doesn't start
 from scratch.
 
-## 1. Database preview + metrics UI
+## 1. Database preview + metrics UI (SHIPPED)
 
-**Goal:** browse what each backup has actually stored — without running an
-export — plus at-a-glance metrics per source.
+Implemented as a sibling query method rather than extending `ExportQuery`
+(which stays export-only): `Storage.browse_items(query, text=, limit=,
+offset=)` (`src/dbs/storage/{base,sqlite}.py`) returns `(rows, total)`, still
+built on `_build_filter` so it shares the source/type/date/deleted semantics
+with export. `Storage.get_item(item_id)` returns the full row (raw payload +
+media list) for the detail drawer; `Storage.get_media_blob(media_id)` serves
+one archived blob; `Storage.metrics()` aggregates items-by-source/kind, live
+vs deleted, revision count, and stored media bytes in one query set.
+`BackupService` exposes all four as thin wrappers.
 
-**Reuse-first (already in place):**
-- Item query seam: `SqliteStorage.iter_items(ExportQuery)`
-  (`src/dbs/storage/sqlite.py`) with `ExportQuery` filters
-  (`src/dbs/export/base.py`: `sources`, `item_types`, `since`/`until`,
-  `include_deleted`, `include_revisions`, `include_raw`).
-- Counts: `SqliteStorage.item_counts(source_id)` → `(total, live, deleted)`.
-- Service/web already expose `status()` → `/api/status`, `history()` →
-  `/api/history`, `export()` → `/api/export`, `verify()` → `/api/verify`.
-- Frontend tab pattern: `src/dbs/web/static/index.html` nav + `app.js`
-  `LOADERS`/`switchTab`.
+Web: `GET /api/items` (paginated, filterable, text search over title/body —
+wildcards are escaped so `%`/`_` in a query aren't treated as SQL LIKE
+wildcards), `GET /api/items/{id}` (detail), `GET /api/media/{id}` (blob,
+`Content-Disposition` filename sanitized against CRLF/quote injection),
+`GET /api/metrics`. Frontend: a **Browse** tab (`index.html`/`app.js`/
+`style.css`) with source/type/search/date filters, a paginated results table,
+a metrics strip + per-source/kind breakdown table, and a slide-in item detail
+drawer (raw JSON, media thumbnails for images, download links for
+non-image/un-archived media).
 
-**Sketch:**
-- New **paginated, read-only** `GET /api/items` over `iter_items` — the one
-  genuinely new storage bit is pagination (`limit`/`offset` on `ExportQuery`
-  or a sibling query method). Returns title/url/source/kind/created/updated/
-  deleted + a media summary.
-- A **"Browse" tab**: source/type/text-search/date filters (mirroring the
-  Export form), a results table, and a row → **detail drawer** showing the raw
-  JSON payload and media list. Images render inline via a
-  `GET /api/media/{id}` blob endpoint (reusing `iter_media_blobs`).
-- A **metrics strip**: items by source and by kind, live vs deleted,
-  revision count, stored media bytes, last-run trend — a new lightweight
-  `storage.metrics()` doing aggregate SQL over `items` / `media` /
-  `item_revisions`.
-
-**Open questions when picked up:** how much raw payload to show inline;
-render media bytes inline vs download-only (respect `max_media_bytes`);
-whether to add a CLI counterpart (`dbs items` / `dbs stats`) or keep it
-web-only.
+Not done (deferred, low-cost to add later if wanted): a CLI counterpart
+(`dbs items` / `dbs stats`) — the sketch's own open question — was left out
+to keep this web-only, matching the "Database preview" scope as browsing what
+the *web UI* backup has stored.
 
 ## 2. Skool phase 2 — native video download (SHIPPED)
 

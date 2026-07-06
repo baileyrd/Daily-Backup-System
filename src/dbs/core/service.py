@@ -196,6 +196,7 @@ class BackupService:
                 now=self.clock,
                 store_media=sc.store_media,
                 max_media_bytes=max(0, sc.max_media_mb) * 1024 * 1024,
+                download_dir=self.config.download_dir_for(name),
             )
             result = self.engine.run_source(rc, ctx, on_progress=on_progress)
         finally:
@@ -367,6 +368,20 @@ class BackupService:
                 return []
             source_id = source.id
         return self.storage.recent_runs(source_id, limit)
+
+    def browse_items(
+        self, query: ExportQuery, *, text: str | None = None, limit: int = 50, offset: int = 0
+    ) -> tuple[list[ItemRow], int]:
+        return self.storage.browse_items(query, text=text, limit=limit, offset=offset)
+
+    def get_item(self, item_id: int) -> ItemRow | None:
+        return self.storage.get_item(item_id)
+
+    def get_media_blob(self, media_id: int) -> dict[str, Any] | None:
+        return self.storage.get_media_blob(media_id)
+
+    def metrics(self) -> dict[str, Any]:
+        return self.storage.metrics()
 
     def list_sources(self) -> list[dict[str, Any]]:
         out = []

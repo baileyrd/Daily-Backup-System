@@ -46,6 +46,11 @@ def _parse_date(value: Optional[str]) -> Optional[datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def _safe_header_value(value: str) -> str:
+    """Strip characters that could break an HTTP header (CRLF, quotes)."""
+    return value.replace("\r", "").replace("\n", "").replace('"', "")
+
+
 def _source_secret_names(rc, options: dict[str, Any]) -> list[str]:
     """The secret env-var name(s) a configured source will actually read.
 
@@ -88,8 +93,10 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
     """Build the FastAPI app bound to a config file. Raises if deps are absent.
 
     ``allow_setup`` enables the privileged setup actions (install deps, browser
-    login) that shell out on the host; off by default, keep it off on shared
-    machines.
+    login) that shell out on the host. Defaults to ``False`` here for direct
+    callers (e.g. tests); the ``dbs serve`` CLI passes ``True`` unless
+    ``--no-setup`` is given, so setup is on by default for actual end users —
+    turn it off explicitly with ``--no-setup`` on a shared machine.
     """
     try:
         from fastapi import Body, FastAPI, HTTPException, Query
@@ -249,6 +256,74 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
                     for x in report.issues
                 ],
             }
+        finally:
+            svc.close()
+
+    # -- browse (paginated item listing + detail + media + metrics) ---------
+
+    @app.get("/api/items")
+    def list_items(
+        source: Optional[list[str]] = Query(None),
+        type: Optional[list[str]] = Query(None),
+        since: Optional[str] = Query(None),
+        until: Optional[str] = Query(None),
+        include_deleted: bool = Query(False),
+        q: Optional[str] = Query(None),
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ) -> dict[str, Any]:
+        try:
+            query = ExportQuery(
+                sources=list(source) if source else None,
+                item_types=list(type) if type else None,
+                since=_parse_date(since),
+                until=_parse_date(until),
+                include_deleted=include_deleted,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"bad date: {exc}")
+        svc = open_service()
+        try:
+            items, total = svc.browse_items(query, text=q, limit=limit, offset=offset)
+        finally:
+            svc.close()
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+    @app.get("/api/items/{item_id}")
+    def item_detail(item_id: int) -> dict[str, Any]:
+        svc = open_service()
+        try:
+            item = svc.get_item(item_id)
+        finally:
+            svc.close()
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"no such item {item_id}")
+        return item
+
+    @app.get("/api/media/{media_id}")
+    def media_blob(media_id: int):
+        svc = open_service()
+        try:
+            blob = svc.get_media_blob(media_id)
+        finally:
+            svc.close()
+        if blob is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no such media {media_id} (or its bytes were not archived)",
+            )
+        filename = _safe_header_value(blob["filename"] or f"media-{media_id}")
+        return Response(
+            content=blob["data"],
+            media_type=blob["mime"] or "application/octet-stream",
+            headers={"Content-Disposition": f'inline; filename="{filename}"'},
+        )
+
+    @app.get("/api/metrics")
+    def metrics() -> dict[str, Any]:
+        svc = open_service()
+        try:
+            return svc.metrics()
         finally:
             svc.close()
 

@@ -255,10 +255,17 @@ class SqliteStorage(Storage):
             for it in items:
                 self._track_watermark(res, it.item_updated_at)
                 ex = existing.get(it.external_id)
+                # Track the written state so a duplicate external_id later in
+                # this same batch updates the row instead of re-inserting
+                # (the DB index above predates the batch's own writes).
                 if ex is None:
-                    self._insert_item(source_id, run_id, it, now, res)
+                    existing[it.external_id] = self._insert_item(
+                        source_id, run_id, it, now, res
+                    )
                 else:
-                    self._update_item(ex, run_id, it, now, res)
+                    existing[it.external_id] = self._update_item(
+                        ex, run_id, it, now, res
+                    )
         return res
 
     def _existing_index(
@@ -279,7 +286,7 @@ class SqliteStorage(Storage):
 
     def _insert_item(
         self, source_id: int, run_id: int, it: PreparedItem, now: str, res: BatchResult
-    ) -> None:
+    ) -> dict[str, Any]:
         deleted = 1 if it.deleted else 0
         change_kind = "deleted" if it.deleted else "created"
         cur = self.conn.execute(
@@ -306,41 +313,56 @@ class SqliteStorage(Storage):
             res.deleted += 1
         else:
             res.created += 1
+        return {
+            "id": item_id, "external_id": it.external_id,
+            "content_hash": it.content_hash, "revision": 1, "deleted": deleted,
+        }
 
     def _update_item(
-        self, ex: sqlite3.Row, run_id: int, it: PreparedItem, now: str, res: BatchResult
-    ) -> None:
+        self, ex: "sqlite3.Row | dict[str, Any]", run_id: int, it: PreparedItem,
+        now: str, res: BatchResult
+    ) -> dict[str, Any]:
         item_id = int(ex["id"])
         was_deleted = bool(ex["deleted"])
         hash_changed = ex["content_hash"] != it.content_hash
+        new_rev = int(ex["revision"])
+        deleted = was_deleted
+        content_hash = ex["content_hash"]
 
         if it.deleted and not was_deleted:
-            new_rev = int(ex["revision"]) + 1
+            new_rev += 1
             self._write_full_update(item_id, new_rev, it, now, run_id, deleted=True)
             self._insert_revision(item_id, new_rev, it, now, run_id, "deleted")
             self._replace_media(item_id, it)
             res.deleted += 1
             res.revisions += 1
+            deleted, content_hash = True, it.content_hash
         elif was_deleted and not it.deleted:
-            new_rev = int(ex["revision"]) + 1
+            new_rev += 1
             self._write_full_update(item_id, new_rev, it, now, run_id, deleted=False)
             self._insert_revision(item_id, new_rev, it, now, run_id, "undeleted")
             self._replace_media(item_id, it)
             res.undeleted += 1
             res.revisions += 1
+            deleted, content_hash = False, it.content_hash
         elif hash_changed:
-            new_rev = int(ex["revision"]) + 1
+            new_rev += 1
             self._write_full_update(item_id, new_rev, it, now, run_id, deleted=False)
             self._insert_revision(item_id, new_rev, it, now, run_id, "updated")
             self._replace_media(item_id, it)
             res.updated += 1
             res.revisions += 1
+            deleted, content_hash = False, it.content_hash
         else:
             self.conn.execute(
                 "UPDATE items SET last_seen_at=?, observed_run_id=? WHERE id=?",
                 (now, run_id, item_id),
             )
             res.unchanged += 1
+        return {
+            "id": item_id, "external_id": it.external_id,
+            "content_hash": content_hash, "revision": new_rev, "deleted": deleted,
+        }
 
     def _write_full_update(
         self,
@@ -604,6 +626,97 @@ class SqliteStorage(Storage):
         deleted = int(row["deleted"] or 0)
         return total, total - deleted, deleted
 
+    # -- browse / metrics (web UI) -------------------------------------------
+
+    def browse_items(
+        self, query: ExportQuery, *, text: str | None = None, limit: int = 50, offset: int = 0
+    ) -> tuple[list[ItemRow], int]:
+        where, params = _build_filter(query, table="i")
+        if text:
+            where += " AND (i.title LIKE ? ESCAPE '\\' OR i.body LIKE ? ESCAPE '\\')"
+            like = _like_pattern(text)
+            params = [*params, like, like]
+        total = int(
+            self.conn.execute(
+                f"SELECT COUNT(*) FROM items i JOIN sources s ON s.id = i.source_id WHERE {where}",
+                params,
+            ).fetchone()[0]
+        )
+        sql = (
+            "SELECT i.*, s.name AS source_name, s.type AS source_type, "
+            "(SELECT COUNT(*) FROM media m WHERE m.item_id = i.id) AS media_count "
+            "FROM items i JOIN sources s ON s.id = i.source_id "
+            f"WHERE {where} ORDER BY i.item_created_at DESC, i.id DESC LIMIT ? OFFSET ?"
+        )
+        rows = self.conn.execute(sql, [*params, max(1, limit), max(0, offset)]).fetchall()
+        return [_row_to_browse_item(r) for r in rows], total
+
+    def get_item(self, item_id: int) -> ItemRow | None:
+        row = self.conn.execute(
+            "SELECT i.*, s.name AS source_name, s.type AS source_type "
+            "FROM items i JOIN sources s ON s.id = i.source_id WHERE i.id=?",
+            (item_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        out = _row_to_item(row, include_raw=True)
+        out["id"] = int(row["id"])
+        out["media"] = self._media_for_item(item_id)
+        return out
+
+    def _media_for_item(self, item_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT id, url, kind, filename, mime, sha256, byte_size, local_path, "
+            "(data IS NOT NULL) AS has_data FROM media WHERE item_id=? ORDER BY id",
+            (item_id,),
+        ).fetchall()
+        return [
+            {
+                "id": int(r["id"]), "url": r["url"], "kind": r["kind"],
+                "filename": r["filename"], "mime": r["mime"], "sha256": r["sha256"],
+                "byte_size": r["byte_size"], "local_path": r["local_path"],
+                "has_data": bool(r["has_data"]),
+            }
+            for r in rows
+        ]
+
+    def get_media_blob(self, media_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT id, item_id, filename, mime, data FROM media WHERE id=? AND data IS NOT NULL",
+            (media_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]), "item_id": int(row["item_id"]),
+            "filename": row["filename"], "mime": row["mime"], "data": row["data"],
+        }
+
+    def metrics(self) -> dict[str, Any]:
+        by_source_kind = self.conn.execute(
+            "SELECT s.name AS source, i.item_kind AS kind, COUNT(*) AS total, "
+            "SUM(CASE WHEN i.deleted=0 THEN 1 ELSE 0 END) AS live "
+            "FROM items i JOIN sources s ON s.id = i.source_id "
+            "GROUP BY s.name, i.item_kind ORDER BY s.name, i.item_kind"
+        ).fetchall()
+        revisions = self.conn.execute("SELECT COUNT(*) FROM item_revisions").fetchone()[0]
+        media = self.conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(byte_size), 0) AS bytes "
+            "FROM media WHERE data IS NOT NULL"
+        ).fetchone()
+        return {
+            "by_source_kind": [
+                {
+                    "source": r["source"], "kind": r["kind"], "total": int(r["total"]),
+                    "live": int(r["live"] or 0), "deleted": int(r["total"]) - int(r["live"] or 0),
+                }
+                for r in by_source_kind
+            ],
+            "revision_count": int(revisions),
+            "media_count": int(media["n"] or 0),
+            "media_bytes": int(media["bytes"] or 0),
+        }
+
     def integrity_check(self) -> str:
         row = self.conn.execute("PRAGMA integrity_check").fetchone()
         return row[0] if row else "unknown"
@@ -730,6 +843,31 @@ def _row_to_item(row: sqlite3.Row, *, include_raw: bool) -> ItemRow:
     if include_raw:
         out["raw"] = json.loads(row["raw_json"])
     return out
+
+
+def _row_to_browse_item(row: sqlite3.Row) -> ItemRow:
+    """Lighter item shape for the paginated browse listing (no raw payload)."""
+    return {
+        "id": int(row["id"]),
+        "source": row["source_name"],
+        "type": row["source_type"],
+        "external_id": row["external_id"],
+        "item_kind": row["item_kind"],
+        "title": row["title"],
+        "url": row["url"],
+        "created_at": row["item_created_at"],
+        "updated_at": row["item_updated_at"],
+        "revision": row["revision"],
+        "deleted": bool(row["deleted"]),
+        "deleted_at": row["deleted_at"],
+        "media_count": int(row["media_count"]),
+    }
+
+
+def _like_pattern(text: str) -> str:
+    """Escape SQL LIKE wildcards in free-text search input (paired with ESCAPE '\\')."""
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
 
 
 __all__ = ["SqliteStorage"]

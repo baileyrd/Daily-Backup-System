@@ -9,6 +9,7 @@ CONFIG_TEMPLATE = """\
 [dbs]
 database = "dbs.sqlite3"          # SQLite file (created automatically)
 export_dir = "exports"           # default output directory for exports
+download_root = "downloads"      # each source downloads into <download_root>/<source-name>
 default_overlap_seconds = 300    # re-scan window to avoid boundary gaps
 
 # --- Sources --------------------------------------------------------------
@@ -53,12 +54,13 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # Skool: back up your communities/courses/lessons via a logged-in browser
 # session. Needs the extra:  pip install 'daily-backup-system[skool]' && playwright
 # install chromium. Click "Skool login" in the UI to capture the session
-# (SKOOL_SESSION_DIR). downloads_dir is where resource files + lesson videos
-# are saved (download_videos, on by default; yt-dlp + auto-managed ffmpeg).
+# (SKOOL_SESSION_DIR). Resource files + lesson videos are saved under
+# <download_root>/<source-name> (download_videos, on by default; yt-dlp +
+# auto-managed ffmpeg); set downloads_dir to override the location.
 # [sources.skool]
 # type = "skool"
 # enabled = true
-# downloads_dir = "~/skool-backup"
+# downloads_dir = "~/skool-backup"   # optional; default <download_root>/<source-name>
 # download_videos = true             # set false for catalog/resources only
 # video_quality = 1080               # cap the HLS variant height; 0 = best
 # write_markdown = true              # a url2obs-style .md note of each lesson page

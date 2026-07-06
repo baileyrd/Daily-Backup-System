@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from logging import Logger
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Union
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -157,6 +158,10 @@ class RunContext:
     # per-file size in bytes (0 = no cap).
     store_media: bool = False
     max_media_bytes: int = 0
+    # This source's download folder (<download_root>/<source-name>), resolved
+    # by the service. Connectors that write files should default to it; an
+    # explicit per-source option (e.g. skool's downloads_dir) still wins.
+    download_dir: Path | None = None
 
 
 # --------------------------------------------------------------------------- #

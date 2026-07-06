@@ -11,13 +11,14 @@ files** to a local ``downloads_dir`` (recorded as :class:`MediaRef` paths).
 Native (Mux) lesson video is downloaded too (``download_videos``, on by
 default): the lesson page embeds — or the player reveals — a signed
 ``.m3u8?token=`` HLS URL, which yt-dlp downloads into ``downloads_dir``
-(ffmpeg is auto-managed via ``imageio-ffmpeg``, falling back to the system
-PATH). The signed URL is found by, in order: reconstructing it from the lesson
-page's ``__NEXT_DATA__`` (``playbackId`` + ``playbackToken``), clicking the
-Mux player and sniffing the browser's resource timeline, and a shadow-DOM
-``<video>.src`` fallback — the same ladder skool-downloader uses. External
-video links (Vimeo/YouTube/Loom) are recorded as stable references, not
-downloaded.
+(ffmpeg/ffprobe are auto-managed via ``ffmpeg-downloader``, falling back to
+the system PATH — ``imageio-ffmpeg`` was dropped, since it never bundled
+``ffprobe``). The signed URL is found by, in order: clicking the Mux player
+and sniffing the browser's resource timeline or a shadow-DOM ``<video>.src``,
+then falling back to reconstructing it from the lesson page's
+``__NEXT_DATA__`` (``playbackId`` + ``playbackToken``) — the same ladder
+skool-downloader uses. External video links (Vimeo/YouTube/Loom) are
+downloaded too, straight through yt-dlp, when ``download_videos`` is set.
 
 Skool's course tree carries only titles/ids, so video/resource data requires
 visiting **each lesson's own page** (see ``_process_lesson``). A tiny
@@ -161,8 +162,11 @@ class SkoolConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Where downloaded resource files (and, in phase 2, videos) are written.
-    downloads_dir: str = Field(
-        description="Where downloaded resource files, videos, and notes are written."
+    # Optional: defaults to <download_root>/<source-name> (ctx.download_dir).
+    downloads_dir: str | None = Field(
+        default=None,
+        description="Where downloaded resource files, videos, and notes are "
+                    "written. Defaults to <download_root>/<source-name>.",
     )
     # Community slugs (or full classroom URLs) to back up. Empty = auto-discover
     # the communities the logged-in account has joined.
@@ -300,9 +304,10 @@ class SkoolConnector(Connector):
     docs_url = "https://github.com/baileyrd/skool-downloader"
     setup_hint = (
         "Click ‘Skool login’ to capture a session: a browser opens, you log in, "
-        "and you CLOSE the window to finish. Set downloads_dir (where resource "
-        "files are saved) and, optionally, communities = [\"your-community\"] "
-        "(otherwise your joined communities are auto-discovered)."
+        "and you CLOSE the window to finish. Resource files are saved under "
+        "<download_root>/<source-name> unless downloads_dir overrides it; "
+        "optionally set communities = [\"your-community\"] (otherwise your "
+        "joined communities are auto-discovered)."
     )
     # A Playwright persistent-context directory captured once; kept in the dbs
     # dir and referenced by SKOOL_SESSION_DIR in .env — the same capture the
@@ -395,6 +400,19 @@ class SkoolConnector(Connector):
 
     # -- acquisition (the only Playwright-touching part; overridden in tests) --
 
+    @staticmethod
+    def _downloads_root(cfg: SkoolConfig, ctx: RunContext) -> Path:
+        """Where files land: explicit ``downloads_dir`` wins, else the
+        engine-provided per-source folder (``<download_root>/<source-name>``)."""
+        if cfg.downloads_dir:
+            return Path(cfg.downloads_dir).expanduser()
+        if ctx.download_dir is None:  # only when constructed without a service
+            raise ConnectorConfigError(
+                "no download folder: set downloads_dir on the skool source or "
+                "download_root in [dbs]."
+            )
+        return ctx.download_dir
+
     def _acquire(self, ctx: RunContext) -> Iterator[dict[str, Any]]:
         """Drive an authenticated browser over each community's classroom and
         yield tagged community/course/lesson dicts.
@@ -421,7 +439,7 @@ class SkoolConnector(Connector):
                 f"Skool session directory {session_dir} does not exist; capture a "
                 f"login once (the web UI's ‘Skool login’ button) to create it."
             )
-        downloads = Path(cfg.downloads_dir).expanduser()
+        downloads = self._downloads_root(cfg, ctx)
 
         try:
             with sync_playwright() as pw:

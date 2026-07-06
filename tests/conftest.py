@@ -105,6 +105,7 @@ def make_ctx(
     secrets: Secrets | None = None,
     store_media: bool = False,
     max_media_bytes: int = 0,
+    download_dir=None,
 ) -> RunContext:
     return RunContext(
         source_id=source_id,
@@ -120,6 +121,7 @@ def make_ctx(
         now=clock or (lambda: datetime(2024, 1, 1, tzinfo=UTC)),
         store_media=store_media,
         max_media_bytes=max_media_bytes,
+        download_dir=download_dir,
     )
 
 

@@ -26,7 +26,8 @@ This document is the system-level reference; diagrams referenced below live in
 - **`Storage` (ABC) + `SqliteStorage` (`dbs.storage`).** All persistence. An ABC
   so a future deployment can swap SQLite for Postgres without touching the core.
 - **`Export` (`dbs.export`).** Pluggable exporters streaming from storage:
-  json / ndjson / csv / markdown / a self-describing zip `archive`.
+  json / ndjson / csv / markdown / obsidian (a vault of linked notes) / a
+  self-describing zip `archive`.
 - **`dbs.cli` (Typer).** The only module that prints, reads argv, or sets exit
   codes. Maps 1:1 onto `BackupService` methods.
 - **`dbs.web` (optional, `[web]` extra).** A FastAPI app (`dbs serve`) that
@@ -40,17 +41,23 @@ This document is the system-level reference; diagrams referenced below live in
   restricted to names a connector declares as a secret, and are never read
   back — the secrets API reports only set/unset status. It binds to localhost
   and is unauthenticated by design (local, single-user use). Optional
-  **setup actions** (`dbs.web.setup`, gated behind `--allow-setup`) can
-  install a connector's declared `pip_requirements` and run a connector's
-  declared interactive **auth capture** as background jobs; the executed
-  commands are derived from connector metadata, never from client input.
-  Connectors declare their optional runtime deps (`pip_requirements` /
-  `runtime_imports` / `needs_playwright_browser`) and a `check_ready()` probe,
-  and may declare an `AuthCapture` (kind `browser_session` → a Playwright
-  session dir, or `browser_cookies` → a Netscape `cookies.txt`) naming the
-  `*_env` secret it populates. The web layer owns the (Playwright) browser
-  automation per kind; the connector stays UI-agnostic and the core still
-  installs/launches nothing itself.
+  **setup actions** (`dbs.web.setup`) can install a connector's declared
+  `pip_requirements` and run a connector's declared interactive **auth
+  capture** as background jobs; the executed commands are derived from
+  connector metadata, never from client input. This is **on by default**
+  (`dbs serve --allow-setup`, the default) and disabled with `dbs serve
+  --no-setup`. Connectors declare their optional runtime deps
+  (`pip_requirements` / `runtime_imports` / `needs_playwright_browser`) and a
+  `check_ready()` probe, and may declare an `AuthCapture` (kind
+  `browser_session` → a Playwright session dir, or `browser_cookies` → a
+  Netscape `cookies.txt`) naming the `*_env` secret it populates. The web
+  layer owns the (Playwright) browser automation per kind; the connector
+  stays UI-agnostic and the core still installs/launches nothing itself. A
+  separate, ad-hoc **Research** tab (backed by `dbs.research`, its own
+  `[research]` extra and a third `AuthCapture`-like `browser_storage_state`
+  capture for NotebookLM) reuses the same job/SSE/setup machinery but sits
+  outside the `BackupService`/connector model entirely — see
+  [docs/research.md](research.md).
 
 ## Anatomy of a backup run
 
@@ -58,9 +65,8 @@ This document is the system-level reference; diagrams referenced below live in
 
 `dbs backup raindrop` (or `--all`, or the equivalent `POST /api/backup`) walks
 through `BackupService.backup_source()` → `Engine.run_source()` →
-`Connector.fetch()`, with the engine driving every write. The four
-correctness invariants below are why the engine — not each connector — owns
-persistence:
+`Connector.fetch()`, with the engine driving every write. The correctness
+invariants below are why the engine — not each connector — owns persistence:
 
 1. **The cursor never gets ahead of data.** Buffered items + the new cursor are
    committed in one transaction per `Checkpoint`. A crash leaves the cursor
@@ -81,7 +87,8 @@ persistence:
    items in one pass — a truncated upstream listing looks like mass deletion,
    and the engine treats that as a warning rather than acting on it.
 5. **Crash recovery.** A reaper flips stale `running` runs to `interrupted` and
-   clears their locks at the start of each operation.
+   clears their locks at the start of each per-source backup run (so `backup
+   --all` reaps once per source it touches, not once for the whole batch).
 6. **Least-privilege secrets.** Each connector sees only its declared
    `secret_keys`, via a `Secrets` accessor scoped at run-context construction
    time — a plugin cannot read another connector's token even if it tried.
@@ -97,7 +104,15 @@ surfaced loudly. `ManagedHTTPClient` (`dbs.core.http`) separately handles
 HTTP-level retry/backoff for connectors that opt into it
 (`wants_managed_http`): exponential backoff with jitter on 429/5xx/network
 errors, honoring `Retry-After`, with an optional preemptive requests-per-minute
-limiter.
+limiter. Any other 4xx response is raised immediately as-is (no retry, not
+wrapped in a `Connector*` error) — a connector's `fetch()` must catch and
+reclassify those itself if a given 4xx should be treated as
+config/auth/transient rather than aborting the run as an unhandled exception.
+
+A source that fails to acquire its single-writer lock (another run for the
+same source already in progress) is recorded as `skipped` and raises
+`SourceLockedError` rather than blocking; `dbs backup --all --only-due` skips
+a source outright if it last started within the past 20 hours.
 
 ## Progress reporting (UI-agnostic)
 
@@ -151,11 +166,14 @@ how capabilities/`AuthCapture` work).
   with the raw payload at that revision.
 - `sync_runs` — per-run status and counters (`success`/`partial`/`failed`/…).
 - `sync_state` — per-source opaque cursor + engine watermark + run count.
-- `media` — assets per item: always a reference (url/kind/filename/mime), plus the
-  actual bytes (`data`/`byte_size`/`sha256`) when the source opts in with
-  `store_media` (local files only; size-capped via `max_media_mb`). Default is
-  reference-only — large binary media is not embedded unless asked for.
+- `media` — assets per item: always a reference (url/kind/filename/mime/
+  local_path/fetched_at), plus the actual bytes (`data`/`byte_size`/`sha256`)
+  when the source opts in with `store_media` (local files only; size-capped
+  via `max_media_mb`). Default is reference-only — large binary media is not
+  embedded unless asked for.
 - `source_locks` — single-writer guard per source.
+- `schema_migrations` — internal bookkeeping of which migrations have run;
+  not part of the backup data itself.
 
 All timestamps are ISO-8601 UTC text with a trailing `Z`, so lexicographic order
 is chronological. Connection pragmas (WAL, `foreign_keys`, `busy_timeout`) are set

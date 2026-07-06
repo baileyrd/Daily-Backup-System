@@ -182,12 +182,27 @@ when you wrap a browser/SDK source rather than a REST endpoint:
   exercising the mapping and markers with no browser — see
   `tests/connectors/test_reddit.py` and `tests/connectors/test_youtube.py`.
 
-The same shape works for a **local-file** source that indexes data another tool
-produced on disk. The built-in `skool` connector reads the JSON manifests written
-by `skool-downloader` (no network, no auth — `requires_auth=False`,
-`secret_keys=()`), walks the tree in an overridable `_acquire()`, and emits one
-full-enumeration `ReconcileMarker` so stale catalog entries are swept. Its tests
-exercise both the injected mapping and a real temp-dir tree.
+The built-in `skool` connector is another browser-session example, and shows a
+variant worth calling out: instead of a REST API, it reads a `__NEXT_DATA__`
+JSON blob embedded in each authenticated classroom page (Skool is a Next.js
+site with no public API). Like `reddit`, it's `requires_auth=True` with a
+path-valued `secret_keys` entry (`SKOOL_SESSION_DIR`, a captured Playwright
+session directory), `supports_incremental=False` (every run re-reads the
+classroom tree), and `supports_full_enumeration=True` with a single
+`ReconcileMarker` so catalog entries that vanish upstream get swept. It walks
+the tree in an overridable `_acquire()`, so tests can inject fabricated
+`__NEXT_DATA__`-shaped records with no browser — see
+`tests/connectors/test_skool.py`.
+
+## Writing files to disk
+
+A connector that downloads files (videos, resource attachments, repo zips)
+should write them under `ctx.download_dir` — the per-source folder
+`<download_root>/<source-name>` resolved by the service from the `[dbs]`
+`download_root` config key (default `"downloads"`, relative to the config
+file). Offer an explicit per-source option (like skool's `downloads_dir`) only
+as an override; when it's unset, fall back to `ctx.download_dir` so every
+source lands in a predictable place under one root.
 
 ## Archiving extra content per item
 
