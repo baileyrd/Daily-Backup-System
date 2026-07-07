@@ -111,3 +111,34 @@ def test_connector_override_to_registry_map(tmp_path):
     override = cfg.registry_override()
     assert override["raindrop"] == "x:raindrop"
     assert override["raindrop:allow_override"] == "true"
+
+
+def test_requires_vpn_and_vpn_commands(tmp_path):
+    p = tmp_path / "dbs.toml"
+    p.write_text(
+        "[dbs]\n"
+        'vpn_exec = "/usr/bin/env"\n'
+        'vpn_status = "/bin/true"\n\n'
+        "[sources.yt]\n"
+        'type = "youtube"\n'
+        "requires_vpn = true\n\n"
+        "[sources.rd]\n"
+        'type = "raindrop"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(p)
+    assert cfg.vpn_exec == "/usr/bin/env"
+    assert cfg.vpn_status == "/bin/true"
+    assert cfg.sources["yt"].requires_vpn is True
+    assert cfg.sources["rd"].requires_vpn is False
+    # reserved key: must not leak into connector options
+    assert "requires_vpn" not in cfg.sources["yt"].options
+
+
+def test_vpn_command_defaults(tmp_path):
+    p = tmp_path / "dbs.toml"
+    p.write_text('[sources.rd]\ntype = "raindrop"\n', encoding="utf-8")
+    cfg = load_config(p)
+    assert cfg.vpn_exec == "sudo vpn-netns exec"
+    assert cfg.vpn_status == "sudo vpn-netns status"
+    assert cfg.sources["rd"].requires_vpn is False

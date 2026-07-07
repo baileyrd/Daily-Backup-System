@@ -4,271 +4,410 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Daily Backup System</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v={{v}}" />
 </head>
 <body>
-  <header>
-    <h1>Daily Backup System</h1>
-    <span id="meta" class="meta"></span>
-  </header>
+<div class="app">
 
-  <nav id="tabs">
-    <button data-tab="sources" class="active">Sources</button>
-    <button data-tab="history">History</button>
-    <button data-tab="browse">Browse</button>
-    <button data-tab="connectors">Connectors</button>
-    <button data-tab="secrets">API keys</button>
-    <button data-tab="add">Add source</button>
-    <button data-tab="export">Export</button>
-    <button data-tab="research">Research</button>
-    <button data-tab="verify">Verify</button>
-  </nav>
-
-  <!-- Live backup progress (shared across tabs) -->
-  <section id="progress" class="card hidden">
-    <div class="progress-head">
-      <strong id="progress-title">Backup</strong>
-      <span id="progress-sub" class="muted"></span>
+  <!-- ================= Sidebar ================= -->
+  <aside class="sidebar">
+    <div class="wordmark">
+      <div class="glyph" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <rect x="2" y="2.5" width="12" height="2.6" rx="1.3" fill="var(--accent-text)" opacity="0.55"/>
+          <rect x="2" y="6.7" width="12" height="2.6" rx="1.3" fill="var(--accent-text)" opacity="0.8"/>
+          <rect x="2" y="10.9" width="12" height="2.6" rx="1.3" fill="var(--accent-text)"/>
+        </svg>
+      </div>
+      <div>
+        <div class="name">Daily Backup</div>
+        <div class="sub" id="meta-version">dbs</div>
+      </div>
     </div>
-    <div class="bar"><div id="progress-bar" class="bar-fill"></div></div>
-    <div id="progress-line" class="mono"></div>
-    <div id="progress-results"></div>
-  </section>
 
-  <!-- Setup / capture log (shared across tabs) -->
-  <section id="setup-log-card" class="card hidden">
-    <div class="row between">
-      <strong id="setup-log-title">Setup</strong>
-      <button id="setup-log-hide" class="small">Hide</button>
+    <nav id="tabs" aria-label="Main">
+      <button class="nav-item active" data-tab="dashboard">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="1.5" width="5.4" height="5.4" rx="1.2"/><rect x="9.1" y="1.5" width="5.4" height="5.4" rx="1.2"/><rect x="1.5" y="9.1" width="5.4" height="5.4" rx="1.2"/><rect x="9.1" y="9.1" width="5.4" height="5.4" rx="1.2"/></svg>
+        Overview
+      </button>
+
+      <div class="nav-group-label">Data</div>
+      <button class="nav-item" data-tab="browse">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 3.5h12M2 8h12M2 12.5h8"/></svg>
+        Library <span class="count" id="nav-item-count"></span>
+      </button>
+      <button class="nav-item" data-tab="history">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6.2"/><path d="M8 4.5V8l2.4 1.6"/></svg>
+        Activity
+      </button>
+
+      <div class="nav-group-label">Setup</div>
+      <button class="nav-item" data-tab="sources">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><ellipse cx="8" cy="3.6" rx="5.5" ry="2.1"/><path d="M2.5 3.6v8.8c0 1.16 2.46 2.1 5.5 2.1s5.5-.94 5.5-2.1V3.6"/><path d="M2.5 8c0 1.16 2.46 2.1 5.5 2.1s5.5-.94 5.5-2.1"/></svg>
+        Sources <span class="count" id="nav-source-count"></span>
+      </button>
+      <button class="nav-item" data-tab="connectors">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M6 2.5v4M10 2.5v4M4 6.5h8v2.2a4 4 0 0 1-8 0V6.5ZM8 12.7v1.8"/></svg>
+        Connectors
+      </button>
+      <button class="nav-item" data-tab="secrets">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="5.4" cy="10.6" r="3.4"/><path d="M7.9 8.1 13.5 2.5M11 5l2 2"/></svg>
+        API keys
+      </button>
+
+      <div class="nav-group-label">Tools</div>
+      <button class="nav-item" data-tab="export">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 10V2.5M5 5.5 8 2.5l3 3M2.5 10.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>
+        Export
+      </button>
+      <button class="nav-item" data-tab="research">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.6"/><path d="m10.4 10.4 3.1 3.1"/></svg>
+        Research
+      </button>
+      <button class="nav-item" data-tab="verify">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 13.5 4v4c0 3.2-2.3 5.4-5.5 6.2C4.8 13.4 2.5 11.2 2.5 8V4L8 1.8Z"/><path d="m5.8 8 1.6 1.6 2.9-3"/></svg>
+        Verify
+      </button>
+    </nav>
+
+    <div class="sidebar-foot" id="meta"></div>
+  </aside>
+
+  <!-- ================= Main ================= -->
+  <div class="main">
+    <div class="topbar">
+      <span class="crumb" id="crumb">Overview</span>
+      <span class="health-chip hidden" id="health-chip"><span class="dot ok" id="health-dot"></span><span id="health-text"></span></span>
+      <span class="spacer"></span>
+      <button class="btn ghost" id="theme-toggle" title="Toggle light/dark theme" aria-label="Toggle theme">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.2v1.8M8 13v1.8M1.2 8H3M13 8h1.8M3.2 3.2l1.3 1.3M11.5 11.5l1.3 1.3M12.8 3.2l-1.3 1.3M4.5 11.5l-1.3 1.3"/></svg>
+      </button>
+      <button class="btn primary" id="backup-all">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v2.6h-2.6"/></svg>
+        Back up all
+      </button>
     </div>
-    <pre id="setup-log" class="log"></pre>
-  </section>
 
-  <main>
-    <!-- Sources -->
-    <section id="tab-sources" class="tab">
-      <div class="row between">
-        <h2>Sources</h2>
-        <div>
-          <button id="backup-all" class="primary">Back up all</button>
-          <button id="refresh-sources">Refresh</button>
+    <div class="content">
+
+      <!-- Setup / capture log (shared across tabs) -->
+      <section id="setup-log-card" class="card pad hidden">
+        <div class="row between">
+          <strong id="setup-log-title">Setup</strong>
+          <button id="setup-log-hide" class="btn ghost small">Hide</button>
         </div>
-      </div>
-      <table id="sources-table">
-        <thead>
-          <tr>
-            <th>Name</th><th>Type</th><th>Enabled</th><th>Live</th>
-            <th>Deleted</th><th>Runs</th><th>Last run</th><th></th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-      <p id="sources-hint" class="muted" style="margin-top:0.75rem;"></p>
-    </section>
+        <pre id="setup-log" class="log"></pre>
+      </section>
 
-    <!-- History -->
-    <section id="tab-history" class="tab hidden">
-      <div class="row between">
-        <h2>History</h2>
-        <div>
-          <label>Source <input id="history-source" placeholder="(all)" /></label>
-          <label>Limit <input id="history-limit" type="number" value="25" min="1" max="500" /></label>
-          <button id="refresh-history">Refresh</button>
+      <!-- ============ Overview ============ -->
+      <section id="tab-dashboard" class="tab">
+        <div class="tile-row" id="dash-tiles"></div>
+        <div class="grid-2">
+          <div class="stack">
+            <div class="card">
+              <div class="card-head">
+                <h3>Sources</h3>
+                <span class="aux" id="dash-sources-aux"></span>
+              </div>
+              <div id="dash-sources"></div>
+            </div>
+            <div class="card hidden" id="dash-spark-card">
+              <div class="card-head">
+                <h3>Items added — last 14 days</h3>
+                <span class="aux" id="dash-spark-aux"></span>
+              </div>
+              <div class="spark-wrap">
+                <svg id="dash-spark" viewBox="0 0 560 96" width="100%" height="96" preserveAspectRatio="none" aria-label="Items added per day, last 14 days"></svg>
+                <div class="spark-meta"><span id="dash-spark-from"></span><span id="dash-spark-to"></span></div>
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <h3>Recent activity</h3>
+              <button class="btn ghost small" data-goto="history">View all</button>
+            </div>
+            <div class="feed" id="dash-feed"></div>
+          </div>
         </div>
-      </div>
-      <table id="history-table">
-        <thead>
-          <tr><th>Started</th><th>Source</th><th>Status</th><th>Mode</th>
-              <th>+</th><th>~</th><th>x</th><th>Error</th></tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </section>
+      </section>
 
-    <!-- Browse (what's actually stored) -->
-    <section id="tab-browse" class="tab hidden">
-      <div class="row between">
-        <h2>Browse</h2>
-        <button id="refresh-browse">Refresh</button>
-      </div>
-      <div id="browse-metrics"></div>
-      <form id="browse-filters" class="row" style="flex-wrap:wrap;gap:0.6rem;margin-bottom:0.75rem;">
-        <label>Source <input id="browse-source" placeholder="comma,separated" /></label>
-        <label>Type <input id="browse-type" placeholder="comma,separated" /></label>
-        <label>Search <input id="browse-q" placeholder="title / body contains…" /></label>
-        <label>Since <input id="browse-since" placeholder="YYYY-MM-DD" /></label>
-        <label>Until <input id="browse-until" placeholder="YYYY-MM-DD" /></label>
-        <label class="check"><input type="checkbox" id="browse-deleted" /> Include deleted</label>
-        <button type="submit" class="primary">Filter</button>
-      </form>
-      <table id="browse-table">
-        <thead>
-          <tr><th>Source</th><th>Type</th><th>Title</th><th>Created</th><th>Updated</th><th>Rev</th><th>Media</th></tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-      <div id="browse-pager" class="row between" style="margin-top:0.6rem;">
-        <span id="browse-count" class="muted"></span>
-        <div>
-          <button id="browse-prev" class="small">‹ Prev</button>
-          <button id="browse-next" class="small">Next ›</button>
+      <!-- ============ Library (browse) ============ -->
+      <section id="tab-browse" class="tab hidden">
+        <div class="view-head">
+          <h2>Library</h2>
+          <span class="desc">Everything stored across all sources</span>
+          <div class="actions">
+            <div class="seg" id="browse-view-toggle" role="group" aria-label="Library view">
+              <button type="button" data-view="cards">Cards</button>
+              <button type="button" data-view="table">Table</button>
+            </div>
+            <button class="btn" id="browse-export">Export this view</button>
+            <button class="btn" id="refresh-browse">Refresh</button>
+          </div>
         </div>
-      </div>
-    </section>
 
-    <!-- Connectors -->
-    <section id="tab-connectors" class="tab hidden">
-      <div class="row between">
-        <h2>Connectors</h2>
-        <button id="refresh-connectors">Refresh</button>
-      </div>
-      <div id="connectors-list"></div>
-    </section>
+        <div id="browse-metrics"></div>
 
-    <!-- API keys / secrets -->
-    <section id="tab-secrets" class="tab hidden">
-      <div class="row between">
-        <h2>API keys &amp; tokens</h2>
-        <button id="refresh-secrets">Refresh</button>
-      </div>
-      <p class="muted">Values are written to your <code id="secrets-envpath">.env</code> file (gitignored) and
-        <strong>never shown back</strong> — only whether each is set. Connectors that don't need a key won't appear here.</p>
-      <div id="secrets-list"></div>
-      <div class="card">
-        <h3 style="margin:0 0 0.5rem;font-size:0.95rem;">Set another key</h3>
-        <form id="secret-other-form" class="row">
-          <select id="secret-other-name"></select>
-          <input id="secret-other-value" type="password" placeholder="value" autocomplete="new-password" />
-          <button type="submit" class="primary">Save</button>
+        <form id="browse-filters">
+          <div class="filter-bar">
+            <div class="search-box">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.6"/><path d="m10.4 10.4 3.1 3.1"/></svg>
+              <input id="browse-q" placeholder="Search titles and bodies…" aria-label="Search items" />
+            </div>
+            <span id="browse-source-chips" class="chip-group" aria-label="Filter by source"></span>
+            <button type="button" class="chip" id="browse-deleted" aria-pressed="false">Include deleted</button>
+          </div>
+          <div class="filter-bar secondary">
+            <label class="inline">Type <input id="browse-type" placeholder="comma,separated" size="14" /></label>
+            <label class="inline">Since <input id="browse-since" type="date" /></label>
+            <label class="inline">Until <input id="browse-until" type="date" /></label>
+            <button type="submit" class="btn small">Apply</button>
+          </div>
         </form>
-      </div>
-    </section>
 
-    <!-- Add source -->
-    <section id="tab-add" class="tab hidden">
-      <h2>Add source</h2>
-      <form id="add-form" class="card">
-        <label>Name <input id="add-name" required placeholder="raindrop-personal" /></label>
-        <label>Type
-          <select id="add-type" required></select>
-        </label>
-        <div id="add-schema" class="schema"></div>
-        <div id="add-capture"></div>
-        <label class="check"><input type="checkbox" id="add-store-media" /> Store media bytes in the database</label>
-        <label>Max media size per file (MB, 0 = no limit)
-          <input id="add-max-media" type="number" min="0" value="0" />
-        </label>
-        <details>
-          <summary>Advanced: options as JSON</summary>
-          <textarea id="add-options" rows="6" placeholder='{ "collection_id": 0 }'></textarea>
-        </details>
-        <button type="submit" class="primary">Add source</button>
-        <span id="add-result" class="result"></span>
-      </form>
-      <p class="muted">Secrets are never stored in the config — reference them by name via a
-        <code>*_env</code> option (e.g. <code>token_env = RAINDROP_TOKEN</code>) and set the
-        value in the <strong>API keys</strong> tab (it writes your <code>.env</code>).</p>
-    </section>
+        <div id="browse-cards" class="hidden"></div>
 
-    <!-- Export -->
-    <section id="tab-export" class="tab hidden">
-      <h2>Export</h2>
-      <form id="export-form" class="card">
-        <label>Format <select id="export-format"></select></label>
-        <label>Source(s) <input id="export-source" placeholder="comma,separated (optional)" /></label>
-        <label>Type(s) <input id="export-type" placeholder="comma,separated (optional)" /></label>
-        <label>Since <input id="export-since" placeholder="YYYY-MM-DD" /></label>
-        <label>Until <input id="export-until" placeholder="YYYY-MM-DD" /></label>
-        <label class="check"><input type="checkbox" id="export-deleted" /> Include deleted</label>
-        <label class="check"><input type="checkbox" id="export-revisions" /> Include revisions (archive)</label>
-        <label class="check"><input type="checkbox" id="export-noraw" /> Omit raw payloads</label>
-        <button type="submit" class="primary">Download export</button>
-      </form>
-    </section>
-
-    <!-- Research (YouTube -> NotebookLM -> markdown report) -->
-    <section id="tab-research" class="tab hidden">
-      <div class="row between">
-        <h2>Research</h2>
-        <button id="refresh-research">Refresh</button>
-      </div>
-      <p class="muted">Feed YouTube videos — from a live search or from your backups — through a
-        NotebookLM notebook and get a markdown research report. Runs take a few minutes.</p>
-
-      <div id="research-setup" class="card hidden"></div>
-
-      <form id="research-form" class="card">
-        <label>Topic <input id="research-topic" required placeholder="claude code skills" /></label>
-        <label>Videos
-          <select id="research-mode">
-            <option value="search">Search YouTube</option>
-            <option value="backup">From my backups</option>
-          </select>
-        </label>
-        <div id="research-search-fields">
-          <label>Search queries (one per line; blank = the topic itself)
-            <textarea id="research-queries" rows="2"></textarea>
-          </label>
-          <label>Results per query <input id="research-per-query" type="number" value="10" min="1" max="50" /></label>
-          <label>Recency (months, 0 = no filter) <input id="research-months" type="number" value="6" min="0" /></label>
+        <div class="card table-wrap" id="browse-table-wrap">
+          <table id="browse-table">
+            <thead>
+              <tr><th>Title</th><th>Source</th><th>Type</th><th>Created</th><th>Updated</th><th class="num">Rev</th><th class="num">Media</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
         </div>
-        <div id="research-backup-fields" class="hidden">
-          <label>Source
-            <select id="research-source"><option value="">(all youtube sources)</option></select>
-          </label>
-          <label>Lists (comma separated, e.g. watch-later, liked — blank = all)
-            <input id="research-lists" placeholder="watch-later, liked" />
-          </label>
+        <div class="row between pager" id="browse-pager">
+          <span id="browse-count" class="muted mono"></span>
+          <div class="row">
+            <button id="browse-prev" class="btn small">‹ Prev</button>
+            <button id="browse-next" class="btn small">Next ›</button>
+          </div>
         </div>
-        <label>Video count <input id="research-count" type="number" value="10" min="1" max="50" /></label>
-        <details>
-          <summary>Analysis questions (blank = the default 5-question set)</summary>
-          <textarea id="research-questions" rows="6" placeholder="one question per line"></textarea>
-        </details>
-        <label class="check"><input type="checkbox" id="research-infographic" /> Also generate an infographic (saved on the server host)</label>
-        <label>Notebook name (optional) <input id="research-notebook" placeholder="Research: &lt;topic&gt;" /></label>
-        <button type="submit" class="primary" id="research-run">Run research</button>
-        <span id="research-auth-note" class="tag"></span>
-      </form>
-
-      <section id="research-progress" class="card hidden">
-        <div class="row between">
-          <strong id="research-progress-title">Research</strong>
-          <button id="research-log-hide" class="small">Hide</button>
-        </div>
-        <pre id="research-log" class="log"></pre>
       </section>
 
-      <section id="research-result" class="card hidden">
-        <div class="row between">
-          <strong>Report</strong>
-          <a id="research-download" class="small" href="#" download>Download .md</a>
+      <!-- ============ Activity (history) ============ -->
+      <section id="tab-history" class="tab hidden">
+        <div class="view-head">
+          <h2>Activity</h2>
+          <span class="desc">Every backup run, newest first</span>
+          <div class="actions">
+            <label class="inline">Source <input id="history-source" placeholder="(all)" size="14" /></label>
+            <label class="inline">Limit <input id="history-limit" type="number" value="25" min="1" max="500" /></label>
+            <button id="refresh-history" class="btn small">Refresh</button>
+          </div>
         </div>
-        <pre id="research-report" class="log" style="max-height:32rem;"></pre>
+        <div class="card table-wrap">
+          <table id="history-table">
+            <thead>
+              <tr><th>Started</th><th>Source</th><th>Status</th><th>Mode</th>
+                  <th class="num">Added</th><th class="num">Changed</th><th class="num">Removed</th><th>Note</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </section>
-    </section>
 
-    <!-- Verify -->
-    <section id="tab-verify" class="tab hidden">
-      <div class="row between">
-        <h2>Verify</h2>
-        <button id="run-verify" class="primary">Run integrity check</button>
-      </div>
-      <div id="verify-result"></div>
-    </section>
-  </main>
+      <!-- ============ Sources ============ -->
+      <section id="tab-sources" class="tab hidden">
+        <div class="view-head">
+          <h2>Sources</h2>
+          <span class="desc">What gets backed up, and how</span>
+          <div class="actions">
+            <button class="btn" id="refresh-sources">Refresh</button>
+            <button class="btn primary" data-goto="add">+ Add source</button>
+          </div>
+        </div>
+        <div class="card" id="sources-list"></div>
+        <p id="sources-hint" class="muted hint-line"></p>
+      </section>
 
-  <!-- Item detail drawer (opened from the Browse tab) -->
-  <div id="item-drawer" class="drawer hidden">
-    <div class="drawer-head row between">
-      <strong id="item-drawer-title">Item</strong>
-      <button id="item-drawer-close" class="small">Close</button>
+      <!-- ============ Add source ============ -->
+      <section id="tab-add" class="tab hidden">
+        <div class="view-head">
+          <h2>Add source</h2>
+          <span class="desc">Pick a connector and name the new source</span>
+          <div class="actions"><button class="btn ghost small" data-goto="sources">‹ Back to sources</button></div>
+        </div>
+        <form id="add-form" class="card pad form">
+          <label>Name <input id="add-name" required placeholder="raindrop-personal" /></label>
+          <label>Type
+            <select id="add-type" required></select>
+          </label>
+          <div id="add-schema" class="schema"></div>
+          <div id="add-capture"></div>
+          <label class="check"><input type="checkbox" id="add-store-media" /> Store media bytes in the database</label>
+          <label class="check"><input type="checkbox" id="add-requires-vpn" /> Requires VPN (back up through the VPN wrapper only)</label>
+          <label>Max media size per file (MB, 0 = no limit)
+            <input id="add-max-media" type="number" min="0" value="0" />
+          </label>
+          <details>
+            <summary>Advanced: options as JSON</summary>
+            <textarea id="add-options" rows="6" placeholder='{ "collection_id": 0 }'></textarea>
+          </details>
+          <div class="row">
+            <button type="submit" class="btn primary">Add source</button>
+            <span id="add-result" class="result"></span>
+          </div>
+        </form>
+        <p class="muted hint-line">Secrets are never stored in the config — reference them by name via a
+          <code>*_env</code> option (e.g. <code>token_env = RAINDROP_TOKEN</code>) and set the
+          value in <strong>API keys</strong> (it writes your <code>.env</code>).</p>
+      </section>
+
+      <!-- ============ Connectors ============ -->
+      <section id="tab-connectors" class="tab hidden">
+        <div class="view-head">
+          <h2>Connectors</h2>
+          <span class="desc">Installed plugins and their capabilities</span>
+          <div class="actions"><button id="refresh-connectors" class="btn small">Refresh</button></div>
+        </div>
+        <div id="connectors-list"></div>
+      </section>
+
+      <!-- ============ API keys / secrets ============ -->
+      <section id="tab-secrets" class="tab hidden">
+        <div class="view-head">
+          <h2>API keys</h2>
+          <span class="desc">Written to .env, never displayed back</span>
+          <div class="actions"><button id="refresh-secrets" class="btn small">Refresh</button></div>
+        </div>
+        <p class="muted hint-line">Values are written to <code id="secrets-envpath">.env</code> (gitignored) and
+          <strong>never shown back</strong> — only whether each is set. Connectors that don't need a key won't appear here.</p>
+        <div id="secrets-list"></div>
+        <div class="card pad">
+          <h3 class="card-title">Set another key</h3>
+          <form id="secret-other-form" class="row wrap">
+            <select id="secret-other-name"></select>
+            <input id="secret-other-value" type="password" placeholder="value" autocomplete="new-password" />
+            <button type="submit" class="btn primary small">Save</button>
+          </form>
+        </div>
+      </section>
+
+      <!-- ============ Export ============ -->
+      <section id="tab-export" class="tab hidden">
+        <div class="view-head">
+          <h2>Export</h2>
+          <span class="desc">Portable bundles of any slice of the library</span>
+        </div>
+        <form id="export-form" class="card pad form">
+          <label>Format <select id="export-format"></select></label>
+          <label>Source(s) <input id="export-source" placeholder="comma,separated (optional)" /></label>
+          <label>Type(s) <input id="export-type" placeholder="comma,separated (optional)" /></label>
+          <label>Since <input id="export-since" type="date" /></label>
+          <label>Until <input id="export-until" type="date" /></label>
+          <label class="check"><input type="checkbox" id="export-deleted" /> Include deleted</label>
+          <label class="check"><input type="checkbox" id="export-revisions" /> Include revisions (archive)</label>
+          <label class="check"><input type="checkbox" id="export-noraw" /> Omit raw payloads</label>
+          <div class="row"><button type="submit" class="btn primary">Download export</button></div>
+        </form>
+      </section>
+
+      <!-- ============ Research ============ -->
+      <section id="tab-research" class="tab hidden">
+        <div class="view-head">
+          <h2>Research</h2>
+          <span class="desc">YouTube → NotebookLM → markdown report</span>
+          <div class="actions"><button id="refresh-research" class="btn small">Refresh</button></div>
+        </div>
+        <p class="muted hint-line">Feed YouTube videos — from a live search or from your backups — through a
+          NotebookLM notebook and get a markdown research report. Runs take a few minutes.</p>
+
+        <div id="research-setup" class="card pad form hidden"></div>
+
+        <form id="research-form" class="card pad form">
+          <label>Topic <input id="research-topic" required placeholder="claude code skills" /></label>
+          <label>Videos
+            <select id="research-mode">
+              <option value="search">Search YouTube</option>
+              <option value="backup">From my backups</option>
+            </select>
+          </label>
+          <div id="research-search-fields" class="form">
+            <label>Search queries (one per line; blank = the topic itself)
+              <textarea id="research-queries" rows="2"></textarea>
+            </label>
+            <label>Results per query <input id="research-per-query" type="number" value="10" min="1" max="50" /></label>
+            <label>Recency (months, 0 = no filter) <input id="research-months" type="number" value="6" min="0" /></label>
+          </div>
+          <div id="research-backup-fields" class="form hidden">
+            <label>Source
+              <select id="research-source"><option value="">(all youtube sources)</option></select>
+            </label>
+            <label>Lists (comma separated, e.g. watch-later, liked — blank = all)
+              <input id="research-lists" placeholder="watch-later, liked" />
+            </label>
+          </div>
+          <label>Video count <input id="research-count" type="number" value="10" min="1" max="50" /></label>
+          <details>
+            <summary>Analysis questions (blank = the default 5-question set)</summary>
+            <textarea id="research-questions" rows="6" placeholder="one question per line"></textarea>
+          </details>
+          <label class="check"><input type="checkbox" id="research-infographic" /> Also generate an infographic (saved on the server host)</label>
+          <label>Notebook name (optional) <input id="research-notebook" placeholder="Research: &lt;topic&gt;" /></label>
+          <div class="row">
+            <button type="submit" class="btn primary" id="research-run">Run research</button>
+            <span id="research-auth-note" class="tag"></span>
+          </div>
+        </form>
+
+        <section id="research-progress" class="card pad hidden">
+          <div class="row between">
+            <strong id="research-progress-title">Research</strong>
+            <button id="research-log-hide" class="btn ghost small">Hide</button>
+          </div>
+          <pre id="research-log" class="log"></pre>
+        </section>
+
+        <section id="research-result" class="card pad hidden">
+          <div class="row between">
+            <strong>Report</strong>
+            <a id="research-download" class="btn small" href="#" download>Download .md</a>
+          </div>
+          <pre id="research-report" class="log tall"></pre>
+        </section>
+      </section>
+
+      <!-- ============ Verify ============ -->
+      <section id="tab-verify" class="tab hidden">
+        <div class="view-head">
+          <h2>Verify</h2>
+          <span class="desc">Database integrity check</span>
+          <div class="actions"><button id="run-verify" class="btn primary">Run integrity check</button></div>
+        </div>
+        <div id="verify-result"></div>
+      </section>
+
     </div>
-    <div id="item-drawer-body"></div>
   </div>
+</div>
 
-  <div id="toast" class="toast hidden"></div>
+<!-- Live backup progress rail (docked, shared across tabs) -->
+<div id="progress" class="rail hidden" role="status">
+  <div class="rail-head">
+    <strong id="progress-title">Backup</strong>
+    <span id="progress-sub" class="stage"></span>
+    <span class="spacer"></span>
+    <span id="progress-pct" class="pct"></span>
+    <button id="progress-hide" class="btn ghost small">Hide</button>
+  </div>
+  <div class="bar"><div id="progress-bar" class="bar-fill"></div></div>
+  <div id="progress-line" class="mono rail-line"></div>
+  <div id="progress-results" class="rail-results"></div>
+</div>
 
-  <script src="/static/app.js"></script>
+<!-- Item detail drawer (opened from the Library tab) -->
+<div id="item-drawer" class="drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <h3 id="item-drawer-title">Item</h3>
+    <span class="spacer"></span>
+    <button id="item-drawer-close" class="btn ghost small">Close</button>
+  </div>
+  <div id="item-drawer-body" class="drawer-body"></div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/static/app.js?v={{v}}"></script>
 </body>
 </html>

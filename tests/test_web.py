@@ -812,3 +812,100 @@ def test_research_unknown_job_404(client):
     assert client.get("/api/research/999").status_code == 404
     assert client.get("/api/research/999/report").status_code == 404
     assert client.get("/api/research/999/stream").status_code == 404
+
+
+# --- VPN-routed backups ------------------------------------------------------
+
+
+def _write_vpn_setup(tmp_path, *, vpn_exec: str, vpn_status: str = "/bin/true"):
+    """A config whose one source requires the VPN wrapper."""
+    cfg = tmp_path / "dbs.toml"
+    cfg.write_text(
+        "[dbs]\n"
+        'database = "dbs.sqlite3"\n'
+        f'vpn_exec = "{vpn_exec}"\n'
+        f'vpn_status = "{vpn_status}"\n\n'
+        "[sources.rd]\n"
+        'type = "raindrop"\n'
+        "enabled = true\n"
+        "requires_vpn = true\n"
+        "poll_trash = false\n",
+        encoding="utf-8",
+    )
+    return cfg
+
+
+@pytest.fixture
+def vpn_client(tmp_path, monkeypatch):
+    """Wrapper-less VPN config: the 'VPN' subprocess is just the real CLI.
+
+    The raindrop source has no RAINDROP_TOKEN, so the subprocess fails fast
+    (offline) while still writing a genuine failed run row — which exercises
+    the DB read-back path that produces the job result.
+    """
+    monkeypatch.delenv("RAINDROP_TOKEN", raising=False)
+    cfg = _write_vpn_setup(
+        tmp_path, vpn_exec="",
+        vpn_status="echo 'latest handshake: 1 second ago exit IP: 1.2.3.4'",
+    )
+    app = create_app(str(cfg))
+    with TestClient(app) as c:
+        yield c
+
+
+def test_vpn_endpoint_irrelevant_without_vpn_sources(client):
+    r = client.get("/api/vpn").json()
+    assert r["relevant"] is False
+    assert r["up"] is None
+
+
+def test_vpn_endpoint_reports_up(vpn_client):
+    r = vpn_client.get("/api/vpn").json()
+    assert r["relevant"] is True
+    assert r["sources"] == ["rd"]
+    assert r["up"] is True
+
+
+def test_status_includes_requires_vpn(vpn_client):
+    rows = vpn_client.get("/api/status").json()
+    assert rows[0]["name"] == "rd" and rows[0]["requires_vpn"] is True
+
+
+def test_status_requires_vpn_false_by_default(client):
+    rows = client.get("/api/status").json()
+    assert all(r["requires_vpn"] is False for r in rows)
+
+
+def test_vpn_source_backs_up_via_subprocess(vpn_client):
+    import shutil
+    from dbs.web.jobs import _dbs_executable
+
+    if _dbs_executable() == "dbs" and shutil.which("dbs") is None:
+        pytest.skip("dbs console script not installed")
+    r = vpn_client.post("/api/backup", json={"source": "rd"})
+    assert r.status_code == 200
+    job = _wait_done(vpn_client, r.json()["id"], timeout=60)
+    assert job["status"] == "done"
+    res = job["results"][0]
+    assert res["source"] == "rd"
+    assert res["status"] == "failed"
+    assert "RAINDROP_TOKEN" in (res["error"] or "")
+    # The result came from the run row the subprocess wrote, not a synthetic.
+    assert res["run_id"] is not None
+    phases = {ev["phase"] for ev in job["events"]}
+    assert "log" in phases and "source_done" in phases
+
+
+def test_vpn_wrapper_failure_synthesizes_result(tmp_path, monkeypatch):
+    """If the wrapper produces no run row, the job still reports a failure."""
+    monkeypatch.delenv("RAINDROP_TOKEN", raising=False)
+    cfg = _write_vpn_setup(tmp_path, vpn_exec="/bin/true")  # swallows the command
+    app = create_app(str(cfg))
+    with TestClient(app) as c:
+        r = c.post("/api/backup", json={"source": "rd"})
+        job = _wait_done(c, r.json()["id"], timeout=30)
+    assert job["status"] == "done"
+    res = job["results"][0]
+    assert res["status"] == "failed"
+    assert res["run_id"] is None
+    assert "no run record" in res["error"]

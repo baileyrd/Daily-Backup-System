@@ -644,7 +644,9 @@ class SqliteStorage(Storage):
         )
         sql = (
             "SELECT i.*, s.name AS source_name, s.type AS source_type, "
-            "(SELECT COUNT(*) FROM media m WHERE m.item_id = i.id) AS media_count "
+            "(SELECT COUNT(*) FROM media m WHERE m.item_id = i.id) AS media_count, "
+            "(SELECT m.url FROM media m WHERE m.item_id = i.id AND m.kind = 'image' "
+            " ORDER BY m.id LIMIT 1) AS thumb_url "
             "FROM items i JOIN sources s ON s.id = i.source_id "
             f"WHERE {where} ORDER BY i.item_created_at DESC, i.id DESC LIMIT ? OFFSET ?"
         )
@@ -861,6 +863,8 @@ def _row_to_browse_item(row: sqlite3.Row) -> ItemRow:
         "deleted": bool(row["deleted"]),
         "deleted_at": row["deleted_at"],
         "media_count": int(row["media_count"]),
+        "tags": json.loads(row["tags_json"] or "[]"),
+        "thumbnail": row["thumb_url"],
     }
 
 

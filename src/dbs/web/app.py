@@ -15,7 +15,9 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import shlex
 import shutil
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -139,7 +141,12 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
         except ConfigError as exc:
             raise HTTPException(status_code=500, detail=f"Config error: {exc}")
 
-    jobs = JobManager(lambda: BackupService.from_config_file(config_path))
+    from ..config import load_config
+
+    jobs = JobManager(
+        lambda: BackupService.from_config_file(config_path),
+        config_loader=lambda: load_config(config_path),
+    )
     setup_mgr = SetupManager()
     # Research runs are long (minutes of NotebookLM calls) and independent of
     # setup tasks — a separate manager so one doesn't block the other.
@@ -165,9 +172,53 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
     def status(source: Optional[str] = Query(None)) -> list[dict[str, Any]]:
         svc = open_service()
         try:
-            return [s.to_dict() for s in svc.status(source)]
+            rows = [s.to_dict() for s in svc.status(source)]
+            for row in rows:
+                sc = svc.config.sources.get(row.get("name"))
+                row["requires_vpn"] = bool(sc and sc.requires_vpn)
+            return rows
         finally:
             svc.close()
+
+    @app.get("/api/vpn")
+    def vpn_status() -> dict[str, Any]:
+        """Whether the VPN tunnel the requires_vpn sources depend on is up."""
+        cfg = load_config(config_path)
+        required = sorted(n for n, s in cfg.sources.items() if s.requires_vpn)
+        if not required:
+            return {"relevant": False, "sources": [], "up": None, "detail": ""}
+        try:
+            proc = subprocess.run(
+                shlex.split(cfg.vpn_status),
+                capture_output=True, text=True, timeout=20,
+            )
+            out = (proc.stdout or "") + (proc.stderr or "")
+            # The wrapper's status is trustworthy only if it exited cleanly,
+            # shows a wg handshake, AND resolved an exit IP (fail-closed
+            # namespaces pass the first two with a dead tunnel).
+            up = (
+                proc.returncode == 0
+                and "handshake" in out
+                and "(unreachable)" not in out
+            )
+            detail = ""
+            for line in out.splitlines():
+                if line.strip().startswith("exit IP:"):
+                    detail = line.strip()
+                    break
+            if not up and not detail:
+                detail = (out.strip().splitlines() or ["tunnel is down"])[-1]
+        except FileNotFoundError:
+            up, detail = False, f"status command not found: {cfg.vpn_status}"
+        except subprocess.TimeoutExpired:
+            up, detail = False, "VPN status check timed out"
+        return {
+            "relevant": True,
+            "sources": required,
+            "up": up,
+            "detail": detail,
+            "exec": cfg.vpn_exec,
+        }
 
     @app.get("/api/sources")
     def sources() -> list[dict[str, Any]]:
@@ -589,10 +640,12 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
                 name, stype, options,
                 store_media=bool(payload.get("store_media")),
                 max_media_mb=max_media_mb,
+                requires_vpn=bool(payload.get("requires_vpn")),
             )
             return {
                 "name": sc.name, "type": sc.type, "options": sc.options,
                 "store_media": sc.store_media, "max_media_mb": sc.max_media_mb,
+                "requires_vpn": sc.requires_vpn,
             }
         except (ConnectorLoadError, ConnectorConfigError, BackupRunError) as exc:
             raise HTTPException(status_code=400, detail=str(exc))
@@ -928,7 +981,14 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
-        return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        # Cache-bust the asset links on every static-file change so browsers
+        # never mix an old stylesheet with a new page after an upgrade.
+        stamp = max(
+            (int(p.stat().st_mtime) for p in STATIC_DIR.glob("*") if p.is_file()),
+            default=0,
+        )
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        return html.replace("{{v}}", str(stamp))
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

@@ -14,12 +14,17 @@ Config shape (TOML)::
     export_dir = "exports"
     download_root = "downloads"    # per-source folders are created under this
     default_overlap_seconds = 300
+    # Wrapper for sources marked requires_vpn: the web tier runs them as
+    # `<vpn_exec> dbs backup <name>` subprocesses instead of in-process.
+    vpn_exec = "sudo vpn-netns exec"
+    vpn_status = "sudo vpn-netns status"
 
     [sources.raindrop-personal]
     type = "raindrop"
     enabled = true
     schedule = "daily"
     reconcile_every_runs = 7
+    requires_vpn = false       # true = only back up through the VPN wrapper
     collection_id = 0          # connector-specific options follow
     token_env = "RAINDROP_TOKEN"
 
@@ -42,6 +47,7 @@ from .core.errors import ConfigError
 
 _RESERVED_SOURCE_KEYS = {
     "type", "enabled", "schedule", "reconcile_every_runs", "store_media", "max_media_mb",
+    "requires_vpn",
 }
 _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _SECRET_KEY_HINTS = ("token", "secret", "password", "api_key", "apikey", "access_key")
@@ -59,6 +65,9 @@ class SourceConfig(BaseModel):
     # media otherwise stays referenced). max_media_mb caps per-file size (0 = no cap).
     store_media: bool = False
     max_media_mb: int = 0
+    # Back up this source only through the configured VPN wrapper (see
+    # Config.vpn_exec) — for connectors whose upstream IP-blocks the host.
+    requires_vpn: bool = False
     options: dict[str, Any] = {}
 
 
@@ -79,6 +88,11 @@ class Config(BaseModel):
     # an explicit per-source dir (e.g. skool's downloads_dir).
     download_root: str = "downloads"
     default_overlap_seconds: int = 300
+    # Command prefix that routes a backup through the VPN (split with shlex),
+    # and a command whose success/output reports whether the tunnel is up.
+    # Used only for sources with requires_vpn = true.
+    vpn_exec: str = "sudo vpn-netns exec"
+    vpn_status: str = "sudo vpn-netns status"
     sources: dict[str, SourceConfig] = {}
     connectors: dict[str, ConnectorOverride] = {}
     base_dir: Path = Path(".")
@@ -153,6 +167,7 @@ def load_config(path: str | Path) -> Config:
             reconcile_every_runs=body.get("reconcile_every_runs"),
             store_media=bool(body.get("store_media", False)),
             max_media_mb=int(body.get("max_media_mb", 0) or 0),
+            requires_vpn=bool(body.get("requires_vpn", False)),
             options=options,
         )
 
@@ -167,6 +182,8 @@ def load_config(path: str | Path) -> Config:
             export_dir=dbs_section.get("export_dir", "exports"),
             download_root=dbs_section.get("download_root", "downloads"),
             default_overlap_seconds=int(dbs_section.get("default_overlap_seconds", 300)),
+            vpn_exec=str(dbs_section.get("vpn_exec", "sudo vpn-netns exec")),
+            vpn_status=str(dbs_section.get("vpn_status", "sudo vpn-netns status")),
             sources=sources,
             connectors=connectors,
             base_dir=path.resolve().parent,

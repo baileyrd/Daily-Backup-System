@@ -432,6 +432,7 @@ class BackupService:
         *,
         store_media: bool = False,
         max_media_mb: int = 0,
+        requires_vpn: bool = False,
         write: bool = True,
     ) -> SourceConfig:
         if name in self.config.sources:
@@ -444,6 +445,7 @@ class BackupService:
         sc = SourceConfig(
             name=name, type=type, options=options,
             store_media=store_media, max_media_mb=max(0, max_media_mb),
+            requires_vpn=requires_vpn,
         )
         if write and self.config.source_path is not None:
             _append_source_to_config(self.config.source_path, sc)
@@ -583,6 +585,8 @@ def _append_source_to_config(path: Path, sc: SourceConfig) -> None:
         lines.append("store_media = true")
         if sc.max_media_mb:
             lines.append(f"max_media_mb = {sc.max_media_mb}")
+    if sc.requires_vpn:
+        lines.append("requires_vpn = true")
     for key, value in sc.options.items():
         lines.append(f"{key} = {_toml_value(value)}")
     with path.open("a", encoding="utf-8") as fh:
