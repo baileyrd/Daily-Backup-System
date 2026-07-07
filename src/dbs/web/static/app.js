@@ -563,14 +563,13 @@ function listTag(it) {
   return t && t !== it.item_kind ? t : null;
 }
 
-// YouTube stores no image media, but thumbnails are derivable from the video id.
+// Thumbnails are served from the server's local cache (/api/thumb) rather
+// than hotlinked — reddit 403s cross-origin browser requests, and cached
+// copies survive link rot. YouTube has no image media rows, but the server
+// derives its thumbnail from the video id.
 function thumbUrl(it) {
-  if (it.thumbnail) return it.thumbnail;
-  if (it.type === "youtube" && it.url) {
-    const m = it.url.match(/[?&]v=([\w-]{11})/);
-    if (m) return `https://i.ytimg.com/vi/${m[1]}/mqdefault.jpg`;
-  }
-  return null;
+  const derivable = it.type === "youtube" && it.url && /[?&]v=[\w-]{11}/.test(it.url);
+  return it.thumbnail || derivable ? `/api/thumb/${it.id}` : null;
 }
 
 function itemCard(it) {

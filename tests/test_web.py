@@ -909,3 +909,116 @@ def test_vpn_wrapper_failure_synthesizes_result(tmp_path, monkeypatch):
     assert res["status"] == "failed"
     assert res["run_id"] is None
     assert "no run record" in res["error"]
+
+
+# --- thumbnail cache ---------------------------------------------------------
+
+
+def test_thumb_404_for_unknown_item(client):
+    assert client.get("/api/thumb/9999").status_code == 404
+
+
+def test_thumb_404_without_image_media(client):
+    # Run a backup so an item (with no image media) exists.
+    r = client.post("/api/backup", json={"source": "courses"})
+    _wait_done(client, r.json()["id"])
+    item_id = client.get("/api/items").json()["items"][0]["id"]
+    assert client.get(f"/api/thumb/{item_id}").status_code == 404
+
+
+def test_cached_thumbnail_fetch_and_miss(tmp_path, monkeypatch):
+    from dbs.web import app as webapp
+
+    calls = []
+
+    class FakeResp:
+        def __init__(self, ctype, data):
+            self.headers = {"Content-Type": ctype}
+            self._data = data
+        def read(self, n):  # noqa: ARG002
+            return self._data
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout):  # noqa: ARG001
+        calls.append(req.full_url)
+        if "dead" in req.full_url:
+            raise OSError("boom")
+        return FakeResp("image/png", b"\x89PNG-fake-bytes")
+
+    monkeypatch.setattr(webapp.urllib.request, "urlopen", fake_urlopen)
+    cache = tmp_path / "_thumbs"
+
+    # First call downloads and caches; second is served without a fetch.
+    p1 = webapp._cached_thumbnail("https://example.com/a.png", cache)
+    p2 = webapp._cached_thumbnail("https://example.com/a.png", cache)
+    assert p1 == p2 and p1.suffix == ".png" and p1.read_bytes().startswith(b"\x89PNG")
+    assert len(calls) == 1
+
+    # A failing URL leaves a .miss marker and is not refetched immediately.
+    assert webapp._cached_thumbnail("https://example.com/dead.png", cache) is None
+    assert webapp._cached_thumbnail("https://example.com/dead.png", cache) is None
+    assert calls.count("https://example.com/dead.png") == 1
+    assert list(cache.glob("*.miss"))
+
+
+def test_thumbnail_url_prefers_image_media_and_derives_youtube():
+    from dbs.web.app import _thumbnail_url_for
+
+    item = {"media": [
+        {"kind": "video", "url": "https://youtube.com/watch?v=abcdefghijk"},
+        {"kind": "image", "url": "https://cdn.example.com/cover.jpg"},
+    ]}
+    assert _thumbnail_url_for(item) == "https://cdn.example.com/cover.jpg"
+    yt = {"media": [], "type": "youtube", "url": "https://www.youtube.com/watch?v=abcdefghijk"}
+    assert _thumbnail_url_for(yt) == "https://i.ytimg.com/vi/abcdefghijk/mqdefault.jpg"
+    # skool lessons: no image media, but raw.videoLink is usually YouTube
+    lesson = {"media": [], "type": "skool",
+              "raw": {"videoLink": "https://youtu.be/BLJVNHji2JQ"}}
+    assert _thumbnail_url_for(lesson) == "https://i.ytimg.com/vi/BLJVNHji2JQ/mqdefault.jpg"
+    assert _thumbnail_url_for({"media": [], "type": "raindrop", "url": "https://x.example"}) is None
+    # Loom/Vimeo links pass through for oEmbed resolution at fetch time;
+    # unsupported hosts yield nothing.
+    assert _thumbnail_url_for({"media": [], "type": "skool",
+                               "raw": {"videoLink": "https://vimeo.com/12345"}}) == "https://vimeo.com/12345"
+    assert _thumbnail_url_for({"media": [], "type": "skool",
+                               "raw": {"videoLink": "https://wistia.com/medias/abc"}}) is None
+
+
+def test_cached_thumbnail_resolves_loom_via_oembed(tmp_path, monkeypatch):
+    from dbs.web import app as webapp
+
+    calls = []
+
+    class FakeResp:
+        def __init__(self, ctype, data):
+            self.headers = {"Content-Type": ctype}
+            self._data = data
+        def read(self, n=None):  # noqa: ARG002
+            return self._data
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout):  # noqa: ARG001
+        calls.append(req.full_url)
+        if "oembed" in req.full_url:
+            return FakeResp("application/json",
+                            b'{"thumbnail_url": "https://cdn.loom.com/x.gif"}')
+        return FakeResp("image/gif", b"GIF89a-fake")
+
+    monkeypatch.setattr(webapp.urllib.request, "urlopen", fake_urlopen)
+    cache = tmp_path / "_thumbs"
+    share = "https://www.loom.com/share/d048d3e3e88c4aa19ae263ede8dd1940"
+
+    p1 = webapp._cached_thumbnail(share, cache)
+    assert p1 is not None and p1.suffix == ".gif"
+    assert any("oembed" in c for c in calls)
+    assert calls[-1] == "https://cdn.loom.com/x.gif"
+    # Second call: cache hit — no oEmbed, no image fetch.
+    n = len(calls)
+    assert webapp._cached_thumbnail(share, cache) == p1
+    assert len(calls) == n

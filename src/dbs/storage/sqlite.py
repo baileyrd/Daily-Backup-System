@@ -645,8 +645,16 @@ class SqliteStorage(Storage):
         sql = (
             "SELECT i.*, s.name AS source_name, s.type AS source_type, "
             "(SELECT COUNT(*) FROM media m WHERE m.item_id = i.id) AS media_count, "
-            "(SELECT m.url FROM media m WHERE m.item_id = i.id AND m.kind = 'image' "
-            " ORDER BY m.id LIMIT 1) AS thumb_url "
+            "COALESCE("
+            " (SELECT m.url FROM media m WHERE m.item_id = i.id AND m.kind = 'image' "
+            "  ORDER BY m.id LIMIT 1), "
+            # No image media, but a video link (skool lessons) whose thumbnail
+            # the web tier can derive (YouTube) or oEmbed-resolve (Loom/Vimeo).
+            " CASE WHEN json_extract(i.raw_json, '$.videoLink') LIKE '%youtu%' "
+            "        OR json_extract(i.raw_json, '$.videoLink') LIKE '%loom.com%' "
+            "        OR json_extract(i.raw_json, '$.videoLink') LIKE '%vimeo.com%' "
+            "      THEN json_extract(i.raw_json, '$.videoLink') END"
+            ") AS thumb_url "
             "FROM items i JOIN sources s ON s.id = i.source_id "
             f"WHERE {where} ORDER BY i.item_created_at DESC, i.id DESC LIMIT ? OFFSET ?"
         )

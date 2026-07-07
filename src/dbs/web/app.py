@@ -13,12 +13,17 @@ not in the core — :func:`create_app` raises a helpful error if they're missing
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import tempfile
+import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -82,6 +87,125 @@ def _source_secret_names(rc, options: dict[str, Any]) -> list[str]:
 
 
 # Per-format download metadata: (file extension, media type).
+# -- thumbnail cache ---------------------------------------------------------
+
+_THUMB_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+_THUMB_MAX_BYTES = 10 * 1024 * 1024
+_THUMB_MISS_TTL = 24 * 3600  # retry dead links at most daily
+_THUMB_TYPES = {
+    ".jpg": "image/jpeg", ".png": "image/png",
+    ".webp": "image/webp", ".gif": "image/gif",
+}
+_THUMB_EXTS = {mime: ext for ext, mime in _THUMB_TYPES.items()}
+
+
+def _youtube_thumb(url: str | None) -> str | None:
+    m = re.search(r"(?:[?&]v=|youtu\.be/|/embed/|/shorts/)([\w-]{11})", url or "")
+    return f"https://i.ytimg.com/vi/{m.group(1)}/mqdefault.jpg" if m else None
+
+
+# Video hosts whose thumbnails aren't derivable from the URL but are exposed
+# via their public oEmbed endpoint (resolved once; the image is then cached).
+_OEMBED_ENDPOINTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"https?://(?:www\.)?loom\.com/share/\w+"),
+     "https://www.loom.com/v1/oembed?url={url}"),
+    (re.compile(r"https?://(?:www\.)?vimeo\.com/\d+"),
+     "https://vimeo.com/api/oembed.json?url={url}"),
+)
+
+
+def _is_oembed_video(url: str | None) -> bool:
+    return bool(url) and any(pat.match(url) for pat, _ in _OEMBED_ENDPOINTS)
+
+
+def _resolve_video_thumb(url: str) -> str | None:
+    """oEmbed-resolve a video page URL to its thumbnail image URL."""
+    for pat, endpoint in _OEMBED_ENDPOINTS:
+        if not pat.match(url):
+            continue
+        req = urllib.request.Request(
+            endpoint.format(url=urllib.parse.quote(url, safe="")),
+            headers={"User-Agent": _THUMB_UA, "Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read(1024 * 1024))
+        except (OSError, ValueError):
+            return None
+        thumb = data.get("thumbnail_url")
+        return thumb if isinstance(thumb, str) and thumb.startswith("http") else None
+    return None
+
+
+def _thumbnail_url_for(item: dict[str, Any]) -> str | None:
+    """The best remote thumbnail URL for an item detail dict, if any."""
+    for m in item.get("media") or []:
+        url = m.get("url") or ""
+        if m.get("kind") == "image" and url.startswith(("http://", "https://")):
+            return url
+    # No image media, but a YouTube video to derive a thumbnail from: youtube
+    # items link the video directly; skool lessons carry raw.videoLink.
+    if item.get("type") == "youtube":
+        derived = _youtube_thumb(item.get("url"))
+        if derived:
+            return derived
+    raw = item.get("raw")
+    if isinstance(raw, dict):
+        link = raw.get("videoLink")
+        derived = _youtube_thumb(link)
+        if derived:
+            return derived
+        if _is_oembed_video(link):
+            return link  # _cached_thumbnail oEmbed-resolves it on first fetch
+    return None
+
+
+def _cached_thumbnail(url: str, cache_dir: Path) -> Path | None:
+    """Return a local file for ``url``, downloading it on first use.
+
+    A ``.miss`` marker suppresses refetching a failing URL for
+    ``_THUMB_MISS_TTL`` seconds. Returns None when the image can't be had.
+    """
+    key = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    for ext in _THUMB_TYPES:
+        cached = cache_dir / f"{key}{ext}"
+        if cached.exists():
+            return cached
+    miss = cache_dir / f"{key}.miss"
+    if miss.exists() and time.time() - miss.stat().st_mtime < _THUMB_MISS_TTL:
+        return None
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    if _is_oembed_video(url):
+        resolved = _resolve_video_thumb(url)
+        if resolved is None:
+            miss.touch()
+            return None
+        url = resolved  # cache key stays the original video URL
+    req = urllib.request.Request(url, headers={
+        "User-Agent": _THUMB_UA,
+        "Accept": "image/avif,image/webp,image/png,image/*,*/*;q=0.8",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
+            data = resp.read(_THUMB_MAX_BYTES + 1)
+    except (OSError, ValueError):
+        miss.touch()
+        return None
+    if not data or len(data) > _THUMB_MAX_BYTES or not ctype.startswith("image/"):
+        miss.touch()
+        return None
+    dest = cache_dir / f"{key}{_THUMB_EXTS.get(ctype, '.jpg')}"
+    tmp = dest.with_name(dest.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, dest)  # atomic; concurrent fetchers converge on one file
+    miss.unlink(missing_ok=True)
+    return dest
+
+
 _FORMAT_META = {
     "json": ("json", "application/json"),
     "ndjson": ("ndjson", "application/x-ndjson"),
@@ -368,6 +492,36 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
             content=blob["data"],
             media_type=blob["mime"] or "application/octet-stream",
             headers={"Content-Disposition": f'inline; filename="{filename}"'},
+        )
+
+    @app.get("/api/thumb/{item_id}")
+    def thumbnail(item_id: int):
+        """Serve an item's thumbnail from the local disk cache, fetching once.
+
+        Hotlinking source CDNs breaks (reddit 403s browser requests, links
+        rot), so the first request downloads the image into
+        ``<download_root>/_thumbs/`` and every later one is served locally.
+        Failed fetches leave a marker so dead links aren't re-tried on every
+        page view.
+        """
+        svc = open_service()
+        try:
+            item = svc.get_item(item_id)
+            cache_dir = svc.config.download_root_path / "_thumbs"
+        finally:
+            svc.close()
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"no such item {item_id}")
+        url = _thumbnail_url_for(item)
+        if url is None:
+            raise HTTPException(status_code=404, detail="item has no thumbnail")
+        path = _cached_thumbnail(url, cache_dir)
+        if path is None:
+            raise HTTPException(status_code=404, detail="thumbnail unavailable")
+        return FileResponse(
+            path,
+            media_type=_THUMB_TYPES.get(path.suffix, "image/jpeg"),
+            headers={"Cache-Control": "public, max-age=604800, immutable"},
         )
 
     @app.get("/api/metrics")
