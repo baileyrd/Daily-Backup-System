@@ -154,7 +154,8 @@ async function loadHistory() {
         el("td", { textContent: r.items_created ?? 0 }),
         el("td", { textContent: r.items_updated ?? 0 }),
         el("td", { textContent: r.items_deleted ?? 0 }),
-        el("td", { className: "muted", textContent: r.error || "" }),
+        el("td", { className: "muted",
+                   textContent: [r.error, ...(r.warnings || [])].filter(Boolean).join(" — ") }),
       ));
     });
   } catch (e) { toast(e.message, "err"); }
@@ -886,7 +887,8 @@ function openProgress(job) {
 
 function addResult(r) {
   const line = `${r.source}: ${r.status} [${r.mode}] +${r.created} ~${r.updated} =${r.unchanged} x${r.deleted} (fetched ${r.fetched})`;
-  $("#progress-results").append(el("div", { className: "mono " + statusClass(r.status), textContent: line + (r.error ? `  — ${r.error}` : "") }));
+  const notes = [r.error, ...(r.warnings || [])].filter(Boolean);
+  $("#progress-results").append(el("div", { className: "mono " + statusClass(r.status), textContent: line + (notes.length ? `  — ${notes.join(" — ")}` : "") }));
 }
 
 function finishProgress(snap) {

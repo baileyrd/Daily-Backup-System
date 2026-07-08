@@ -178,6 +178,7 @@ class SqliteStorage(Storage):
         items_seen: int,
         cursor_after: str | None,
         error: str | None,
+        warnings: list[str] | None = None,
     ) -> None:
         now = self._now()
         with self.transaction():
@@ -186,13 +187,16 @@ class SqliteStorage(Storage):
                 UPDATE sync_runs SET
                     status=?, finished_at=?, items_seen=?, items_created=?,
                     items_updated=?, items_unchanged=?, items_deleted=?,
-                    items_undeleted=?, revisions=?, cursor_after=?, error=?
+                    items_undeleted=?, revisions=?, cursor_after=?, error=?,
+                    warnings=?
                 WHERE id=?
                 """,
                 (
                     status, now, items_seen, stats.created, stats.updated,
                     stats.unchanged, stats.deleted, stats.undeleted, stats.revisions,
-                    cursor_after, error, run_id,
+                    cursor_after, error,
+                    json.dumps(warnings) if warnings else None,
+                    run_id,
                 ),
             )
 
@@ -230,7 +234,13 @@ class SqliteStorage(Storage):
                 "WHERE r.source_id=? ORDER BY r.started_at DESC, r.id DESC LIMIT ?",
                 (source_id, limit),
             ).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            # Stored as a JSON array; hand callers a plain list ([] when unset).
+            d["warnings"] = json.loads(d["warnings"]) if d.get("warnings") else []
+            out.append(d)
+        return out
 
     # -- items / batch commit ----------------------------------------------
 
