@@ -320,3 +320,14 @@ def test_update_ytdlp_dry_run():
     result = runner.invoke(app, ["update-ytdlp", "--dry-run"])
     assert result.exit_code == 0
     assert "pip install --upgrade yt-dlp[default]" in result.stdout
+
+
+def test_verify_archive_command(tmp_path):
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    bundle = tmp_path / "b.zip"
+    runner.invoke(app, ["--config", str(cfg), "export", "--format", "archive",
+                        "--out", str(bundle)])
+    result = runner.invoke(app, ["--config", str(cfg), "verify", "--archive", str(bundle)])
+    assert result.exit_code == 0, result.stdout
+    assert "OK" in result.stdout

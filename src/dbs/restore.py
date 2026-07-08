@@ -26,6 +26,7 @@ never touch storage themselves.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import zipfile
@@ -120,6 +121,43 @@ def prepared_item_from_row(row: dict[str, Any], where: str) -> PreparedItem:
     )
 
 
+def verify_archive(path: Path) -> dict[str, Any]:
+    """Check a bundle's per-entry sha256 checksums (see the archive exporter).
+
+    Returns ``{"has_checksums": bool, "verified": int, "issues": [str, ...]}``.
+    An empty ``issues`` list on a checksummed bundle means every listed entry
+    hashed clean AND no unlisted entries are present (an extra file smuggled
+    into the zip is itself an integrity failure). A pre-checksum bundle
+    (older dbs) reports ``has_checksums=False`` with no issues — there is
+    nothing to verify against.
+    """
+    manifest = read_manifest(path)
+    if manifest is None:
+        raise ConfigError(f"{path} is not an archive bundle (bare ndjson has no manifest)")
+    checksums = manifest.get("checksums")
+    if not isinstance(checksums, dict):
+        return {"has_checksums": False, "verified": 0, "issues": []}
+    issues: list[str] = []
+    verified = 0
+    with zipfile.ZipFile(path) as zf:
+        names = set(zf.namelist())
+        for name, want in sorted(checksums.items()):
+            if name not in names:
+                issues.append(f"{name}: listed in the manifest but missing from the bundle")
+                continue
+            digest = hashlib.sha256()
+            with zf.open(name) as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != want:
+                issues.append(f"{name}: sha256 mismatch (bundle is corrupt or was modified)")
+            else:
+                verified += 1
+        for name in sorted(names - set(checksums) - {"manifest.json"}):
+            issues.append(f"{name}: present in the bundle but not listed in the manifest")
+    return {"has_checksums": True, "verified": verified, "issues": issues}
+
+
 def skipped_extras(manifest: dict[str, Any] | None) -> tuple[int, int]:
     """(revision rows, media files) present in the bundle but not restored."""
     counts = (manifest or {}).get("counts") or {}
@@ -134,4 +172,5 @@ __all__ = [
     "prepared_item_from_row",
     "read_manifest",
     "skipped_extras",
+    "verify_archive",
 ]

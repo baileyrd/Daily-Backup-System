@@ -194,3 +194,97 @@ def test_prepared_item_from_row_validation():
         prepared_item_from_row({k: v for k, v in ok.items() if k != "content_hash"}, "test")
     with pytest.raises(ConfigError, match="not restore-grade"):
         prepared_item_from_row({k: v for k, v in ok.items() if k != "raw"}, "test")
+
+
+# --- self-verifying archives (checksummed manifest) --------------------------
+
+
+def _corrupt_items_member(bundle):
+    """Rewrite the zip with one byte of an items/ NDJSON member flipped."""
+    import shutil
+
+    tmp = bundle.with_name("tmp-" + bundle.name)
+    with zipfile.ZipFile(bundle) as src_zf, zipfile.ZipFile(tmp, "w") as dst_zf:
+        for info in src_zf.infolist():
+            data = src_zf.read(info.filename)
+            if info.filename.startswith("items/"):
+                data = data[:-2] + b"X" + data[-1:]
+            dst_zf.writestr(info, data)
+    shutil.move(str(tmp), str(bundle))
+
+
+def test_archive_manifest_carries_checksums(storage, tmp_path):
+    from dbs.restore import read_manifest, verify_archive
+
+    _seed(storage)
+    bundle = tmp_path / "b.zip"
+    _service(storage, tmp_path).export(ExportQuery(include_deleted=True), "archive", bundle)
+    manifest = read_manifest(bundle)
+    assert manifest["checksum_algorithm"] == "sha256"
+    assert "items/rd.ndjson" in manifest["checksums"]
+    report = verify_archive(bundle)
+    assert report["has_checksums"] is True
+    assert report["issues"] == [] and report["verified"] >= 1
+
+
+def test_corrupt_bundle_is_detected_and_refused(storage, fresh, tmp_path):
+    from dbs.restore import verify_archive
+
+    _seed(storage)
+    bundle = tmp_path / "b.zip"
+    _service(storage, tmp_path).export(ExportQuery(), "archive", bundle)
+    _corrupt_items_member(bundle)
+    report = verify_archive(bundle)
+    assert any("mismatch" in i for i in report["issues"])
+    # Restore must refuse before ingesting a single row.
+    with pytest.raises(ConfigError, match="integrity"):
+        _service(fresh, tmp_path).restore(bundle)
+    assert fresh.conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
+
+
+def test_unlisted_entry_is_flagged(storage, tmp_path):
+    from dbs.restore import verify_archive
+
+    _seed(storage)
+    bundle = tmp_path / "b.zip"
+    _service(storage, tmp_path).export(ExportQuery(), "archive", bundle)
+    with zipfile.ZipFile(bundle, "a") as zf:
+        zf.writestr("items/smuggled.ndjson", "{}")
+    report = verify_archive(bundle)
+    assert any("not listed" in i for i in report["issues"])
+
+
+def test_pre_checksum_bundle_still_restores(fresh, tmp_path):
+    # An older bundle (no checksums key) has nothing to verify against.
+    row = {
+        "source": "rd", "type": "raindrop", "external_id": "1",
+        "item_kind": "link", "content_hash": "h1", "raw": {"_id": 1},
+        "tags": [], "deleted": False,
+    }
+    bundle = tmp_path / "old.zip"
+    with zipfile.ZipFile(bundle, "w") as zf:
+        zf.writestr("manifest.json", json.dumps({"db_schema_version": 1}))
+        zf.writestr("items/rd.ndjson", json.dumps(row) + "\n")
+    report = _service(fresh, tmp_path).restore(bundle)
+    assert report.created == 1
+
+
+def test_media_blobs_are_checksummed(storage, tmp_path):
+    from dbs.restore import read_manifest, verify_archive
+
+    src = storage.upsert_source("rd", "raindrop", "test:raindrop", "{}", 1)
+    run = storage.begin_run(src.id, "test:raindrop", "full", None)
+    item = PreparedItem(
+        "1", "link", "T", "https://a", None, [],
+        "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", "h1",
+        json.dumps({"_id": 1}), False,
+        media=[{"url": "https://a/f.bin", "kind": "archive",
+                "filename": "f.bin", "data": b"blob-bytes"}],
+    )
+    storage.upsert_items(src.id, run, [item], store_media=True)
+    bundle = tmp_path / "b.zip"
+    _service(storage, tmp_path).export(ExportQuery(), "archive", bundle)
+    manifest = read_manifest(bundle)
+    media_entries = [k for k in manifest["checksums"] if k.startswith("media/")]
+    assert media_entries, manifest["checksums"]
+    assert verify_archive(bundle)["issues"] == []
