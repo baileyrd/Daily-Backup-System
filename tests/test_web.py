@@ -784,6 +784,15 @@ def test_research_job_runs_with_fake_pipeline(client, monkeypatch):
     assert "# Research: my topic" in snap["result"]["report"]
     assert "fake progress line" in snap["log"]
 
+    # The report is persisted to disk — job history is in-memory, so before
+    # this a server restart discarded minutes of NotebookLM work.
+    from pathlib import Path as _Path
+
+    saved = _Path(snap["result"]["report_path"])
+    assert saved.exists() and saved.name.startswith("report-")
+    assert "my-topic" in saved.name
+    assert "# Research: my topic" in saved.read_text(encoding="utf-8")
+
     # The rendered markdown downloads once done.
     dl = client.get(f"/api/research/{job['id']}/report")
     assert dl.status_code == 200

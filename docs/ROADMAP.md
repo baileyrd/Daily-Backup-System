@@ -21,7 +21,7 @@ Smaller fixes that didn't make the twenty are collected in the appendix.
 | 10 | Encryption at rest / encrypted exports | could | M–L |
 | 11 | Built-in scheduler + honor per-source `schedule` — **shipped** | could | M |
 | 12 | Web auth + CSRF/Origin/Host protection — **shipped** | should | M |
-| 13 | Notifications + persistent job history | could | M |
+| 13 | Notifications + persistent job history — **shipped** | could | M |
 | 14 | `dbs doctor` + dependency self-update — **shipped** | could | M |
 | 15 | Concurrent `backup_all` | could | L |
 | 16 | Query & index tuning for scale | could | M |
@@ -176,7 +176,7 @@ auto-generated, required for non-localhost binds); make off-localhost +
 setup-enabled a hard error without the token; symmetrical secret-name
 validation.
 
-### 13. Notifications + persistent job history — [could], M
+### 13. Notifications + persistent job history — [could], M — SHIPPED
 
 A backup tool's classic failure is failing silently for months. Today run
 outcomes live in `sync_runs` (good) but nothing pushes them anywhere, web
