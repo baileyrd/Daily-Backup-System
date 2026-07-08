@@ -59,6 +59,7 @@ dbs = "dbs.cli:main"
 # Built-in connectors are discovered through the SAME entry-point group that
 # third-party connector packages use. This is the extensibility seam.
 [project.entry-points."dbs.connectors"]
+github = "dbs.connectors.github:GitHubConnector"
 raindrop = "dbs.connectors.raindrop:RaindropConnector"
 reddit = "dbs.connectors.reddit:RedditConnector"
 youtube = "dbs.connectors.youtube:YouTubeConnector"
