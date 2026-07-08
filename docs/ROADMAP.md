@@ -24,7 +24,7 @@ Smaller fixes that didn't make the twenty are collected in the appendix.
 | 13 | Notifications + persistent job history — **shipped** | could | M |
 | 14 | `dbs doctor` + dependency self-update — **shipped** | could | M |
 | 15 | Concurrent `backup_all` | could | L |
-| 16 | Query & index tuning for scale | could | M |
+| 16 | Query & index tuning for scale — **shipped** | could | M |
 | 17 | Full-text search (FTS5) — **shipped** | could | M |
 | 18 | Make the dormant contract surface real | should | M |
 | 19 | New connectors + shared browser helper | could | M–L each |
@@ -213,7 +213,7 @@ already exists. The per-source lock table already prevents double-running a
 source. Keep browser-based connectors serialized (they're resource-heavy)
 via a capability-driven concurrency class.
 
-### 16. Query & index tuning for scale — [could], M
+### 16. Query & index tuning for scale — [could], M — SHIPPED (indexes + set-based sweep; keyset pagination deferred — offset paging is fine at personal scale with the new index)
 
 Confirmed hot spots for when the DB reaches hundreds of thousands of items:
 `soft_delete_missing` loads every live row into Python per run (make it a

@@ -407,3 +407,28 @@ def test_like_fallback_when_fts_unavailable(storage):
     # LIKE is a single-substring scan: the cross-field query finds nothing.
     _, total = storage.browse_items(ExportQuery(), text="quick fox")
     assert total == 0
+
+
+# --- sweep scale + scale indexes (migration 0004) ----------------------------
+
+
+def test_soft_delete_sweep_handles_large_live_sets(storage):
+    # >400 live ids exercises the temp-table chunking of the anti-join sweep.
+    src, run = _setup(storage)
+    items = [_item(str(i), f"h{i}") for i in range(450)]
+    storage.upsert_items(src.id, run, items)
+    run2 = storage.begin_run(src.id, "test:fake", "reconcile", None)
+    live = {str(i) for i in range(450)} - {"7", "133", "449"}
+    assert storage.soft_delete_missing(src.id, live, run2) == 3
+    _t, live_n, gone = storage.item_counts(src.id)
+    assert (live_n, gone) == (447, 3)
+    # Repeat sweeps stay correct (the temp table is cleared between calls).
+    assert storage.soft_delete_missing(src.id, live, run2) == 0
+
+
+def test_scale_indexes_exist(storage):
+    names = {r[0] for r in storage.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'"
+    )}
+    assert "idx_items_created_global" in names
+    assert "idx_media_with_data" in names

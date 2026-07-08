@@ -529,17 +529,34 @@ class SqliteStorage(Storage):
     def soft_delete_missing(
         self, source_id: int, live_ids: set[str], run_id: int
     ) -> int:
+        """Soft-delete live items absent from ``live_ids`` (reconcile sweep).
+
+        The live set goes into a temp table and the victims come from a SQL
+        anti-join, so memory is O(victims) — a handful in steady state, and
+        never more than the engine's sweep-safety fraction — instead of the
+        previous O(every live row loaded into Python) per sweep.
+        """
         now = self._now()
         count = 0
         with self.transaction():
-            rows = self.conn.execute(
-                "SELECT id, external_id, revision, content_hash, raw_json, title "
-                "FROM items WHERE source_id=? AND deleted=0",
+            self.conn.execute(
+                "CREATE TEMP TABLE IF NOT EXISTS _sweep_live("
+                "external_id TEXT PRIMARY KEY) WITHOUT ROWID"
+            )
+            self.conn.execute("DELETE FROM _sweep_live")
+            for chunk in _chunks(list(live_ids), 400):
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO _sweep_live(external_id) VALUES "
+                    + ",".join(["(?)"] * len(chunk)),
+                    chunk,
+                )
+            victims = self.conn.execute(
+                "SELECT id, revision, content_hash, raw_json, title "
+                "FROM items WHERE source_id=? AND deleted=0 "
+                "AND external_id NOT IN (SELECT external_id FROM _sweep_live)",
                 (source_id,),
             ).fetchall()
-            for r in rows:
-                if r["external_id"] in live_ids:
-                    continue
+            for r in victims:
                 new_rev = int(r["revision"]) + 1
                 self.conn.execute(
                     "UPDATE items SET deleted=1, deleted_at=?, revision=?, "
@@ -556,6 +573,7 @@ class SqliteStorage(Storage):
                     (r["id"], new_rev, r["content_hash"], r["raw_json"], r["title"], now, run_id),
                 )
                 count += 1
+            self.conn.execute("DELETE FROM _sweep_live")
         return count
 
     # -- cursor / state -----------------------------------------------------
