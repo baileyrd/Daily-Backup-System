@@ -65,7 +65,7 @@ implemented yet — noted here so they aren't rediscovered from scratch:
   wraps its list extractions with a plain wall-clock cap
   (`extract_timeout`, default 600s); a timed-out list is flagged like a
   failed one, so deletion detection is skipped for the run.
-- **No yt-dlp self-update mechanism.** The reference ships a `skool
+- **No yt-dlp self-update mechanism. (SHIPPED as `dbs update-ytdlp`)** The reference ships a `skool
   update-ytdlp` command and recommends running it weekly for unattended
   installs (its own yt-dlp binary is fetched from GitHub releases, unpinned,
   so "latest" is one command away). `dbs` only pins a floor version in

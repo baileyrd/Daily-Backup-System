@@ -300,3 +300,23 @@ def test_restore_command_ndjson(tmp_path):
     result = runner.invoke(app, ["--config", str(cfg), "restore", str(tmp_path / "nope.zip")])
     assert result.exit_code == 4
     assert "no such file" in result.stdout
+
+
+def test_doctor_command(tmp_path, monkeypatch):
+    monkeypatch.delenv("RAINDROP_TOKEN", raising=False)
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    # The template ships a raindrop source; its token isn't set -> exit 1.
+    result = runner.invoke(app, ["--config", str(cfg), "doctor"])
+    assert result.exit_code == 1, result.stdout
+    assert "secrets" in result.stdout and "RAINDROP_TOKEN" in result.stdout
+
+    monkeypatch.setenv("RAINDROP_TOKEN", "tok")
+    result = runner.invoke(app, ["--config", str(cfg), "doctor"])
+    assert result.exit_code == 0, result.stdout
+
+
+def test_update_ytdlp_dry_run():
+    result = runner.invoke(app, ["update-ytdlp", "--dry-run"])
+    assert result.exit_code == 0
+    assert "pip install --upgrade yt-dlp[default]" in result.stdout
