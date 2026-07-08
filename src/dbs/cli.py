@@ -552,6 +552,12 @@ def serve(
              "/?token=... and it stores it locally). Mandatory when binding to "
              "a non-localhost address.",
     ),
+    schedule: bool = typer.Option(
+        False, "--schedule/--no-schedule",
+        help="Run backups automatically while the server is up: every minute, "
+             "any enabled source whose `schedule` cadence (hourly/daily/weekly) "
+             "has elapsed is backed up — no external cron needed.",
+    ),
 ) -> None:
     """Launch the web management UI (requires the [web] extra)."""
     is_local = host in ("127.0.0.1", "localhost", "::1", "")
@@ -579,9 +585,16 @@ def serve(
 
     # The app factory reads this config path on every request, so it always
     # reflects the latest on-disk config (e.g. sources added via the UI).
-    app_instance = create_app(_state["config"], allow_setup=allow_setup, auth_token=token)
+    app_instance = create_app(
+        _state["config"], allow_setup=allow_setup, auth_token=token,
+        schedule_seconds=60.0 if schedule else None,
+    )
     typer.secho(f"Serving Daily Backup System UI at http://{host}:{port}", fg=typer.colors.GREEN)
     typer.echo(f"  (config: {_state['config']})  —  press Ctrl+C to stop")
+    if schedule:
+        typer.echo(
+            "  scheduler ON — due sources back up automatically while this runs"
+        )
     if token:
         typer.echo(
             f"  token auth ON — open http://{host}:{port}/?token=<your token> "

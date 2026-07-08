@@ -279,6 +279,9 @@ class SourceStatus:
     run_count: int
     watermark: datetime | None
     has_interrupted_runs: bool
+    schedule: str = "daily"
+    next_due_at: datetime | None = None  # None = due right now
+    due_now: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -294,6 +297,9 @@ class SourceStatus:
             "run_count": self.run_count,
             "watermark": self.watermark.isoformat() if self.watermark else None,
             "has_interrupted_runs": self.has_interrupted_runs,
+            "schedule": self.schedule,
+            "next_due_at": self.next_due_at.isoformat() if self.next_due_at else None,
+            "due_now": self.due_now,
         }
 
 

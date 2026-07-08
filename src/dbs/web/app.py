@@ -119,6 +119,7 @@ def create_app(
     *,
     allow_setup: bool = False,
     auth_token: str | None = None,
+    schedule_seconds: float | None = None,
 ):
     """Build the FastAPI app bound to a config file. Raises if deps are absent.
 
@@ -132,6 +133,12 @@ def create_app(
     ``Authorization: Bearer …`` or a ``?token=`` query parameter (the latter so
     ``EventSource`` streams and download links can authenticate) — on every
     ``/api`` call, and is mandatory for non-localhost binds.
+
+    ``schedule_seconds`` (``dbs serve --schedule``) starts a background loop
+    that checks every N seconds whether any enabled source's ``schedule``
+    cadence has elapsed and, if so, starts a normal ``only_due`` backup job —
+    the same job the Backup button creates, so it shows up in the UI's live
+    progress and history like any other run.
     """
     try:
         from fastapi import Body, FastAPI, HTTPException, Query
@@ -181,7 +188,47 @@ def create_app(
     # setup tasks — a separate manager so one doesn't block the other.
     research_mgr = SetupManager()
 
-    app = FastAPI(title="Daily Backup System", version=__version__)
+    # -- built-in scheduler (opt-in: dbs serve --schedule) --------------------
+
+    scheduler_lifespan = None
+    if schedule_seconds:
+        import logging
+        import threading
+        from contextlib import asynccontextmanager
+
+        sched_log = logging.getLogger("dbs.web.scheduler")
+        stop_scheduler = threading.Event()
+
+        def _scheduler_loop() -> None:
+            # wait() first so startup never fires an instant surprise backup;
+            # the first check happens one interval in.
+            while not stop_scheduler.wait(schedule_seconds):
+                try:
+                    svc = BackupService.from_config_file(config_path)
+                    try:
+                        due = svc.due_sources()
+                    finally:
+                        svc.close()
+                    if not due:
+                        continue
+                    sched_log.info("scheduler: %s due — starting backup", ", ".join(due))
+                    jobs.start({"all": True, "only_due": True})
+                except JobAlreadyRunning:
+                    pass  # a run is in flight; the next tick re-checks
+                except Exception:  # noqa: BLE001 - the loop must survive anything
+                    sched_log.warning("scheduler tick failed", exc_info=True)
+
+        @asynccontextmanager
+        async def scheduler_lifespan(app):  # noqa: ARG001 - FastAPI's contract
+            threading.Thread(
+                target=_scheduler_loop, daemon=True, name="dbs-scheduler"
+            ).start()
+            yield
+            stop_scheduler.set()
+
+    app = FastAPI(
+        title="Daily Backup System", version=__version__, lifespan=scheduler_lifespan
+    )
 
     # -- security gate (Host / Origin / optional bearer token) ---------------
 
@@ -239,6 +286,7 @@ def create_app(
             "formats": sorted(EXPORTERS),
             "setup_enabled": allow_setup,
             "auth_required": auth_token is not None,
+            "scheduler_enabled": bool(schedule_seconds),
         }
 
     # -- read views ---------------------------------------------------------

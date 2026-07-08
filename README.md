@@ -71,7 +71,7 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | Command | Description |
 |---|---|
 | `dbs init [--force]` | Create config + `.env.example` and initialize the DB (idempotent; `--force` overwrites an existing config). |
-| `dbs backup [SOURCE] [--all] [--only-due] [--force-full] [--reconcile] [--dry-run] [--progress/--no-progress]` | Run an incremental backup. `auto` mode picks incremental vs. reconcile. `--only-due` skips sources backed up within the last 20h (for `--all` runs more than once a day). A live status line (running item counter + per-source `[i/N]` position) shows automatically on a TTY; force it with `--progress` or silence it with `--no-progress`. |
+| `dbs backup [SOURCE] [--all] [--only-due] [--force-full] [--reconcile] [--dry-run] [--progress/--no-progress]` | Run an incremental backup. `auto` mode picks incremental vs. reconcile. `--only-due` skips sources whose `schedule` cadence (`hourly`/`daily`/`weekly`, default daily ≈ 20h of slack) hasn't elapsed (for `--all` runs more than once a day). A live status line (running item counter + per-source `[i/N]` position) shows automatically on a TTY; force it with `--progress` or silence it with `--no-progress`. |
 | `dbs status [SOURCE] [--json]` | Per-source item counts, last run, cursor watermark, warnings. |
 | `dbs history [SOURCE] [-n N] [--json]` | Recent backup runs and their stats. |
 | `dbs export --format FMT --out PATH [filters]` | Export to `json`/`ndjson`/`csv`/`markdown`/`obsidian`/`archive`. |
@@ -81,7 +81,7 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | `dbs verify [SOURCE]` | Database + per-source integrity self-check. |
 | `dbs maintain [--vacuum] [--snapshot PATH] [--json]` | Database housekeeping: flush the WAL and refresh query-planner stats; `--vacuum` compacts the file, `--snapshot` writes a consistent single-file copy that's safe to move off-machine (a raw copy of a live WAL-mode DB misses the `-wal` sidecar). |
 | `dbs schedule [--interval daily\|hourly]` | Print ready-to-use cron / systemd snippets. |
-| `dbs serve [--host H] [--port P] [--no-setup]` | Launch the web management UI (needs the `[web]` extra). In-UI setup (dependency install + browser-login capture) is on by default; `--no-setup` disables it. |
+| `dbs serve [--host H] [--port P] [--no-setup] [--token T] [--schedule]` | Launch the web management UI (needs the `[web]` extra). In-UI setup (dependency install + browser-login capture) is on by default; `--no-setup` disables it. `--schedule` backs up due sources automatically while the server runs (no external cron needed); `--token` adds bearer-token auth (required off-localhost). |
 | `dbs research youtube TOPIC [...]` \| `dbs research youtube-backup TOPIC [...]` | Ad-hoc YouTube research: search (or reuse a backed-up list), synthesize via NotebookLM, write a markdown report. See [docs/research.md](docs/research.md). |
 | `dbs version` | Tool + core API version. |
 

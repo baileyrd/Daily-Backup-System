@@ -19,7 +19,7 @@ Smaller fixes that didn't make the twenty are collected in the appendix.
 | 8 | Revision retention policy | could | M |
 | 9 | Self-verifying archives (checksummed manifest) | could | S–M |
 | 10 | Encryption at rest / encrypted exports | could | M–L |
-| 11 | Built-in scheduler + honor per-source `schedule` | could | M |
+| 11 | Built-in scheduler + honor per-source `schedule` — **shipped** | could | M |
 | 12 | Web auth + CSRF/Origin/Host protection — **shipped** | should | M |
 | 13 | Notifications + persistent job history | could | M |
 | 14 | `dbs doctor` + dependency self-update | could | M |
@@ -152,7 +152,7 @@ way (the `.env` secrets file already sets the local-trust baseline).
 
 ## C. Scheduling, operations & the web tier
 
-### 11. Built-in scheduler + honor per-source `schedule` — [could], M
+### 11. Built-in scheduler + honor per-source `schedule` — [could], M — SHIPPED
 
 The "daily" in Daily Backup System is currently outsourced entirely to cron,
 and `_is_due` hardcodes ~20h while the per-source `schedule` config field is
