@@ -18,7 +18,7 @@ Smaller fixes that didn't make the twenty are collected in the appendix.
 | 7 | Database maintenance (`dbs maintain`) — **shipped** #57 | should | M |
 | 8 | Revision retention policy — **shipped** | could | M |
 | 9 | Self-verifying archives (checksummed manifest) — **shipped** | could | S–M |
-| 10 | Encryption at rest / encrypted exports | could | M–L |
+| 10 | Encryption at rest / encrypted exports — **shipped** (exports) | could | M–L |
 | 11 | Built-in scheduler + honor per-source `schedule` — **shipped** | could | M |
 | 12 | Web auth + CSRF/Origin/Host protection — **shipped** | should | M |
 | 13 | Notifications + persistent job history — **shipped** | could | M |
@@ -140,7 +140,7 @@ NDJSON files and each media blob) into `manifest.json`, and add
 streaming; turns the bundle from self-describing into self-verifying, and
 composes with #6 (restore can verify before ingesting).
 
-### 10. Encryption at rest / encrypted exports — [could], M–L
+### 10. Encryption at rest / encrypted exports — [could], M–L — SHIPPED (encrypted exports via [crypto] extra; SQLCipher at-rest variant deferred)
 
 The DB aggregates private bookmarks, saved posts, course content, and
 archived page copies in plaintext; export bundles are plaintext zips.
