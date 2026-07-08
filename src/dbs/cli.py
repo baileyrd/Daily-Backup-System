@@ -429,6 +429,46 @@ def verify(source: Optional[str] = typer.Argument(None)) -> None:
 
 
 @app.command()
+def restore(
+    path: Path = typer.Argument(
+        ..., help="An archive .zip (dbs export --format archive) or an .ndjson "
+                  "export written with raw payloads."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Parse and validate the bundle; write nothing."
+    ),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Restore an exported backup into the database. Idempotent: re-restoring
+    the same bundle classifies every row as unchanged."""
+    svc = _service()
+    try:
+        try:
+            report = svc.restore(path, dry_run=dry_run)
+        except ConfigError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(4) from exc
+        if json_out:
+            typer.echo(json.dumps(report.to_dict(), indent=2))
+            return
+        verb = "Would restore" if report.dry_run else "Restored"
+        typer.secho(
+            f"{verb} {report.fetched} item(s) across {len(report.sources)} "
+            f"source(s): {', '.join(report.sources) or '-'}",
+            fg=typer.colors.GREEN,
+        )
+        if not report.dry_run:
+            typer.echo(
+                f"  +{report.created} created  ~{report.updated} updated  "
+                f"={report.unchanged} unchanged  x{report.deleted} deleted"
+            )
+        for w in report.warnings:
+            typer.secho(f"  warning: {w}", fg=typer.colors.YELLOW)
+    finally:
+        svc.close()
+
+
+@app.command()
 def maintain(
     vacuum: bool = typer.Option(
         False, "--vacuum",

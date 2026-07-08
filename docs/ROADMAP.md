@@ -9,13 +9,13 @@ Smaller fixes that didn't make the twenty are collected in the appendix.
 
 | # | Item | Kind | Effort |
 |---|---|---|---|
-| 1 | Uniform partial-enumeration deletion safety | should | M |
-| 2 | Fix deleted-item resurrection in `_update_item` | should | S |
-| 3 | Wall-clock watchdog around yt-dlp calls | should | M |
-| 4 | A real warnings channel on run results | should | S–M |
-| 5 | Harden `Retry-After` handling | should | S |
-| 6 | Restore/import (`dbs restore`) | should | L |
-| 7 | Database maintenance (`dbs maintain`) | should | M |
+| 1 | Uniform partial-enumeration deletion safety — **shipped** #53 | should | M |
+| 2 | Fix deleted-item resurrection in `_update_item` — **shipped** #52 | should | S |
+| 3 | Wall-clock watchdog around yt-dlp calls — **shipped** #56 | should | M |
+| 4 | A real warnings channel on run results — **shipped** #55 | should | S–M |
+| 5 | Harden `Retry-After` handling — **shipped** #54 | should | S |
+| 6 | Restore/import (`dbs restore`) — **shipped** | should | L |
+| 7 | Database maintenance (`dbs maintain`) — **shipped** #57 | should | M |
 | 8 | Revision retention policy | could | M |
 | 9 | Self-verifying archives (checksummed manifest) | could | S–M |
 | 10 | Encryption at rest / encrypted exports | could | M–L |
@@ -34,7 +34,7 @@ Smaller fixes that didn't make the twenty are collected in the appendix.
 
 ## A. Correctness & data-safety hardening
 
-### 1. Uniform partial-enumeration deletion safety — [should], M
+### 1. Uniform partial-enumeration deletion safety — [should], M — SHIPPED (#53)
 
 The strongest deletion-safety pattern in the codebase — Skool's
 `_partial_enumeration` sentinel, which suppresses the `ReconcileMarker`
@@ -56,7 +56,7 @@ regress: e.g. a `ReconcileMarker(complete=False)` flag or a
 `PartialEnumeration` event that any connector can yield, with the engine
 owning the suppress-the-sweep behavior.
 
-### 2. Fix deleted-item resurrection in `_update_item` — [should], S
+### 2. Fix deleted-item resurrection in `_update_item` — [should], S — SHIPPED (#52)
 
 In `storage/sqlite.py`, an item that is deleted upstream *and stays deleted*
 but whose raw payload changes falls through the first two branches into the
@@ -67,7 +67,7 @@ Raindrop's trash poll today). The branch should preserve `deleted=True` when
 the incoming item is deleted; add a regression test alongside
 `test_native_delete_inserts_as_deleted`.
 
-### 3. Wall-clock watchdog around yt-dlp calls — [should], M
+### 3. Wall-clock watchdog around yt-dlp calls — [should], M — SHIPPED (#56)
 
 Already identified in BACKLOG.md item 3: `socket_timeout=30` guards per-read
 stalls, but nothing bounds a stuck extraction/download (a fragment loop, a
@@ -79,7 +79,7 @@ for: run the yt-dlp call in a worker (subprocess for kill-ability, or thread
 `youtube.py:_dump_list`, classify a timeout as transient, and continue the
 run.
 
-### 4. A real warnings channel on run results — [should], S–M
+### 4. A real warnings channel on run results — [should], S–M — SHIPPED (#55)
 
 When the engine refuses a mass-delete sweep it appends the warning to
 `RunResult.error` while leaving status `SUCCESS`; `dbs backup` then exits 0
@@ -88,7 +88,7 @@ with pending deletions invisible to cron. Add `warnings: list[str]` to
 and the web UI, and consider a distinct exit code (or including warnings in
 exit 2) so schedulers can alert. Zero-item-run warnings belong here too.
 
-### 5. Harden `Retry-After` handling — [should], S
+### 5. Harden `Retry-After` handling — [should], S — SHIPPED (#54)
 
 `ManagedHTTPClient._backoff` sleeps a server-supplied `retry_after`
 uncapped — a hostile or broken server saying `Retry-After: 86400` blocks the
@@ -98,7 +98,7 @@ isn't). Clamp it, and while there, support the HTTP-date form of the header
 
 ## B. Data lifecycle: restore, maintenance, integrity
 
-### 6. Restore/import (`dbs restore`) — [should], L
+### 6. Restore/import (`dbs restore`) — [should], L — SHIPPED (items v1: latest state; revisions/media reported skipped)
 
 The system is write-only: ndjson is advertised as "restore-grade" and the
 archive as self-describing, yet nothing can read either back. A backup tool
@@ -111,7 +111,7 @@ modes. This also finally gives the manifest metadata a consumer, and enables
 a round-trip test (backup → export → restore → compare) that would pin
 losslessness forever.
 
-### 7. Database maintenance (`dbs maintain`) — [should], M
+### 7. Database maintenance (`dbs maintain`) — [should], M — SHIPPED (#57)
 
 Nothing ever runs `VACUUM`, checkpoints the WAL, or runs
 `PRAGMA optimize`/`ANALYZE`; media rows are delete-and-reinserted on every

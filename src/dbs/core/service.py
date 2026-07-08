@@ -27,6 +27,7 @@ from ..storage.sqlite import SqliteStorage
 from .engine import Engine
 from .errors import (
     BackupRunError,
+    ConfigError,
     ConnectorConfigError,
     SourceLockedError,
 )
@@ -36,6 +37,7 @@ from .models import (
     Cursor,
     MaintenanceReport,
     ProgressCallback,
+    RestoreReport,
     RunContext,
     RunResult,
     RunStatus,
@@ -513,6 +515,123 @@ class BackupService:
             "db_schema_version": SCHEMA_VERSION,
             "connector_schema_versions": connector_schema_versions,
         }
+
+    # -- restore --------------------------------------------------------------
+
+    def restore(self, path: str | Path, *, dry_run: bool = False) -> RestoreReport:
+        """Replay an export (archive zip or raw-bearing ndjson) into the DB.
+
+        Rows go through the same classified ``upsert_items`` path a live
+        backup uses, carrying their stored ``content_hash`` verbatim, so a
+        re-restore of the same bundle is a no-op ("unchanged"). Existing
+        sources are never reconfigured — a source row is created only when
+        missing (type from the bundle, empty config). Cursors are untouched:
+        a freshly restored source simply does a full run on its next backup.
+        Each restored source gets a ``mode="restore"`` entry in run history.
+        """
+        from ..restore import (
+            iter_export_rows,
+            prepared_item_from_row,
+            read_manifest,
+            skipped_extras,
+        )
+        from ..storage.migrations import SCHEMA_VERSION
+
+        src_path = Path(path).expanduser()
+        if not src_path.is_file():
+            raise ConfigError(f"no such file: {src_path}")
+        manifest = read_manifest(src_path)
+        if manifest is not None:
+            bundle_schema = manifest.get("db_schema_version")
+            if isinstance(bundle_schema, int) and bundle_schema > SCHEMA_VERSION:
+                raise ConfigError(
+                    f"bundle was written by a newer dbs (db_schema_version "
+                    f"{bundle_schema} > this build's {SCHEMA_VERSION}); "
+                    f"upgrade dbs before restoring."
+                )
+        warnings: list[str] = []
+        revisions_skipped, media_skipped = skipped_extras(manifest)
+        if revisions_skipped:
+            warnings.append(
+                f"{revisions_skipped} revision row(s) in the bundle were not "
+                f"restored (restore replays the latest item state only)"
+            )
+        if media_skipped:
+            warnings.append(
+                f"{media_skipped} media file(s) in the bundle were not restored"
+            )
+
+        fetched = 0
+        records: dict[str, Any] = {}
+        runs: dict[str, int] = {}
+        buffers: dict[str, list] = {}
+        seen: dict[str, int] = {}
+        stats: dict[str, BatchResult] = {}
+
+        def flush(name: str) -> None:
+            batch = buffers[name]
+            if not batch:
+                return
+            res = self.storage.upsert_items(records[name].id, runs[name], batch)
+            stats[name].merge(res)
+            buffers[name] = []
+
+        for row in iter_export_rows(src_path):
+            fetched += 1
+            name = str(row.get("source") or "").strip()
+            if not name:
+                raise ConfigError(f"{src_path}: row {fetched} has no source name")
+            item = prepared_item_from_row(row, f"{src_path}: row {fetched}")
+            seen[name] = seen.get(name, 0) + 1
+            if dry_run:
+                continue
+            if name not in records:
+                existing = self.storage.get_source(name)
+                if existing is None:
+                    stype = str(row.get("type") or "unknown")
+                    existing = self.storage.upsert_source(
+                        name, stype, f"restored:{stype}", "{}", 1
+                    )
+                records[name] = existing
+                runs[name] = self.storage.begin_run(
+                    existing.id, existing.plugin_id, "restore", None
+                )
+                buffers[name] = []
+                stats[name] = BatchResult()
+            buffers[name].append(item)
+            if len(buffers[name]) >= 500:
+                flush(name)
+
+        for name in buffers:
+            flush(name)
+        for name, run_id in runs.items():
+            self.storage.finish_run(
+                run_id, RunStatus.SUCCESS.value, stats[name],
+                items_seen=seen.get(name, 0), cursor_after=None, error=None,
+                warnings=[],
+            )
+
+        totals = BatchResult()
+        for st in stats.values():
+            totals.merge(st)
+        expected = ((manifest or {}).get("counts") or {}).get("items")
+        if isinstance(expected, int) and expected != fetched:
+            warnings.append(
+                f"manifest says {expected} item(s) but the bundle held {fetched}"
+            )
+        return RestoreReport(
+            path=str(src_path),
+            dry_run=dry_run,
+            sources=sorted(seen),
+            fetched=fetched,
+            created=totals.created,
+            updated=totals.updated,
+            unchanged=totals.unchanged,
+            deleted=totals.deleted,
+            revisions_skipped=revisions_skipped,
+            media_skipped=media_skipped,
+            warnings=warnings,
+        )
 
     # -- maintenance ---------------------------------------------------------
 
