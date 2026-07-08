@@ -130,6 +130,43 @@ def test_still_deleted_item_with_changed_payload_stays_deleted(storage):
     assert row["revision"] == 2
 
 
+def test_maintain_reports_stats(storage):
+    src, run = _setup(storage)
+    storage.upsert_items(src.id, run, [_item("1", "h1")])
+    stats = storage.maintain()
+    assert stats["wal_checkpointed"] is True
+    assert stats["optimized"] is True
+    assert stats["vacuumed"] is False
+    assert stats["size_after"] > 0
+
+    stats = storage.maintain(vacuum=True)
+    assert stats["vacuumed"] is True
+
+
+def test_vacuum_into_snapshot_is_a_complete_database(storage, tmp_path):
+    src, run = _setup(storage)
+    storage.upsert_items(src.id, run, [_item("1", "h1"), _item("2", "h2")])
+    dest = tmp_path / "backups" / "snap.sqlite3"  # parent dir gets created
+    size = storage.vacuum_into(dest)
+    assert size > 0 and dest.exists()
+
+    # The snapshot is a complete, standalone database (WAL already folded in).
+    snap = SqliteStorage(dest)
+    try:
+        n = snap.conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        assert n == 2
+    finally:
+        snap.close()
+
+
+def test_vacuum_into_refuses_existing_destination(storage, tmp_path):
+    dest = tmp_path / "snap.sqlite3"
+    dest.write_bytes(b"do not clobber")
+    with pytest.raises(FileExistsError):
+        storage.vacuum_into(dest)
+    assert dest.read_bytes() == b"do not clobber"
+
+
 def test_cursor_save_load_and_watermark_monotonic(storage):
     src, run = _setup(storage)
     storage.save_cursor(src.id, Cursor({"a": 1}), "2024-01-01T00:00:00Z", run)

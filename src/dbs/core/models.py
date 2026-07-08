@@ -326,6 +326,32 @@ class VerifyReport:
     issues: list[VerifyIssue] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class MaintenanceReport:
+    """Result of a database maintenance pass. Plain data; no rendering."""
+
+    database: str
+    wal_checkpointed: bool
+    optimized: bool
+    vacuumed: bool
+    size_before: int
+    size_after: int
+    snapshot_path: str | None = None
+    snapshot_bytes: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "database": self.database,
+            "wal_checkpointed": self.wal_checkpointed,
+            "optimized": self.optimized,
+            "vacuumed": self.vacuumed,
+            "size_before": self.size_before,
+            "size_after": self.size_after,
+            "snapshot_path": self.snapshot_path,
+            "snapshot_bytes": self.snapshot_bytes,
+        }
+
+
 __all__ = [
     "utcnow",
     "MediaRef",
@@ -344,6 +370,7 @@ __all__ = [
     "ConnectorInfo",
     "VerifyIssue",
     "VerifyReport",
+    "MaintenanceReport",
     "Capabilities",
     "ItemKind",
 ]

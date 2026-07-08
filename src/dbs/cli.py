@@ -429,6 +429,51 @@ def verify(source: Optional[str] = typer.Argument(None)) -> None:
 
 
 @app.command()
+def maintain(
+    vacuum: bool = typer.Option(
+        False, "--vacuum",
+        help="Rebuild the database file to reclaim free pages (media rewrites "
+             "and revision growth never shrink it otherwise; can take a while).",
+    ),
+    snapshot: Optional[Path] = typer.Option(
+        None, "--snapshot",
+        help="Also write a consistent single-file copy (VACUUM INTO) safe to "
+             "copy off-machine. Refuses an existing path.",
+    ),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Database housekeeping: flush the WAL, refresh query-planner stats,
+    optionally compact (--vacuum) and snapshot (--snapshot PATH)."""
+    svc = _service()
+    try:
+        try:
+            report = svc.maintain(vacuum=vacuum, snapshot=snapshot)
+        except FileExistsError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(1) from exc
+        if json_out:
+            typer.echo(json.dumps(report.to_dict(), indent=2))
+            return
+        typer.secho(f"Database: {report.database}", fg=typer.colors.CYAN)
+        typer.echo(f"  WAL checkpoint: {'ok' if report.wal_checkpointed else 'blocked/none'}")
+        typer.echo("  planner stats:  refreshed")
+        if report.vacuumed:
+            typer.echo(
+                f"  vacuum:         done "
+                f"({report.size_before:,} -> {report.size_after:,} bytes)"
+            )
+        else:
+            typer.echo(f"  vacuum:         skipped ({report.size_after:,} bytes; --vacuum to compact)")
+        if report.snapshot_path:
+            typer.secho(
+                f"  snapshot:       {report.snapshot_path} ({report.snapshot_bytes:,} bytes)",
+                fg=typer.colors.GREEN,
+            )
+    finally:
+        svc.close()
+
+
+@app.command()
 def schedule(
     interval: str = typer.Option("daily", help="cron preset: daily|hourly."),
 ) -> None:

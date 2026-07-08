@@ -77,6 +77,9 @@ class SqliteStorage(Storage):
 
     def close(self) -> None:
         try:
+            # SQLite's own advice: cheap here (it only re-analyzes what
+            # changed), and the only routine chance the planner gets stats.
+            self.conn.execute("PRAGMA optimize")
             self.conn.close()
         except sqlite3.Error:
             pass
@@ -739,6 +742,56 @@ class SqliteStorage(Storage):
     def integrity_check(self) -> str:
         row = self.conn.execute("PRAGMA integrity_check").fetchone()
         return row[0] if row else "unknown"
+
+    # -- maintenance ---------------------------------------------------------
+
+    def _file_size(self) -> int:
+        try:
+            return Path(self.path).stat().st_size
+        except OSError:  # :memory:, or the file is gone
+            return 0
+
+    def maintain(self, *, vacuum: bool = False) -> dict[str, Any]:
+        """WAL checkpoint + planner stats (+ optional VACUUM).
+
+        Nothing else ever runs these: without a checkpoint a long-lived
+        process accumulates an unbounded ``-wal`` sidecar (and a copy of the
+        bare ``.sqlite3`` file silently misses everything still in it);
+        without ``PRAGMA optimize`` the query planner has no statistics; and
+        media rewrites + revision growth leave free pages only VACUUM
+        reclaims. Runs in autocommit — VACUUM cannot run inside a
+        transaction, so this must never be called mid-``transaction()``.
+        """
+        size_before = self._file_size()
+        # TRUNCATE both flushes the WAL into the main file and truncates the
+        # sidecar, so the .sqlite3 file alone is complete afterwards.
+        row = self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        wal_ok = row is not None and int(row[0]) == 0  # 0 = ran unblocked
+        self.conn.execute("PRAGMA optimize")
+        if vacuum:
+            self.conn.execute("VACUUM")
+        return {
+            "path": self.path,
+            "wal_checkpointed": wal_ok,
+            "optimized": True,
+            "vacuumed": bool(vacuum),
+            "size_before": size_before,
+            "size_after": self._file_size(),
+        }
+
+    def vacuum_into(self, dest: str | Path) -> int:
+        """Consistent single-file snapshot via ``VACUUM INTO`` (see the ABC).
+
+        Refuses an existing destination rather than overwriting — a snapshot
+        target that already exists is more likely a mistyped path than an
+        intentional replace, and ``VACUUM INTO`` itself errors on it anyway.
+        """
+        target = Path(dest).expanduser()
+        if target.exists():
+            raise FileExistsError(f"snapshot target already exists: {target}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self.conn.execute("VACUUM INTO ?", (str(target),))
+        return target.stat().st_size
 
 
 # --------------------------------------------------------------------------- #
