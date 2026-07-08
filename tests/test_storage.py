@@ -102,6 +102,34 @@ def test_native_delete_inserts_as_deleted(storage):
     assert row["deleted"] == 1
 
 
+def test_still_deleted_item_with_changed_payload_stays_deleted(storage):
+    """Regression: a deleted item whose payload changes must not be resurrected.
+
+    A native-deletes source (e.g. Raindrop's trash poll) can re-emit a trash
+    item with a mutated payload; the update must record the change while the
+    item stays deleted, preserving the original deletion time.
+    """
+    src, run = _setup(storage)
+    storage.upsert_items(src.id, run, [_item("9", "h1", deleted=True)])
+    first = storage.conn.execute(
+        "SELECT deleted, deleted_at FROM items WHERE external_id='9'"
+    ).fetchone()
+    assert first["deleted"] == 1 and first["deleted_at"] is not None
+
+    run2 = storage.begin_run(src.id, "test:fake", "incremental", None)
+    res = storage.upsert_items(src.id, run2, [_item("9", "h2", deleted=True)])
+    assert res.updated == 1 and res.undeleted == 0
+
+    row = storage.conn.execute(
+        "SELECT deleted, deleted_at, content_hash, revision "
+        "FROM items WHERE external_id='9'"
+    ).fetchone()
+    assert row["deleted"] == 1                       # not resurrected
+    assert row["deleted_at"] == first["deleted_at"]  # original time preserved
+    assert row["content_hash"] == "h2"               # the change was recorded
+    assert row["revision"] == 2
+
+
 def test_cursor_save_load_and_watermark_monotonic(storage):
     src, run = _setup(storage)
     storage.save_cursor(src.id, Cursor({"a": 1}), "2024-01-01T00:00:00Z", run)

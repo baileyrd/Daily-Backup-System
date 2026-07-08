@@ -346,13 +346,17 @@ class SqliteStorage(Storage):
             res.revisions += 1
             deleted, content_hash = False, it.content_hash
         elif hash_changed:
+            # A still-deleted item whose payload changed stays deleted — a
+            # native-deletes source (e.g. Raindrop's trash) may re-emit trash
+            # items with mutated payloads, and an update must never resurrect
+            # them. `deleted=it.deleted` is False on the normal live path.
             new_rev += 1
-            self._write_full_update(item_id, new_rev, it, now, run_id, deleted=False)
+            self._write_full_update(item_id, new_rev, it, now, run_id, deleted=it.deleted)
             self._insert_revision(item_id, new_rev, it, now, run_id, "updated")
             self._replace_media(item_id, it)
             res.updated += 1
             res.revisions += 1
-            deleted, content_hash = False, it.content_hash
+            deleted, content_hash = it.deleted, it.content_hash
         else:
             self.conn.execute(
                 "UPDATE items SET last_seen_at=?, observed_run_id=? WHERE id=?",
@@ -380,14 +384,19 @@ class SqliteStorage(Storage):
                 item_kind=?, title=?, url=?, body=?, tags_json=?,
                 item_created_at=?, item_updated_at=?, content_hash=?, raw_json=?,
                 revision=?, last_seen_at=?, last_changed_at=?, observed_run_id=?,
-                deleted=?, deleted_at=?
+                deleted=?,
+                deleted_at=CASE WHEN ? THEN COALESCE(deleted_at, ?) ELSE NULL END
             WHERE id=?
             """,
             (
                 it.item_kind, it.title, it.url, it.body, json.dumps(it.tags),
                 it.item_created_at, it.item_updated_at, it.content_hash, it.raw_json,
                 new_rev, now, now, run_id,
-                1 if deleted else 0, now if deleted else None, item_id,
+                1 if deleted else 0,
+                # Preserve the original deletion time when an already-deleted
+                # item is updated in place; stamp `now` only on a live->deleted
+                # transition (deleted_at is NULL there).
+                1 if deleted else 0, now, item_id,
             ),
         )
 
