@@ -253,6 +253,12 @@ class Storage(ABC):
             "vacuumed": False, "size_before": 0, "size_after": 0,
         }
 
+    def prune_revisions(self, source_id: int, keep: int) -> int:
+        """Delete all but the newest ``keep`` revisions of each of the
+        source's items (0 = keep everything). Returns rows deleted. Items
+        themselves are never touched — only their history is trimmed."""
+        return 0
+
     def vacuum_into(self, dest: str | Path) -> int:
         """Write a consistent single-file snapshot to ``dest`` (must not
         exist) and return its size in bytes. The snapshot is safe to copy

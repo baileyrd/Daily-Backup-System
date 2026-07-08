@@ -81,3 +81,27 @@ def test_disabled_source_is_never_due(storage, tmp_path, clock):
     svc = _svc(storage, tmp_path, clock)
     svc.config.sources["s"].enabled = False
     assert svc.due_sources() == []
+
+
+def test_maintain_applies_keep_revisions(storage, tmp_path):
+    # keep_revisions is enforced during maintain(), per source.
+    cfg = Config(base_dir=tmp_path)
+    cfg.sources["s"] = SourceConfig(
+        name="s", type="fake", keep_revisions=1, options={}
+    )
+    svc = BackupService(storage, cfg, ConnectorRegistry())
+
+    src = storage.upsert_source("s", "fake", "test:fake", "{}", 1)
+    for i, h in enumerate(["h1", "h2", "h3"]):
+        run = storage.begin_run(src.id, "test:fake", "full", None)
+        from dbs.storage.base import PreparedItem
+        storage.upsert_items(src.id, run, [PreparedItem(
+            "1", "note", "t", None, None, [], None, None, h,
+            '{"h": "%s"}' % h, False,
+        )])
+
+    report = svc.maintain()
+    assert report.revisions_pruned == 2
+    assert report.to_dict()["revisions_pruned"] == 2
+    left = storage.conn.execute("SELECT COUNT(*) FROM item_revisions").fetchone()[0]
+    assert left == 1

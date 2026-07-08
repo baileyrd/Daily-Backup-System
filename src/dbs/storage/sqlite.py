@@ -875,6 +875,33 @@ class SqliteStorage(Storage):
             "size_after": self._file_size(),
         }
 
+    def prune_revisions(self, source_id: int, keep: int) -> int:
+        """Trim each item's revision history to the newest ``keep`` rows.
+
+        High-churn sources otherwise grow ``item_revisions`` without bound
+        (a full raw snapshot per change). The newest ``keep`` per item
+        survive; the ``items`` row (always the latest state) is untouched.
+        """
+        if keep <= 0:
+            return 0
+        with self.transaction():
+            cur = self.conn.execute(
+                """
+                DELETE FROM item_revisions WHERE id IN (
+                    SELECT rv.id FROM item_revisions rv
+                    JOIN items i ON i.id = rv.item_id
+                    WHERE i.source_id = ?
+                      AND rv.id NOT IN (
+                        SELECT rv2.id FROM item_revisions rv2
+                        WHERE rv2.item_id = rv.item_id
+                        ORDER BY rv2.revision DESC LIMIT ?
+                      )
+                )
+                """,
+                (source_id, keep),
+            )
+        return cur.rowcount
+
     def vacuum_into(self, dest: str | Path) -> int:
         """Consistent single-file snapshot via ``VACUUM INTO`` (see the ABC).
 

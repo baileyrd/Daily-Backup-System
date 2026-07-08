@@ -16,7 +16,7 @@ Smaller fixes that didn't make the twenty are collected in the appendix.
 | 5 | Harden `Retry-After` handling — **shipped** #54 | should | S |
 | 6 | Restore/import (`dbs restore`) — **shipped** | should | L |
 | 7 | Database maintenance (`dbs maintain`) — **shipped** #57 | should | M |
-| 8 | Revision retention policy | could | M |
+| 8 | Revision retention policy — **shipped** | could | M |
 | 9 | Self-verifying archives (checksummed manifest) — **shipped** | could | S–M |
 | 10 | Encryption at rest / encrypted exports | could | M–L |
 | 11 | Built-in scheduler + honor per-source `schedule` — **shipped** | could | M |
@@ -122,7 +122,7 @@ hooks): `wal_checkpoint(TRUNCATE)`, `PRAGMA optimize` on close, optional
 consistent single-file snapshot that's safe to copy off-machine (copying
 the live DB without its `-wal` sidecar yields a stale snapshot today).
 
-### 8. Revision retention policy — [could], M
+### 8. Revision retention policy — [could], M — SHIPPED (keep_revisions; TTL variant deferred)
 
 `item_revisions` stores a full raw snapshot per change with no pruning; for
 high-churn sources it will dominate DB size. Add opt-in per-source retention
