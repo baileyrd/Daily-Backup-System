@@ -387,6 +387,17 @@ def export(
     include_deleted: bool = typer.Option(False, "--include-deleted"),
     include_revisions: bool = typer.Option(False, "--include-revisions", help="(archive) full history."),
     no_raw: bool = typer.Option(False, "--no-raw", help="Omit verbatim raw payloads."),
+    encrypt: bool = typer.Option(
+        False, "--encrypt",
+        help="Encrypt the output with a passphrase (scrypt + AES-256-GCM). "
+             "Safe to park on untrusted storage; decrypt with `dbs decrypt` "
+             "(dbs restore handles encrypted bundles directly).",
+    ),
+    passphrase_env: str = typer.Option(
+        "DBS_EXPORT_PASSPHRASE", "--passphrase-env",
+        help="Env var (or .env key) holding the passphrase — never pass the "
+             "passphrase itself on the command line.",
+    ),
 ) -> None:
     """Export backed-up data to a portable file or zip archive bundle."""
     svc = _service()
@@ -401,7 +412,7 @@ def export(
             include_raw=not no_raw,
         )
         try:
-            result = svc.export(query, fmt, out)
+            result = svc.export(query, fmt, out, encrypt=encrypt, passphrase_env=passphrase_env)
         except KeyError as exc:
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(4)
@@ -504,6 +515,51 @@ def restore(
             typer.secho(f"  warning: {w}", fg=typer.colors.YELLOW)
     finally:
         svc.close()
+
+
+@app.command()
+def decrypt(
+    src: Path = typer.Argument(..., help="A file written by `dbs export --encrypt`."),
+    out: Optional[Path] = typer.Option(
+        None, "--out", "-o",
+        help="Destination (default: SRC minus its .enc suffix, else SRC + .plain).",
+    ),
+    passphrase_env: str = typer.Option(
+        "DBS_EXPORT_PASSPHRASE", "--passphrase-env",
+        help="Env var (or .env key) holding the passphrase.",
+    ),
+) -> None:
+    """Decrypt a `dbs export --encrypt` file back to its plain form.
+
+    (`dbs restore` reads encrypted bundles directly — this is for getting the
+    plain file back for other tools.)"""
+    from .crypto import decrypt_file, is_encrypted, resolve_passphrase
+
+    if not src.is_file():
+        typer.secho(f"no such file: {src}", fg=typer.colors.RED)
+        raise typer.Exit(4)
+    if not is_encrypted(src):
+        typer.secho(f"{src} is not a dbs-encrypted file", fg=typer.colors.RED)
+        raise typer.Exit(4)
+    dest = out
+    if dest is None:
+        dest = src.with_suffix("") if src.suffix == ".enc" else src.with_name(src.name + ".plain")
+    if dest.exists():
+        typer.secho(f"refusing to overwrite {dest}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+    svc = _service()  # for .env-resolved passphrases
+    try:
+        passphrase = resolve_passphrase(svc.secret_store, passphrase_env)
+    finally:
+        svc.close()
+    try:
+        n = decrypt_file(src, dest, passphrase)
+    except ConfigError as exc:
+        if dest.exists():
+            dest.unlink()
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
+    typer.secho(f"Wrote {dest} ({n:,} bytes)", fg=typer.colors.GREEN)
 
 
 @app.command()

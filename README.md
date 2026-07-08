@@ -74,7 +74,8 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | `dbs backup [SOURCE] [--all] [--only-due] [--force-full] [--reconcile] [--dry-run] [--limit N] [--progress/--no-progress]` | Run an incremental backup. `auto` mode picks incremental vs. reconcile. `--only-due` skips sources whose `schedule` cadence (`hourly`/`daily`/`weekly`, default daily ≈ 20h of slack) hasn't elapsed (for `--all` runs more than once a day). A live status line (running item counter + per-source `[i/N]` position) shows automatically on a TTY; force it with `--progress` or silence it with `--no-progress`. |
 | `dbs status [SOURCE] [--json]` | Per-source item counts, last run, cursor watermark, warnings. |
 | `dbs history [SOURCE] [-n N] [--json]` | Recent backup runs and their stats. |
-| `dbs export --format FMT --out PATH [filters]` | Export to `json`/`ndjson`/`csv`/`markdown`/`obsidian`/`archive`. |
+| `dbs export --format FMT --out PATH [filters] [--encrypt]` | Export to `json`/`ndjson`/`csv`/`markdown`/`obsidian`/`archive`. `--encrypt` seals the output with a passphrase (scrypt + AES-256-GCM, from `DBS_EXPORT_PASSPHRASE` in `.env`/the environment — never argv) so it's safe to park on untrusted storage; needs the `[crypto]` extra. |
+| `dbs decrypt SRC [--out PATH]` | Decrypt a `dbs export --encrypt` file back to its plain form (`dbs restore` reads encrypted bundles directly). |
 | `dbs restore PATH [--dry-run] [--json]` | Restore an exported backup (archive `.zip` or raw-bearing `.ndjson`) into the database. Idempotent — re-restoring the same bundle changes nothing. |
 | `dbs sources list [--json] \| add NAME --type TYPE [--set k=v] \| check` | Manage and validate configured sources. |
 | `dbs connectors list [--verbose] [--json] \| describe TYPE` | Inspect installed connectors (incl. load failures). |

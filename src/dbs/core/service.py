@@ -529,17 +529,36 @@ class BackupService:
     # -- export -------------------------------------------------------------
 
     def export(
-        self, query: ExportQuery, fmt: str, out: str | Path | BinaryIO
+        self, query: ExportQuery, fmt: str, out: str | Path | BinaryIO,
+        *, encrypt: bool = False, passphrase_env: str | None = None,
     ) -> ExportResult:
         exporter = get_exporter(fmt)
         source = _StorageExportSource(self.storage, query, self._manifest(query))
+
+        def _write_to(fh) -> ExportResult:
+            if not encrypt:
+                return exporter.write(source, fh, query)
+            from ..crypto import (
+                DEFAULT_PASSPHRASE_ENV,
+                EncryptingWriter,
+                resolve_passphrase,
+            )
+            passphrase = resolve_passphrase(
+                self.secret_store, passphrase_env or DEFAULT_PASSPHRASE_ENV
+            )
+            writer = EncryptingWriter(fh, passphrase)
+            try:
+                return exporter.write(source, writer, query)
+            finally:
+                writer.close()  # the final frame is what makes truncation detectable
+
         if isinstance(out, (str, Path)):
             dest = Path(out).expanduser()
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = dest.with_name(dest.name + ".tmp")
             try:
                 with tmp.open("wb") as fh:
-                    result = exporter.write(source, fh, query)
+                    result = _write_to(fh)
                 os.replace(tmp, dest)  # atomic
             finally:
                 if tmp.exists():
@@ -650,6 +669,30 @@ class BackupService:
         src_path = Path(path).expanduser()
         if not src_path.is_file():
             raise ConfigError(f"no such file: {src_path}")
+        from ..crypto import is_encrypted
+
+        if is_encrypted(src_path):
+            # Decrypt to a private temp file and restore that; the passphrase
+            # comes from the environment/.env, never argv.
+            import shutil
+            import tempfile
+
+            from ..crypto import (
+                DEFAULT_PASSPHRASE_ENV,
+                decrypt_file,
+                resolve_passphrase,
+            )
+
+            passphrase = resolve_passphrase(self.secret_store, DEFAULT_PASSPHRASE_ENV)
+            tmpdir = Path(tempfile.mkdtemp(prefix="dbs-restore-"))
+            try:
+                plain = tmpdir / "bundle"
+                decrypt_file(src_path, plain, passphrase)
+                report = self.restore(plain, dry_run=dry_run)
+                report.path = str(src_path)  # report the file the user named
+                return report
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
         manifest = read_manifest(src_path)
         if manifest is not None:
             # A checksummed bundle is verified before a single row is ingested;
