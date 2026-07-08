@@ -125,6 +125,7 @@ class Storage(ABC):
         items_seen: int,
         cursor_after: str | None,
         error: str | None,
+        warnings: list[str] | None = None,
     ) -> None: ...
 
     @abstractmethod

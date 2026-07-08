@@ -143,3 +143,28 @@ def test_volatile_fields_excluded_from_hash(storage):
     cls2.script = [bi("t2"), Checkpoint(Cursor({"p": 2}))]  # only volatile field changed
     _src, result = run_fake(storage, cls2, mode="incremental")
     assert result.unchanged == 1 and result.updated == 0
+
+
+def test_zero_item_run_carries_a_warning(storage):
+    # A source can be legitimately empty, so the run stays SUCCESS/exit 0 —
+    # but the historical failure mode (silent auth/scrape problem dressed up
+    # as success) must be visible on the run record, not just in a log line.
+    cls = make_connector()
+    cls.script = []
+    src, result = run_fake(storage, cls, mode="full")
+    assert result.status.value == "success"
+    assert result.error is None
+    assert any("0 items" in w for w in result.warnings)
+    runs = storage.recent_runs(src.id, 1)
+    assert any("0 items" in w for w in runs[0]["warnings"])
+
+
+def test_normal_run_has_no_warnings(storage):
+    cls = make_connector()
+    cls.script = [
+        BackupItem(external_id="1", item_kind="note", raw={"id": "1"}),
+        Checkpoint(Cursor({"p": 1})),
+    ]
+    _src, result = run_fake(storage, cls, mode="full")
+    assert result.warnings == []
+    assert result.to_dict()["warnings"] == []

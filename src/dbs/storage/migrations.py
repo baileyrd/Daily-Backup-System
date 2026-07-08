@@ -129,10 +129,18 @@ ALTER TABLE media ADD COLUMN data BLOB;
 ALTER TABLE media ADD COLUMN byte_size INTEGER;
 """
 
+# "Succeeded with caveats" — a JSON array of warning strings on each run
+# (e.g. a refused deletion sweep, a zero-item enumeration), kept separate
+# from `error` so a SUCCESS run's caveats stay visible in status/history.
+MIGRATION_0003 = """
+ALTER TABLE sync_runs ADD COLUMN warnings TEXT;
+"""
+
 # (version, sql) in ascending order.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, MIGRATION_0001),
     (2, MIGRATION_0002),
+    (3, MIGRATION_0003),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]

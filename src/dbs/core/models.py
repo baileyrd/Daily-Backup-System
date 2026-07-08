@@ -195,6 +195,10 @@ class RunResult:
     undeleted: int = 0
     revisions: int = 0
     error: str | None = None
+    # "Succeeded with caveats" — e.g. a refused deletion sweep or a zero-item
+    # run. Kept separate from `error` so a SUCCESS run's caveats are visible
+    # without masquerading as a failure (and vice versa).
+    warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -212,6 +216,7 @@ class RunResult:
             "undeleted": self.undeleted,
             "revisions": self.revisions,
             "error": self.error,
+            "warnings": list(self.warnings),
         }
 
 

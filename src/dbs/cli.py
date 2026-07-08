@@ -148,9 +148,15 @@ def _print_run(r: RunResult) -> None:
     )
     if r.error:
         typer.secho(f"      error: {r.error}", fg=typer.colors.RED)
+    for w in r.warnings:
+        typer.secho(f"      warning: {w}", fg=typer.colors.YELLOW)
 
 
 def _exit_code(results: list[RunResult]) -> int:
+    # Warnings deliberately don't change the exit code: a success-with-caveats
+    # run (e.g. a legitimately empty source) exiting non-zero would be a
+    # permanent false alarm for cron. Caveats are rendered above and persist
+    # in `dbs history`.
     statuses = {r.status for r in results}
     if RunStatus.FAILED in statuses:
         return 3
@@ -358,6 +364,8 @@ def history(
             )
             if run.get("error"):
                 typer.secho(f"    {run['error']}", fg=typer.colors.RED)
+            for w in run.get("warnings") or []:
+                typer.secho(f"    warning: {w}", fg=typer.colors.YELLOW)
     finally:
         svc.close()
 

@@ -80,9 +80,17 @@ def test_sweep_safety_guard_skips_mass_delete(storage):
     cls2.script = [_bi("1"), Checkpoint(Cursor({"p": 1})), ReconcileMarker(live_ids={"1"})]
     _src, result = run_fake(storage, cls2, mode="reconcile")
     assert result.deleted == 0
-    assert "safety" in (result.error or "")
+    # The refusal is a *warning* on a SUCCESS run, not an error: the committed
+    # data is fine, but the caveat must survive into status/history.
+    assert any("safety" in w for w in result.warnings)
+    assert result.error is None
+    assert result.status.value == "success"
     _t, live, _g = storage.item_counts(src.id)
     assert live == 4  # nothing wrongly deleted
+
+    # The warning round-trips through storage into run history.
+    runs = storage.recent_runs(src.id, 1)
+    assert any("safety" in w for w in runs[0]["warnings"])
 
 
 def test_empty_reconcile_never_wipes(storage):
