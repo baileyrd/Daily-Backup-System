@@ -4,6 +4,22 @@
 ready-to-paste snippets. Always pass an absolute `--config` path so the scheduler
 finds your config regardless of working directory.
 
+## No cron at all: `dbs serve --schedule`
+
+If you already keep the web UI running, it can be the scheduler too:
+
+```bash
+dbs serve --schedule
+```
+
+Every minute the server checks whether any enabled source's `schedule`
+cadence (`hourly` / `daily` / `weekly` per source in `dbs.toml`, default
+daily) has elapsed and, if so, runs the same `--only-due` backup a cron
+would — visible in the UI's live progress and run history like any other
+run. Each cadence carries slack (daily ≈ 20h, hourly ≈ 50m, weekly ≈ 6d) so
+slightly-late ticks never skip a whole period. External cron remains the
+right tool for headless machines where nothing stays running.
+
 ## Exit codes (for alerting)
 
 | Code | Meaning |

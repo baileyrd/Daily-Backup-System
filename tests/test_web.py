@@ -889,3 +889,39 @@ def test_delete_secret_requires_declared_name(secret_client):
     r = secret_client.delete("/api/secrets/TOTALLY_UNKNOWN_NAME")
     assert r.status_code == 400
     assert "not a declared secret" in r.json()["detail"]
+
+
+# --- built-in scheduler (dbs serve --schedule) --------------------------------
+
+
+def test_scheduler_backs_up_due_sources(tmp_path):
+    # The offline skool source has never run -> due immediately. With a tiny
+    # tick interval the scheduler should start (and finish) a real only_due
+    # backup job shortly after startup, visible like any button-started job.
+    cfg = _write_setup(tmp_path)
+    app = create_app(str(cfg), schedule_seconds=0.05)
+    with TestClient(app) as c:
+        deadline = time.time() + 10.0
+        snap = None
+        while time.time() < deadline:
+            snap = c.get("/api/backup/current").json()
+            if snap.get("status") == "done":
+                break
+            time.sleep(0.05)
+        assert snap and snap.get("status") == "done", snap
+        assert snap["spec"] == {"all": True, "only_due": True}
+        assert snap["results"], "the due source should have been backed up"
+
+        # Once backed up, the source is no longer due: give the loop a few
+        # more ticks and confirm no second job replaced the finished one.
+        job_id = snap["id"]
+        time.sleep(0.3)
+        assert c.get("/api/backup/current").json()["id"] == job_id
+
+
+def test_meta_reports_scheduler_state(tmp_path, client):
+    assert client.get("/api/meta").json()["scheduler_enabled"] is False
+    cfg = _write_setup(tmp_path)
+    app = create_app(str(cfg), schedule_seconds=60)
+    with TestClient(app) as c:
+        assert c.get("/api/meta").json()["scheduler_enabled"] is True

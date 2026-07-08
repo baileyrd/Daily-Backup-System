@@ -86,7 +86,7 @@ async function loadMeta() {
     const m = await api("/api/meta");
     META = m;
     $("#meta").textContent = `v${m.tool_version} · core API v${m.core_api_version} · ${m.config_path}`
-      + (m.setup_enabled ? " · setup on" : "");
+      + (m.setup_enabled ? " · setup on" : "") + (m.scheduler_enabled ? " · scheduler on" : "");
     const fmt = $("#export-format");
     fmt.innerHTML = "";
     m.formats.forEach((f) => fmt.append(el("option", { value: f, textContent: f })));
@@ -108,7 +108,7 @@ async function loadSources() {
   const byType = Object.fromEntries(conns.map((c) => [c.type, c]));
 
   if (!rows.length) {
-    tbody.append(el("tr", {}, el("td", { colSpan: 8, className: "muted", textContent: "No sources configured yet — add one in “Add source”." })));
+    tbody.append(el("tr", {}, el("td", { colSpan: 9, className: "muted", textContent: "No sources configured yet — add one in “Add source”." })));
   } else {
     rows.forEach((s) => {
       const last = s.last_run_status
@@ -136,6 +136,10 @@ async function loadSources() {
         el("td", { textContent: num(s.deleted_items) }),
         el("td", { textContent: num(s.run_count) }),
         el("td", {}, last),
+        el("td", s.due_now
+          ? { className: "st-partial", textContent: "due now" }
+          : { className: "muted",
+              textContent: s.next_due_at ? s.next_due_at.replace("T", " ").slice(0, 16) : "—" }),
         el("td", {}, actions),
       ));
     });

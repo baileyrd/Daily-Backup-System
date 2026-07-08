@@ -50,6 +50,14 @@ from .registry import ConnectorRegistry
 from .secrets import Secrets
 
 _DEFAULT_RECONCILE_EVERY = 7
+# Per-cadence "due again after" windows. Each is deliberately short of its
+# nominal period so a timer that fires at slightly-varying times (cron drift,
+# a laptop waking late) never skips a whole period.
+_SCHEDULE_SLACK = {
+    "hourly": timedelta(minutes=50),
+    "daily": timedelta(hours=20),
+    "weekly": timedelta(days=6),
+}
 logger = logging.getLogger("dbs")
 
 
@@ -296,20 +304,45 @@ class BackupService:
             return "reconcile"
         return "incremental"
 
-    def _is_due(self, name: str, sc: SourceConfig) -> bool:
+    def _last_started(self, name: str) -> datetime | None:
         source = self.storage.get_source(name)
         if source is None:
-            return True
+            return None
         runs = self.storage.recent_runs(source.id, 1)
         if not runs or not runs[0].get("started_at"):
-            return True
+            return None
         from .timeutil import parse_iso
 
-        last = parse_iso(runs[0]["started_at"])
+        return parse_iso(runs[0]["started_at"])
+
+    def _next_due_at(self, name: str, sc: SourceConfig) -> datetime | None:
+        """When the source next becomes due; ``None`` = due right now
+        (never run, or its history is unreadable)."""
+        last = self._last_started(name)
         if last is None:
-            return True
-        # "daily": due if the last run started more than ~20h ago.
-        return (self.clock() - last) >= timedelta(hours=20)
+            return None
+        # Each cadence carries slack (daily -> ~20h etc.) so a scheduler that
+        # fires at slightly-varying times never skips a whole period.
+        slack = _SCHEDULE_SLACK.get((sc.schedule or "daily").lower())
+        if slack is None:
+            logger.warning(
+                "%s: unknown schedule %r (expected hourly/daily/weekly) — "
+                "treating as daily", name, sc.schedule,
+            )
+            slack = _SCHEDULE_SLACK["daily"]
+        return last + slack
+
+    def _is_due(self, name: str, sc: SourceConfig) -> bool:
+        next_due = self._next_due_at(name, sc)
+        return next_due is None or self.clock() >= next_due
+
+    def due_sources(self) -> list[str]:
+        """Enabled sources whose ``schedule`` cadence has elapsed — what
+        ``backup --all --only-due`` (and the ``dbs serve`` scheduler) run."""
+        return [
+            name for name, sc in self.config.sources.items()
+            if sc.enabled and self._is_due(name, sc)
+        ]
 
     def _make_http(self, rc) -> ManagedHTTPClient:
         if self.http_factory is not None:
@@ -330,6 +363,9 @@ class BackupService:
             sc = self.config.sources.get(n)
             stype = sc.type if sc else "?"
             enabled = sc.enabled if sc else False
+            schedule = (sc.schedule or "daily") if sc else "daily"
+            next_due = self._next_due_at(n, sc) if sc else None
+            due_now = bool(sc and enabled and self._is_due(n, sc))
             source = self.storage.get_source(n)
             if source is None:
                 out.append(
@@ -338,6 +374,7 @@ class BackupService:
                         live_items=0, deleted_items=0, last_run_status=None,
                         last_run_at=None, last_mode=None, run_count=0,
                         watermark=None, has_interrupted_runs=False,
+                        schedule=schedule, next_due_at=next_due, due_now=due_now,
                     )
                 )
                 continue
@@ -359,6 +396,9 @@ class BackupService:
                     run_count=self.storage.get_run_count(source.id),
                     watermark=watermark,
                     has_interrupted_runs=any(r["status"] == "interrupted" for r in runs),
+                    schedule=schedule,
+                    next_due_at=next_due,
+                    due_now=due_now,
                 )
             )
         return out
