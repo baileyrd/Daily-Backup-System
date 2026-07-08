@@ -412,8 +412,40 @@ def export(
 
 
 @app.command()
-def verify(source: Optional[str] = typer.Argument(None)) -> None:
-    """Run integrity checks on the database and per-source state."""
+def verify(
+    source: Optional[str] = typer.Argument(None),
+    archive: Optional[Path] = typer.Option(
+        None, "--archive",
+        help="Verify an exported archive bundle's checksums instead of the DB.",
+    ),
+) -> None:
+    """Run integrity checks on the database and per-source state — or, with
+    --archive, on an exported bundle's per-entry sha256 checksums."""
+    if archive is not None:
+        from .restore import verify_archive
+
+        try:
+            report = verify_archive(archive)
+        except ConfigError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(4) from exc
+        if not report["has_checksums"]:
+            typer.secho(
+                "Bundle has no checksums (written by an older dbs) — nothing to verify.",
+                fg=typer.colors.YELLOW,
+            )
+            return
+        if not report["issues"]:
+            typer.secho(
+                f"OK — {report['verified']} entr{'y' if report['verified'] == 1 else 'ies'} verified.",
+                fg=typer.colors.GREEN,
+            )
+            return
+        typer.secho("Integrity issues found:", fg=typer.colors.RED, bold=True)
+        for issue in report["issues"]:
+            typer.secho(f"  {issue}", fg=typer.colors.RED)
+        raise typer.Exit(3)
+
     svc = _service()
     try:
         report = svc.verify(source)

@@ -17,7 +17,7 @@ Smaller fixes that didn't make the twenty are collected in the appendix.
 | 6 | Restore/import (`dbs restore`) — **shipped** | should | L |
 | 7 | Database maintenance (`dbs maintain`) — **shipped** #57 | should | M |
 | 8 | Revision retention policy | could | M |
-| 9 | Self-verifying archives (checksummed manifest) | could | S–M |
+| 9 | Self-verifying archives (checksummed manifest) — **shipped** | could | S–M |
 | 10 | Encryption at rest / encrypted exports | could | M–L |
 | 11 | Built-in scheduler + honor per-source `schedule` — **shipped** | could | M |
 | 12 | Web auth + CSRF/Origin/Host protection — **shipped** | should | M |
@@ -131,7 +131,7 @@ high-churn sources it will dominate DB size. Add opt-in per-source retention
 `items`. Pair with a `dbs stats` view showing revision counts/bytes per
 source so the operator can see when it matters.
 
-### 9. Self-verifying archives — [could], S–M
+### 9. Self-verifying archives — [could], S–M — SHIPPED
 
 The archive manifest records counts but no checksums, so a consumer can't
 verify a bundle's integrity. Write sha256 per entry (items/revisions

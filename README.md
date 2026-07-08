@@ -78,7 +78,7 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | `dbs restore PATH [--dry-run] [--json]` | Restore an exported backup (archive `.zip` or raw-bearing `.ndjson`) into the database. Idempotent — re-restoring the same bundle changes nothing. |
 | `dbs sources list [--json] \| add NAME --type TYPE [--set k=v] \| check` | Manage and validate configured sources. |
 | `dbs connectors list [--verbose] [--json] \| describe TYPE` | Inspect installed connectors (incl. load failures). |
-| `dbs verify [SOURCE]` | Database + per-source integrity self-check. |
+| `dbs verify [SOURCE] [--archive PATH]` | Database + per-source integrity self-check; `--archive` verifies an exported bundle's per-entry sha256 checksums instead. |
 | `dbs doctor [--json]` | Diagnose the environment: database health, per-source connector readiness, secrets presence, dependency freshness. Exits 1 on failures. |
 | `dbs update-ytdlp [--dry-run]` | Upgrade yt-dlp in this environment (recommended monthly for unattended installs). |
 | `dbs maintain [--vacuum] [--snapshot PATH] [--json]` | Database housekeeping: flush the WAL and refresh query-planner stats; `--vacuum` compacts the file, `--snapshot` writes a consistent single-file copy that's safe to move off-machine (a raw copy of a live WAL-mode DB misses the `-wal` sidecar). |

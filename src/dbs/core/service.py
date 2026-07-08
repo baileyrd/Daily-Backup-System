@@ -575,6 +575,7 @@ class BackupService:
             prepared_item_from_row,
             read_manifest,
             skipped_extras,
+            verify_archive,
         )
         from ..storage.migrations import SCHEMA_VERSION
 
@@ -582,6 +583,15 @@ class BackupService:
         if not src_path.is_file():
             raise ConfigError(f"no such file: {src_path}")
         manifest = read_manifest(src_path)
+        if manifest is not None:
+            # A checksummed bundle is verified before a single row is ingested;
+            # a corrupt or tampered bundle must never be partially restored.
+            integrity = verify_archive(src_path)
+            if integrity["issues"]:
+                raise ConfigError(
+                    "bundle failed integrity verification: "
+                    + "; ".join(integrity["issues"][:5])
+                )
         if manifest is not None:
             bundle_schema = manifest.get("db_schema_version")
             if isinstance(bundle_schema, int) and bundle_schema > SCHEMA_VERSION:
