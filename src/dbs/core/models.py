@@ -333,6 +333,18 @@ class VerifyReport:
 
 
 @dataclass(slots=True)
+class DoctorCheck:
+    """One ``dbs doctor`` finding. ``status`` is ``ok`` / ``warn`` / ``fail``."""
+
+    name: str
+    status: str
+    detail: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "status": self.status, "detail": self.detail}
+
+
+@dataclass(slots=True)
 class MaintenanceReport:
     """Result of a database maintenance pass. Plain data; no rendering."""
 
@@ -408,6 +420,7 @@ __all__ = [
     "ConnectorInfo",
     "VerifyIssue",
     "VerifyReport",
+    "DoctorCheck",
     "MaintenanceReport",
     "RestoreReport",
     "Capabilities",

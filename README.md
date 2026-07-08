@@ -79,6 +79,8 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | `dbs sources list [--json] \| add NAME --type TYPE [--set k=v] \| check` | Manage and validate configured sources. |
 | `dbs connectors list [--verbose] [--json] \| describe TYPE` | Inspect installed connectors (incl. load failures). |
 | `dbs verify [SOURCE]` | Database + per-source integrity self-check. |
+| `dbs doctor [--json]` | Diagnose the environment: database health, per-source connector readiness, secrets presence, dependency freshness. Exits 1 on failures. |
+| `dbs update-ytdlp [--dry-run]` | Upgrade yt-dlp in this environment (recommended monthly for unattended installs). |
 | `dbs maintain [--vacuum] [--snapshot PATH] [--json]` | Database housekeeping: flush the WAL and refresh query-planner stats; `--vacuum` compacts the file, `--snapshot` writes a consistent single-file copy that's safe to move off-machine (a raw copy of a live WAL-mode DB misses the `-wal` sidecar). |
 | `dbs schedule [--interval daily\|hourly]` | Print ready-to-use cron / systemd snippets. |
 | `dbs serve [--host H] [--port P] [--no-setup] [--token T] [--schedule]` | Launch the web management UI (needs the `[web]` extra). In-UI setup (dependency install + browser-login capture) is on by default; `--no-setup` disables it. `--schedule` backs up due sources automatically while the server runs (no external cron needed); `--token` adds bearer-token auth (required off-localhost). |
@@ -393,10 +395,9 @@ alongside your own maintenance cadence) — YouTube changes frequently enough
 that an aging yt-dlp eventually fails to extract some videos regardless of
 any other setting here. `pyproject.toml` only pins a *floor* version, which
 new installs pick up automatically but an already-installed environment
-won't refresh on its own. This mirrors skool-downloader's own documented
-practice (its `update-ytdlp` command, recommended weekly for unattended
-nightly archives) — `dbs` has no equivalent built-in command yet, so this is
-a manual step for now.
+won't refresh on its own. `dbs update-ytdlp` does exactly this upgrade for
+you, mirroring skool-downloader's own documented practice (its
+`update-ytdlp` command, recommended weekly for unattended nightly archives).
 
 ## Scheduling daily backups
 

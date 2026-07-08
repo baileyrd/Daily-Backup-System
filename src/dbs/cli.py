@@ -469,6 +469,51 @@ def restore(
 
 
 @app.command()
+def doctor(
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Diagnose the environment: database health, per-source readiness,
+    secrets presence, dependency freshness. Read-only. Exits 1 on failures."""
+    svc = _service()
+    try:
+        checks = svc.doctor()
+    finally:
+        svc.close()
+    if json_out:
+        typer.echo(json.dumps([c.to_dict() for c in checks], indent=2))
+    else:
+        colors = {"ok": typer.colors.GREEN, "warn": typer.colors.YELLOW,
+                  "fail": typer.colors.RED}
+        for c in checks:
+            typer.secho(f"  [{c.status:^4}] {c.name}: {c.detail}", fg=colors[c.status])
+    if any(c.status == "fail" for c in checks):
+        raise typer.Exit(1)
+
+
+@app.command(name="update-ytdlp")
+def update_ytdlp(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the command; run nothing."),
+) -> None:
+    """Upgrade yt-dlp in this environment. YouTube changes frequently enough
+    that an aging yt-dlp eventually fails to extract some videos — run this
+    periodically (monthly) on unattended installs, mirroring the reference
+    skool-downloader's own `update-ytdlp` practice."""
+    import subprocess
+
+    argv = [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp[default]"]
+    typer.echo("$ " + " ".join(argv))
+    if dry_run:
+        return
+    code = subprocess.call(argv)
+    if code == 0:
+        typer.secho(
+            "yt-dlp upgraded. Restart any running `dbs serve` to pick it up.",
+            fg=typer.colors.GREEN,
+        )
+    raise typer.Exit(code)
+
+
+@app.command()
 def maintain(
     vacuum: bool = typer.Option(
         False, "--vacuum",

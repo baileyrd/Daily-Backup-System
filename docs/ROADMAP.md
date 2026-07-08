@@ -22,7 +22,7 @@ Smaller fixes that didn't make the twenty are collected in the appendix.
 | 11 | Built-in scheduler + honor per-source `schedule` — **shipped** | could | M |
 | 12 | Web auth + CSRF/Origin/Host protection — **shipped** | should | M |
 | 13 | Notifications + persistent job history | could | M |
-| 14 | `dbs doctor` + dependency self-update | could | M |
+| 14 | `dbs doctor` + dependency self-update — **shipped** | could | M |
 | 15 | Concurrent `backup_all` | could | L |
 | 16 | Query & index tuning for scale | could | M |
 | 17 | Full-text search (FTS5) — **shipped** | could | M |
@@ -189,7 +189,7 @@ finished jobs' event buffers; (c) surface "last successful backup per
 source" prominently in `dbs status` and the dashboard, with staleness
 highlighting.
 
-### 14. `dbs doctor` + dependency self-update — [could], M
+### 14. `dbs doctor` + dependency self-update — [could], M — SHIPPED
 
 The README's Skool/YouTube troubleshooting saga shows how much environment
 state matters (yt-dlp freshness, cookies present, JS runtime, ffmpeg,

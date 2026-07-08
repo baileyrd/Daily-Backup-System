@@ -35,6 +35,7 @@ from .http import ManagedHTTPClient
 from .models import (
     ConnectorInfo,
     Cursor,
+    DoctorCheck,
     MaintenanceReport,
     ProgressCallback,
     RestoreReport,
@@ -699,6 +700,93 @@ class BackupService:
             snapshot_path=snapshot_path,
             snapshot_bytes=snapshot_bytes,
         )
+
+    # -- doctor ---------------------------------------------------------------
+
+    def doctor(self) -> list[DoctorCheck]:
+        """Environment/health diagnostics — the README's troubleshooting
+        checklist as a command. Read-only; never mutates anything."""
+        import importlib.metadata
+
+        checks: list[DoctorCheck] = []
+
+        integrity = self.storage.integrity_check()
+        checks.append(DoctorCheck(
+            "database.integrity", "ok" if integrity == "ok" else "fail", integrity,
+        ))
+
+        wal = Path(str(self.config.database_path) + "-wal")
+        wal_bytes = wal.stat().st_size if wal.exists() else 0
+        checks.append(DoctorCheck(
+            "database.wal",
+            "warn" if wal_bytes > 10_000_000 else "ok",
+            f"{wal_bytes:,} bytes"
+            + (" — run `dbs maintain` to fold it into the main file"
+               if wal_bytes > 10_000_000 else ""),
+        ))
+
+        interrupted = [
+            r for r in self.storage.recent_runs(None, 50)
+            if r.get("status") == "interrupted"
+        ]
+        checks.append(DoctorCheck(
+            "runs.interrupted",
+            "warn" if interrupted else "ok",
+            f"{len(interrupted)} interrupted run(s) in recent history"
+            + (" — a crash/kill; the next backup resumes from the last "
+               "committed cursor" if interrupted else ""),
+        ))
+
+        for name, sc in self.config.sources.items():
+            if not sc.enabled:
+                checks.append(DoctorCheck(f"source.{name}", "ok", "disabled"))
+                continue
+            try:
+                rc = self.registry.get(sc.type)
+            except Exception as exc:  # noqa: BLE001 - reported, not raised
+                checks.append(DoctorCheck(
+                    f"source.{name}", "fail",
+                    f"connector {sc.type!r} unavailable: {exc}",
+                ))
+                continue
+            try:
+                rc.cls.config_model(**sc.options)
+            except Exception as exc:  # noqa: BLE001 - reported, not raised
+                checks.append(DoctorCheck(
+                    f"source.{name}.config", "fail", f"invalid options: {exc}",
+                ))
+            ready, hint = rc.cls.check_ready()
+            checks.append(DoctorCheck(
+                f"source.{name}.deps",
+                "ok" if ready else "warn",
+                "runtime dependencies importable" if ready
+                else f"missing optional deps — {hint or 'see the connector docs'}",
+            ))
+            declared = tuple(rc.cls.secret_keys)
+            if rc.cls.capabilities.requires_auth and declared:
+                present = [k for k in declared if self.secret_store.get(k)]
+                checks.append(DoctorCheck(
+                    f"source.{name}.secrets",
+                    "ok" if present else "fail",
+                    (f"set: {', '.join(present)}" if present
+                     else f"none of {', '.join(declared)} is set — the run "
+                          f"will fail at auth"),
+                ))
+
+        try:
+            ytdlp_version = importlib.metadata.version("yt-dlp")
+            checks.append(DoctorCheck(
+                "deps.yt-dlp", "ok",
+                f"{ytdlp_version} installed — YouTube changes fast; refresh "
+                f"periodically with `dbs update-ytdlp` (monthly is a good cadence "
+                f"for unattended installs)",
+            ))
+        except importlib.metadata.PackageNotFoundError:
+            checks.append(DoctorCheck(
+                "deps.yt-dlp", "ok", "not installed (only the youtube/skool "
+                "connectors and research need it)",
+            ))
+        return checks
 
     # -- verify -------------------------------------------------------------
 
