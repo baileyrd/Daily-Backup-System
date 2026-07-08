@@ -16,9 +16,12 @@ exports** (JSON / NDJSON / CSV / Markdown / Obsidian vault / zip archive).
   CLI is a thin renderer, and a web UI can reuse the same core later.
 - **Exportable** — produce a portable, self-describing backup bundle on demand.
 
-> Status: v0.1 ships the full foundation plus five built-in connectors:
+> Status: v0.1 ships the full foundation plus seven built-in connectors:
 > **Raindrop.io** (the REST/token reference), **GitHub** (starred repositories
-> & gists — token API, `GITHUB_TOKEN`), **Reddit** (saved posts &
+> & gists — token API, `GITHUB_TOKEN`), **Pinboard** (bookmarks —
+> `PINBOARD_TOKEN`, one-request runs when nothing changed), **Readwise**
+> (books & highlights — `READWISE_TOKEN`, true server-side deltas),
+> **Reddit** (saved posts &
 > comments), **YouTube** (Watch Later, Liked, history, playlists), and **Skool**
 > (a native catalog of your communities' classrooms). Reddit, YouTube, and Skool
 > are *browser-session* connectors — they reuse your logged-in session rather than

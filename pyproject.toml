@@ -60,6 +60,8 @@ dbs = "dbs.cli:main"
 # third-party connector packages use. This is the extensibility seam.
 [project.entry-points."dbs.connectors"]
 github = "dbs.connectors.github:GitHubConnector"
+pinboard = "dbs.connectors.pinboard:PinboardConnector"
+readwise = "dbs.connectors.readwise:ReadwiseConnector"
 raindrop = "dbs.connectors.raindrop:RaindropConnector"
 reddit = "dbs.connectors.reddit:RedditConnector"
 youtube = "dbs.connectors.youtube:YouTubeConnector"
