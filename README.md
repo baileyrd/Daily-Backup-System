@@ -176,10 +176,13 @@ The *API keys* tab lets you set the secrets your configured sources need (e.g.
 The web dependencies (`fastapi`, `uvicorn`) are optional — the core never imports
 them, and `dbs serve` prints an install hint if the `[web]` extra is missing.
 
-> **Security:** `dbs serve` binds to `127.0.0.1` and has **no authentication** —
-> it's meant for local, single-user use (the same trust level as editing `.env`
-> by hand). Don't expose it to an untrusted network; put it behind your own auth
-> first if you must.
+> **Security:** `dbs serve` binds to `127.0.0.1` and is meant for local,
+> single-user use (the same trust level as editing `.env` by hand). Requests
+> with a non-local `Host` header are rejected (DNS-rebinding defense) and
+> cross-origin state-changing requests are blocked (CSRF defense). Binding to
+> any other address **requires** `--token <secret>`: every API call must then
+> carry it (`Authorization: Bearer …` or `?token=…`); open the UI once at
+> `/?token=…` and it stores the token locally.
 
 ## How incremental backup works
 

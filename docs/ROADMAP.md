@@ -20,7 +20,7 @@ Smaller fixes that didn't make the twenty are collected in the appendix.
 | 9 | Self-verifying archives (checksummed manifest) | could | S–M |
 | 10 | Encryption at rest / encrypted exports | could | M–L |
 | 11 | Built-in scheduler + honor per-source `schedule` | could | M |
-| 12 | Web auth + CSRF/Origin/Host protection | should | M |
+| 12 | Web auth + CSRF/Origin/Host protection — **shipped** | should | M |
 | 13 | Notifications + persistent job history | could | M |
 | 14 | `dbs doctor` + dependency self-update | could | M |
 | 15 | Concurrent `backup_all` | could | L |
@@ -163,7 +163,7 @@ cosmetic (an `hourly` source is still treated as daily). Two parts:
 Schedule tab showing next-due times. External cron remains the headless
 option; the web UI becomes a self-contained appliance.
 
-### 12. Web auth + CSRF/Origin/Host protection — [should], M
+### 12. Web auth + CSRF/Origin/Host protection — [should], M — SHIPPED
 
 The localhost/no-auth model is coherent, but its edges are exposed: any
 webpage the user visits can POST to `http://127.0.0.1:8000` (no

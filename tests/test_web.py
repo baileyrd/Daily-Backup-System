@@ -812,3 +812,80 @@ def test_research_unknown_job_404(client):
     assert client.get("/api/research/999").status_code == 404
     assert client.get("/api/research/999/report").status_code == 404
     assert client.get("/api/research/999/stream").status_code == 404
+
+
+# --- security gate: Host / Origin / bearer token -----------------------------
+
+
+@pytest.fixture
+def token_client(tmp_path):
+    """A client whose app requires a bearer token on every /api call."""
+    cfg = _write_setup(tmp_path)
+    app = create_app(str(cfg), auth_token="s3cret")
+    with TestClient(app) as c:
+        yield c
+
+
+def test_unrecognized_host_header_is_rejected(client):
+    # DNS-rebinding defense: a rebound hostname arrives with the attacker's
+    # domain in Host. Only loopback names are recognized without a token.
+    r = client.get("/api/status", headers={"host": "evil.example.com"})
+    assert r.status_code == 400
+    assert "Host" in r.json()["detail"]
+
+
+def test_local_hosts_are_recognized(client):
+    for host in ("127.0.0.1:8000", "localhost", "[::1]:8000"):
+        assert client.get("/api/status", headers={"host": host}).status_code == 200
+
+
+def test_cross_origin_mutation_is_rejected(secret_client):
+    r = secret_client.post(
+        "/api/secrets",
+        json={"name": "RAINDROP_TOKEN", "value": "x"},
+        headers={"origin": "https://evil.example.com"},
+    )
+    assert r.status_code == 403
+    # ...and nothing was written.
+    assert not secret_client._env_path.exists()
+
+
+def test_local_origin_mutation_is_allowed(secret_client):
+    r = secret_client.post(
+        "/api/secrets",
+        json={"name": "RAINDROP_TOKEN", "value": "x"},
+        headers={"origin": "http://localhost:8000"},
+    )
+    assert r.status_code == 200
+
+
+def test_token_required_on_api_when_configured(token_client):
+    assert token_client.get("/api/status").status_code == 401
+    assert token_client.get(
+        "/api/status", headers={"authorization": "Bearer wrong"}
+    ).status_code == 401
+    assert token_client.get(
+        "/api/status", headers={"authorization": "Bearer s3cret"}
+    ).status_code == 200
+    # Query-param form: what EventSource streams and download links use.
+    assert token_client.get("/api/status?token=s3cret").status_code == 200
+    # The SPA itself stays reachable so it can pick the token up from the URL.
+    assert token_client.get("/").status_code == 200
+
+
+def test_token_gate_replaces_host_check(token_client):
+    # With a token configured, the token is the gate — a non-local hostname
+    # (e.g. a reverse-proxied deployment) works, but only WITH the token.
+    r = token_client.get(
+        "/api/status",
+        headers={"host": "backup.example.com", "authorization": "Bearer s3cret"},
+    )
+    assert r.status_code == 200
+    r = token_client.get("/api/status", headers={"host": "backup.example.com"})
+    assert r.status_code == 401
+
+
+def test_delete_secret_requires_declared_name(secret_client):
+    r = secret_client.delete("/api/secrets/TOTALLY_UNKNOWN_NAME")
+    assert r.status_code == 400
+    assert "not a declared secret" in r.json()["detail"]
