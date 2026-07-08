@@ -4,7 +4,11 @@ Daily Backup System (`dbs`) is a single Python package (`src/dbs`) with a
 UI-agnostic application core, a plugin model for sources, and two thin
 renderers (a CLI and an optional local web UI) that share that core unchanged.
 This document is the system-level reference; diagrams referenced below live in
-[`docs/diagrams/`](diagrams/) as standalone SVGs.
+[`docs/diagrams/`](diagrams/) as standalone SVGs. For the evaluative deep dive
+(as-built review, strengths, tensions, risks) see
+[architecture-analysis.md](architecture-analysis.md); for the engineering
+principles the code practices see [coding-philosophy.md](coding-philosophy.md);
+for the improvement roadmap see [ROADMAP.md](ROADMAP.md).
 
 ## System overview
 

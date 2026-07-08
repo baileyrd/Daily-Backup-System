@@ -203,7 +203,12 @@ See [docs/architecture.md](docs/architecture.md) for the full design, including
 the Raindrop-specific strategy (the API has no `lastUpdate` sort, so it uses a
 `-created` early-stop fast path + periodic reconcile + trash poll).
 
-Planned/deferred work is tracked in [docs/BACKLOG.md](docs/BACKLOG.md).
+Planned/deferred work is tracked in [docs/BACKLOG.md](docs/BACKLOG.md). A
+detailed as-built review lives in
+[docs/architecture-analysis.md](docs/architecture-analysis.md), the
+engineering principles behind the code in
+[docs/coding-philosophy.md](docs/coding-philosophy.md), and the improvement
+roadmap distilled from that review in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Configuration
 
