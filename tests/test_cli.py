@@ -248,3 +248,28 @@ def test_research_youtube_writes_report_from_fake_pipeline(tmp_path, monkeypatch
     assert result.exit_code == 0, result.stdout
     assert out.exists()
     assert out.read_text(encoding="utf-8") == research.render_report(fake_result)
+
+
+def test_maintain_command_vacuum_and_snapshot(tmp_path):
+    import json as _json
+
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    snap = tmp_path / "snap.sqlite3"
+    result = runner.invoke(
+        app, ["--config", str(cfg), "maintain", "--vacuum", "--snapshot", str(snap)]
+    )
+    assert result.exit_code == 0, result.stdout
+    assert snap.exists()
+    assert "snapshot" in result.stdout
+
+    # Refuses to overwrite the snapshot it just wrote.
+    result = runner.invoke(app, ["--config", str(cfg), "maintain", "--snapshot", str(snap)])
+    assert result.exit_code == 1
+    assert "already exists" in result.stdout
+
+    # --json emits the machine-readable report.
+    result = runner.invoke(app, ["--config", str(cfg), "maintain", "--json"])
+    assert result.exit_code == 0
+    data = _json.loads(result.stdout)
+    assert data["optimized"] is True and data["vacuumed"] is False

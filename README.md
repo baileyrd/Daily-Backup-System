@@ -78,6 +78,7 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | `dbs sources list [--json] \| add NAME --type TYPE [--set k=v] \| check` | Manage and validate configured sources. |
 | `dbs connectors list [--verbose] [--json] \| describe TYPE` | Inspect installed connectors (incl. load failures). |
 | `dbs verify [SOURCE]` | Database + per-source integrity self-check. |
+| `dbs maintain [--vacuum] [--snapshot PATH] [--json]` | Database housekeeping: flush the WAL and refresh query-planner stats; `--vacuum` compacts the file, `--snapshot` writes a consistent single-file copy that's safe to move off-machine (a raw copy of a live WAL-mode DB misses the `-wal` sidecar). |
 | `dbs schedule [--interval daily\|hourly]` | Print ready-to-use cron / systemd snippets. |
 | `dbs serve [--host H] [--port P] [--no-setup]` | Launch the web management UI (needs the `[web]` extra). In-UI setup (dependency install + browser-login capture) is on by default; `--no-setup` disables it. |
 | `dbs research youtube TOPIC [...]` \| `dbs research youtube-backup TOPIC [...]` | Ad-hoc YouTube research: search (or reuse a backed-up list), synthesize via NotebookLM, write a markdown report. See [docs/research.md](docs/research.md). |

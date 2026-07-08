@@ -34,6 +34,7 @@ from .http import ManagedHTTPClient
 from .models import (
     ConnectorInfo,
     Cursor,
+    MaintenanceReport,
     ProgressCallback,
     RunContext,
     RunResult,
@@ -512,6 +513,33 @@ class BackupService:
             "db_schema_version": SCHEMA_VERSION,
             "connector_schema_versions": connector_schema_versions,
         }
+
+    # -- maintenance ---------------------------------------------------------
+
+    def maintain(
+        self, *, vacuum: bool = False, snapshot: str | Path | None = None
+    ) -> MaintenanceReport:
+        """Database housekeeping: flush the WAL, refresh planner statistics,
+        optionally compact (``vacuum``) and write a consistent single-file
+        snapshot (``snapshot`` — safe to copy off-machine, unlike a raw copy
+        of a live WAL-mode database file, which misses the ``-wal`` sidecar).
+        """
+        stats = self.storage.maintain(vacuum=vacuum)
+        snapshot_path: str | None = None
+        snapshot_bytes: int | None = None
+        if snapshot is not None:
+            snapshot_bytes = self.storage.vacuum_into(snapshot)
+            snapshot_path = str(Path(snapshot).expanduser())
+        return MaintenanceReport(
+            database=str(stats.get("path", "")),
+            wal_checkpointed=bool(stats.get("wal_checkpointed", False)),
+            optimized=bool(stats.get("optimized", False)),
+            vacuumed=bool(stats.get("vacuumed", False)),
+            size_before=int(stats.get("size_before", 0)),
+            size_after=int(stats.get("size_after", 0)),
+            snapshot_path=snapshot_path,
+            snapshot_bytes=snapshot_bytes,
+        )
 
     # -- verify -------------------------------------------------------------
 
