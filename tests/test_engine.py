@@ -167,3 +167,60 @@ def test_normal_run_has_no_warnings(storage):
     _src, result = run_fake(storage, cls, mode="full")
     assert result.warnings == []
     assert result.to_dict()["warnings"] == []
+
+
+def test_limit_caps_items_and_skips_the_sweep(storage):
+    # 10 items + a marker claiming only 2 live: with --limit 3 the engine
+    # stops at 3 and a truncated run must never sweep.
+    cls = make_connector()
+    cls.script = [
+        BackupItem(external_id=str(i), item_kind="note", raw={"id": str(i)})
+        for i in range(10)
+    ] + [Checkpoint(Cursor({"p": 1})), ReconcileMarker(live_ids={"0", "1"})]
+    src = storage.upsert_source("s", "fake", "test:fake", "{}", 1)
+    run_id = storage.begin_run(src.id, "test:fake", "full", None)
+    from conftest import make_ctx, registered
+    from dbs.core.engine import Engine
+
+    ctx = make_ctx(source_id=src.id, run_id=run_id, mode="full", limit=3)
+    result = Engine(storage).run_source(registered(cls), ctx)
+    assert result.fetched == 3
+    assert result.created == 3
+    assert result.deleted == 0  # no sweep on a truncated run
+    assert any("--limit 3" in w for w in result.warnings)
+    assert result.status.value == "success"
+
+
+def test_overlap_widens_ctx_since(storage, tmp_path):
+    # default_overlap_seconds is subtracted from the watermark before it
+    # reaches the connector as ctx.since.
+    from datetime import datetime, timezone
+
+    from dbs.config import Config, SourceConfig
+    from dbs.core.registry import ConnectorRegistry, RegisteredConnector
+    from dbs.core.service import BackupService
+
+    seen: dict = {}
+
+    cls = make_connector()
+    cls.script = [Checkpoint(Cursor({"p": 1}))]
+    orig_fetch = cls.fetch
+
+    def spying_fetch(self, ctx):
+        seen["since"] = ctx.since
+        return orig_fetch(self, ctx)
+
+    cls.fetch = spying_fetch
+
+    cfg = Config(base_dir=tmp_path, default_overlap_seconds=300)
+    cfg.sources["s"] = SourceConfig(name="s", type="fake", options={})
+    reg = ConnectorRegistry()
+    reg._by_type["fake"] = RegisteredConnector("fake", "test:fake", "test", cls, False)
+    svc = BackupService(storage, cfg, reg)
+
+    # Seed a watermark, then back up again and observe the widened since.
+    src = storage.upsert_source("s", "fake", "test:fake", "{}", 1)
+    seed_run = storage.begin_run(src.id, "test:fake", "full", None)
+    storage.save_cursor(src.id, Cursor({"p": 0}), "2024-06-01T12:00:00Z", seed_run)
+    svc.backup_source("s")
+    assert seen["since"] == datetime(2024, 6, 1, 11, 55, tzinfo=timezone.utc)

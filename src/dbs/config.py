@@ -90,6 +90,12 @@ class Config(BaseModel):
     # be a ${ENV} reference. notify_on: failure (default) | warning | always.
     notify_url: str | None = None
     notify_on: Literal["failure", "warning", "always"] = "failure"
+    # Engine/HTTP tunables. The defaults suit typical APIs; raise/lower for
+    # slow servers or aggressive rate limits without touching code.
+    http_timeout: float = 30.0
+    http_rate_limit_per_min: int = 120
+    batch_max: int = 500
+    sweep_safety_fraction: float = 0.5
     sources: dict[str, SourceConfig] = {}
     connectors: dict[str, ConnectorOverride] = {}
     base_dir: Path = Path(".")
@@ -181,6 +187,10 @@ def load_config(path: str | Path) -> Config:
             default_overlap_seconds=int(dbs_section.get("default_overlap_seconds", 300)),
             notify_url=dbs_section.get("notify_url"),
             notify_on=dbs_section.get("notify_on", "failure"),
+            http_timeout=float(dbs_section.get("http_timeout", 30.0)),
+            http_rate_limit_per_min=int(dbs_section.get("http_rate_limit_per_min", 120)),
+            batch_max=int(dbs_section.get("batch_max", 500)),
+            sweep_safety_fraction=float(dbs_section.get("sweep_safety_fraction", 0.5)),
             sources=sources,
             connectors=connectors,
             base_dir=path.resolve().parent,

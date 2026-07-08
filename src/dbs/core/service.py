@@ -101,7 +101,11 @@ class BackupService:
         self.secret_store = secret_store if secret_store is not None else dict(os.environ)
         self.http_factory = http_factory
         self.clock = clock
-        self.engine = Engine(storage)
+        self.engine = Engine(
+            storage,
+            batch_max=config.batch_max,
+            sweep_safety_fraction=config.sweep_safety_fraction,
+        )
 
     # -- construction -------------------------------------------------------
 
@@ -143,6 +147,7 @@ class BackupService:
         force_full: bool = False,
         force_reconcile: bool = False,
         dry_run: bool = False,
+        limit: int | None = None,
         on_progress: ProgressCallback | None = None,
     ) -> RunResult:
         self.storage.reap_interrupted_runs()
@@ -193,13 +198,22 @@ class BackupService:
             if rc.cls.wants_managed_http:
                 http = self._make_http(rc)
             secrets = Secrets(self.secret_store, rc.cls.secret_keys)
+            # The advertised re-scan window: a connector keying off ctx.since
+            # re-fetches a small overlap so a boundary-timestamp item can't
+            # fall between two runs (the idempotent upsert dedups the overlap).
+            since = watermark
+            if watermark is not None and self.config.default_overlap_seconds > 0:
+                since = watermark - timedelta(
+                    seconds=self.config.default_overlap_seconds
+                )
             ctx = RunContext(
                 source_id=source.id,
                 source_name=name,
                 config=config_instance,
                 secrets=secrets,
                 cursor=cursor,
-                since=watermark,
+                since=since,
+                limit=limit,
                 http=http,
                 logger=logger.getChild(name),
                 run_id=run_id,
@@ -234,6 +248,7 @@ class BackupService:
         *,
         only_due: bool = False,
         continue_on_error: bool = True,
+        limit: int | None = None,
         on_progress: ProgressCallback | None = None,
     ) -> list[RunResult]:
         # Resolve the work-list up front so progress can report a determinate
@@ -248,7 +263,9 @@ class BackupService:
         for index, (name, sc) in enumerate(due, start=1):
             framed = self._frame_progress(on_progress, index, total)
             try:
-                results.append(self.backup_source(name, on_progress=framed))
+                results.append(
+                    self.backup_source(name, limit=limit, on_progress=framed)
+                )
             except Exception as exc:  # isolation: one source must not abort others
                 if not continue_on_error:
                     raise
@@ -349,8 +366,11 @@ class BackupService:
         if self.http_factory is not None:
             client = self.http_factory()
         else:
-            client = httpx.Client(timeout=30.0)
-        rate = 120 if rc.cls.capabilities.supports_rate_limit_backoff else None
+            client = httpx.Client(timeout=self.config.http_timeout)
+        rate = (
+            self.config.http_rate_limit_per_min
+            if rc.cls.capabilities.supports_rate_limit_backoff else None
+        )
         return ManagedHTTPClient(client, rate_limit_per_min=rate)
 
     # -- status / introspection --------------------------------------------

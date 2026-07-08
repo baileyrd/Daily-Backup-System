@@ -71,7 +71,7 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | Command | Description |
 |---|---|
 | `dbs init [--force]` | Create config + `.env.example` and initialize the DB (idempotent; `--force` overwrites an existing config). |
-| `dbs backup [SOURCE] [--all] [--only-due] [--force-full] [--reconcile] [--dry-run] [--progress/--no-progress]` | Run an incremental backup. `auto` mode picks incremental vs. reconcile. `--only-due` skips sources whose `schedule` cadence (`hourly`/`daily`/`weekly`, default daily ≈ 20h of slack) hasn't elapsed (for `--all` runs more than once a day). A live status line (running item counter + per-source `[i/N]` position) shows automatically on a TTY; force it with `--progress` or silence it with `--no-progress`. |
+| `dbs backup [SOURCE] [--all] [--only-due] [--force-full] [--reconcile] [--dry-run] [--limit N] [--progress/--no-progress]` | Run an incremental backup. `auto` mode picks incremental vs. reconcile. `--only-due` skips sources whose `schedule` cadence (`hourly`/`daily`/`weekly`, default daily ≈ 20h of slack) hasn't elapsed (for `--all` runs more than once a day). A live status line (running item counter + per-source `[i/N]` position) shows automatically on a TTY; force it with `--progress` or silence it with `--no-progress`. |
 | `dbs status [SOURCE] [--json]` | Per-source item counts, last run, cursor watermark, warnings. |
 | `dbs history [SOURCE] [-n N] [--json]` | Recent backup runs and their stats. |
 | `dbs export --format FMT --out PATH [filters]` | Export to `json`/`ndjson`/`csv`/`markdown`/`obsidian`/`archive`. |

@@ -157,17 +157,6 @@ class Connector(ABC):
         """
         raise NotImplementedError
 
-    # -- optional full enumeration -----------------------------------------
-
-    def enumerate_ids(self, ctx: "RunContext") -> Iterator[str]:
-        """Optional alternative to :class:`ReconcileMarker` for deletion detection.
-
-        Only called when ``capabilities.supports_full_enumeration`` is true and
-        the connector chooses this path. Default raises ``NotImplementedError``.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement enumerate_ids()"
-        )
 
 
 def _module_available(name: str) -> bool:

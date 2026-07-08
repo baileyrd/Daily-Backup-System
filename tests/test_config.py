@@ -111,3 +111,38 @@ def test_connector_override_to_registry_map(tmp_path):
     override = cfg.registry_override()
     assert override["raindrop"] == "x:raindrop"
     assert override["raindrop:allow_override"] == "true"
+
+
+def test_engine_and_http_tunables_parse(tmp_path):
+    from dbs.config import load_config
+
+    p = tmp_path / "dbs.toml"
+    p.write_text(
+        "[dbs]\n"
+        "http_timeout = 5.5\n"
+        "http_rate_limit_per_min = 30\n"
+        "batch_max = 100\n"
+        "sweep_safety_fraction = 0.25\n"
+    )
+    cfg = load_config(p)
+    assert cfg.http_timeout == 5.5
+    assert cfg.http_rate_limit_per_min == 30
+    assert cfg.batch_max == 100
+    assert cfg.sweep_safety_fraction == 0.25
+
+
+def test_tunables_reach_the_engine(tmp_path):
+    from dbs.config import Config
+    from dbs.core.registry import ConnectorRegistry
+    from dbs.core.service import BackupService
+    from dbs.storage.sqlite import SqliteStorage
+
+    st = SqliteStorage(tmp_path / "t.sqlite3")
+    st.migrate()
+    try:
+        cfg = Config(base_dir=tmp_path, batch_max=42, sweep_safety_fraction=0.9)
+        svc = BackupService(st, cfg, ConnectorRegistry())
+        assert svc.engine.batch_max == 42
+        assert svc.engine.sweep_safety_fraction == 0.9
+    finally:
+        st.close()

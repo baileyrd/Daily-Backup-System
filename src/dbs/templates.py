@@ -15,6 +15,11 @@ default_overlap_seconds = 300    # re-scan window to avoid boundary gaps
 # keys -- Slack/Discord-compatible as-is). notify_on: failure | warning | always.
 # notify_url = "${DBS_NOTIFY_URL}"   # or the URL directly; ${ENV} refs work
 # notify_on = "failure"
+# Engine/HTTP tunables (defaults shown; uncomment to change):
+# http_timeout = 30.0            # seconds per HTTP request (managed client)
+# http_rate_limit_per_min = 120  # pre-emptive throttle for rate-limited APIs
+# batch_max = 500                # engine buffer size between commits
+# sweep_safety_fraction = 0.5    # refuse reconcile sweeps deleting more than this
 
 # --- Sources --------------------------------------------------------------
 # Each [sources.NAME] block configures one backup source. The 'type' selects a
