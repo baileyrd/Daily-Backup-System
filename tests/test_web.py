@@ -451,7 +451,8 @@ def test_install_commands_are_server_derived(setup_client):
     from dbs.web.setup import install_commands
     import sys
 
-    reg = ConnectorRegistry(); reg.discover()
+    reg = ConnectorRegistry()
+    reg.discover()
     cmds = install_commands(reg.get("reddit"))
     labels = [label for label, _ in cmds]
     argvs = [argv for _, argv in cmds]
@@ -554,7 +555,6 @@ def test_to_netscape_cookies_format():
          "secure": False, "httpOnly": False, "expires": -1},  # session cookie
     ])
     assert out.startswith("# Netscape HTTP Cookie File")
-    lines = [ln for ln in out.splitlines() if ln and not ln.startswith("#") or ln.startswith("#HttpOnly_")]
     # httpOnly cookie carries the #HttpOnly_ prefix and subdomain TRUE.
     assert "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\tabc" in out
     # session cookie -> expiry 0, host-only FALSE, secure FALSE.

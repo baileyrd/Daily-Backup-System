@@ -4,7 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "daily-backup-system"
-version = "0.1.0"
+# Single-sourced from dbs.__version__ (see [tool.hatch.version]) so the
+# package metadata and `dbs version` can never drift apart.
+dynamic = ["version"]
 description = "Modular, incremental daily backups of your data from multiple sources (Reddit, YouTube, Raindrop, ...) into SQLite, with portable exports."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,7 +30,7 @@ yaml = ["pyyaml>=6.0"]
 # lazily and `dbs serve` errors helpfully if the extra is missing, so the CLI
 # stays usable without it.
 web = ["fastapi>=0.110", "uvicorn>=0.29"]
-dev = ["pytest>=8", "pytest-cov", "httpx>=0.27", "fastapi>=0.110", "uvicorn>=0.29"]
+dev = ["pytest>=8", "pytest-cov", "ruff>=0.4", "httpx>=0.27", "fastapi>=0.110", "uvicorn>=0.29"]
 # Source connectors with heavy, browser/session-based dependencies. The core
 # never imports these; each connector imports them lazily at run time, so the
 # tool stays usable (and the connectors stay discoverable) without the extra.
@@ -62,6 +64,9 @@ skool = "dbs.connectors.skool:SkoolConnector"
 [project.urls]
 Homepage = "https://github.com/baileyrd/daily-backup-system"
 Repository = "https://github.com/baileyrd/daily-backup-system"
+
+[tool.hatch.version]
+path = "src/dbs/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dbs"]

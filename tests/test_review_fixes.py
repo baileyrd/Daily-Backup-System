@@ -9,7 +9,7 @@ import pytest
 
 from dbs.config import Config, load_config
 from dbs.core.errors import ConfigError, ConnectorLoadError, SourceLockedError
-from dbs.core.models import BackupItem, Checkpoint, Cursor, ReconcileMarker, RunStatus
+from dbs.core.models import BackupItem, Checkpoint, Cursor, ReconcileMarker
 from dbs.core.registry import ConnectorRegistry
 from dbs.core.service import BackupService, _toml_value
 from dbs.export.base import ExportQuery
@@ -181,7 +181,8 @@ def test_markdown_title_newline_is_flattened(storage, tmp_path):
                      "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", "h", "{}", False),
     ])
     cfg = Config(base_dir=tmp_path)
-    reg = ConnectorRegistry(); reg.discover()
+    reg = ConnectorRegistry()
+    reg.discover()
     svc = BackupService(storage, cfg, reg)
     out = tmp_path / "x.md"
     svc.export(ExportQuery(), "markdown", out)
@@ -203,7 +204,8 @@ def test_stream_export_reports_bytes(storage, tmp_path):
                      "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", "h", "{}", False),
     ])
     cfg = Config(base_dir=tmp_path)
-    reg = ConnectorRegistry(); reg.discover()
+    reg = ConnectorRegistry()
+    reg.discover()
     svc = BackupService(storage, cfg, reg)
     buf = io.BytesIO()
     result = svc.export(ExportQuery(), "csv", buf)
