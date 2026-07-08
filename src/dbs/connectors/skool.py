@@ -477,26 +477,11 @@ class SkoolConnector(Connector):
 
     @staticmethod
     def _launch_context(pw: Any, cfg: SkoolConfig, session_dir: Path) -> Any:
-        """Launch the captured persistent profile, dressed as a regular Chrome.
+        """Launch the captured session as a regular-looking Chrome
+        (see ``_playwright.launch_scrubbed_context`` for the why)."""
+        from ._playwright import launch_scrubbed_context
 
-        Mirrors the Reddit connector: headless Chromium advertises
-        ``HeadlessChrome/<ver>`` in its user agent (a bot signal), so probe the
-        launched browser's own UA and relaunch once with the token scrubbed
-        (version-exact by construction).
-        """
-        kwargs: dict[str, Any] = dict(
-            user_data_dir=str(session_dir),
-            headless=cfg.headless,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context = pw.chromium.launch_persistent_context(**kwargs)
-        probe = context.pages[0] if context.pages else context.new_page()
-        ua = probe.evaluate("() => navigator.userAgent")
-        if "HeadlessChrome" in ua:
-            context.close()
-            kwargs["user_agent"] = ua.replace("HeadlessChrome", "Chrome")
-            context = pw.chromium.launch_persistent_context(**kwargs)
-        return context
+        return launch_scrubbed_context(pw, session_dir, headless=cfg.headless)
 
     def _walk(
         self, page: Any, cfg: SkoolConfig, downloads: Path, ctx: RunContext
