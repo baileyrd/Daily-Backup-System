@@ -27,7 +27,7 @@ Smaller fixes that didn't make the twenty are collected in the appendix.
 | 16 | Query & index tuning for scale — **shipped** | could | M |
 | 17 | Full-text search (FTS5) — **shipped** | could | M |
 | 18 | Make the dormant contract surface real — **shipped** | should | M |
-| 19 | New connectors + shared browser helper | could | M–L each |
+| 19 | New connectors + shared browser helper — **shipped** | could | M–L each |
 | 20 | CI/tooling maturity (lint, types, coverage) — **mostly shipped** | should | S–M |
 
 ---
@@ -253,7 +253,7 @@ additive core growth stops being a flag-day for every installed connector,
 and make engine/HTTP tunables (`batch_max`, `sweep_safety_fraction`, HTTP
 timeout, rate limit) configurable in `[dbs]`.
 
-### 19. New connectors + shared browser helper — [could], M–L each
+### 19. New connectors + shared browser helper — [could], M–L each — SHIPPED (_playwright helper #71; GitHub #72; Pinboard+Readwise #73; Mastodon+Bluesky+Spotify; all offline-tested, live verification pending; a second course platform remains future work)
 
 The two templates (REST+token+incremental à la Raindrop;
 browser-session+full-enumeration à la Reddit/Skool) make new sources cheap.
