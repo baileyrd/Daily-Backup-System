@@ -432,3 +432,52 @@ def test_scale_indexes_exist(storage):
     )}
     assert "idx_items_created_global" in names
     assert "idx_media_with_data" in names
+
+
+def test_prune_revisions_keeps_newest_n_per_item(storage):
+    src, run = _setup(storage)
+    # Item "1" accumulates 4 revisions; item "2" has just one.
+    for i, h in enumerate(["h1", "h2", "h3", "h4"]):
+        r = storage.begin_run(src.id, "test:fake", "incremental", None) if i else run
+        storage.upsert_items(src.id, r, [_item("1", h)])
+    storage.upsert_items(src.id, run, [_item("2", "x1")])
+
+    deleted = storage.prune_revisions(src.id, keep=2)
+    assert deleted == 2  # revisions 1 and 2 of item "1"
+    revs = [r["revision"] for r in storage.conn.execute(
+        "SELECT rv.revision FROM item_revisions rv JOIN items i ON i.id=rv.item_id "
+        "WHERE i.external_id='1' ORDER BY rv.revision"
+    )]
+    assert revs == [3, 4]  # newest 2 kept
+    # Item "2" (fewer than keep) and the items table are untouched.
+    n2 = storage.conn.execute(
+        "SELECT COUNT(*) FROM item_revisions rv JOIN items i ON i.id=rv.item_id "
+        "WHERE i.external_id='2'"
+    ).fetchone()[0]
+    assert n2 == 1
+    row = storage.conn.execute(
+        "SELECT content_hash, revision FROM items WHERE external_id='1'"
+    ).fetchone()
+    assert row["content_hash"] == "h4" and row["revision"] == 4
+
+
+def test_prune_revisions_scopes_to_the_source(storage):
+    src, run = _setup(storage)
+    other = storage.upsert_source("s2", "fake", "test:fake", "{}", 1)
+    run2 = storage.begin_run(other.id, "test:fake", "full", None)
+    for h in ["a1", "a2", "a3"]:
+        storage.upsert_items(other.id, run2, [_item("9", h)])
+    storage.upsert_items(src.id, run, [_item("1", "h1")])
+
+    assert storage.prune_revisions(src.id, keep=1) == 0  # nothing to trim here
+    total_other = storage.conn.execute(
+        "SELECT COUNT(*) FROM item_revisions rv JOIN items i ON i.id=rv.item_id "
+        "WHERE i.source_id=?", (other.id,)
+    ).fetchone()[0]
+    assert total_other == 3  # untouched
+
+
+def test_prune_revisions_zero_keeps_everything(storage):
+    src, run = _setup(storage)
+    storage.upsert_items(src.id, run, [_item("1", "h1")])
+    assert storage.prune_revisions(src.id, keep=0) == 0

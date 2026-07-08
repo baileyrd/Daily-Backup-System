@@ -356,6 +356,7 @@ class MaintenanceReport:
     size_after: int
     snapshot_path: str | None = None
     snapshot_bytes: int | None = None
+    revisions_pruned: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -367,6 +368,7 @@ class MaintenanceReport:
             "size_after": self.size_after,
             "snapshot_path": self.snapshot_path,
             "snapshot_bytes": self.snapshot_bytes,
+            "revisions_pruned": self.revisions_pruned,
         }
 
 

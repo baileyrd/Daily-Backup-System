@@ -742,6 +742,15 @@ class BackupService:
         snapshot (``snapshot`` — safe to copy off-machine, unlike a raw copy
         of a live WAL-mode database file, which misses the ``-wal`` sidecar).
         """
+        # Retention first, so a --vacuum in the same pass reclaims the pages.
+        revisions_pruned = 0
+        for name, sc in self.config.sources.items():
+            if sc.keep_revisions > 0:
+                source = self.storage.get_source(name)
+                if source is not None:
+                    revisions_pruned += self.storage.prune_revisions(
+                        source.id, sc.keep_revisions
+                    )
         stats = self.storage.maintain(vacuum=vacuum)
         snapshot_path: str | None = None
         snapshot_bytes: int | None = None
@@ -750,6 +759,7 @@ class BackupService:
             snapshot_path = str(Path(snapshot).expanduser())
         return MaintenanceReport(
             database=str(stats.get("path", "")),
+            revisions_pruned=revisions_pruned,
             wal_checkpointed=bool(stats.get("wal_checkpointed", False)),
             optimized=bool(stats.get("optimized", False)),
             vacuumed=bool(stats.get("vacuumed", False)),

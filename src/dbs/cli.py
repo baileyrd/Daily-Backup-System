@@ -575,6 +575,8 @@ def maintain(
         typer.secho(f"Database: {report.database}", fg=typer.colors.CYAN)
         typer.echo(f"  WAL checkpoint: {'ok' if report.wal_checkpointed else 'blocked/none'}")
         typer.echo("  planner stats:  refreshed")
+        if report.revisions_pruned:
+            typer.echo(f"  revisions:      pruned {report.revisions_pruned:,} old row(s)")
         if report.vacuumed:
             typer.echo(
                 f"  vacuum:         done "

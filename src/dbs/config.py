@@ -42,6 +42,7 @@ from .core.errors import ConfigError
 
 _RESERVED_SOURCE_KEYS = {
     "type", "enabled", "schedule", "reconcile_every_runs", "store_media", "max_media_mb",
+    "keep_revisions",
 }
 _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _SECRET_KEY_HINTS = ("token", "secret", "password", "api_key", "apikey", "access_key")
@@ -59,6 +60,10 @@ class SourceConfig(BaseModel):
     # media otherwise stays referenced). max_media_mb caps per-file size (0 = no cap).
     store_media: bool = False
     max_media_mb: int = 0
+    # Prune each item's revision history to the newest N during `dbs
+    # maintain` (0 = keep everything). The current row and the newest
+    # revision are always kept; items are never touched.
+    keep_revisions: int = 0
     options: dict[str, Any] = {}
 
 
@@ -159,6 +164,7 @@ def load_config(path: str | Path) -> Config:
             reconcile_every_runs=body.get("reconcile_every_runs"),
             store_media=bool(body.get("store_media", False)),
             max_media_mb=int(body.get("max_media_mb", 0) or 0),
+            keep_revisions=int(body.get("keep_revisions", 0) or 0),
             options=options,
         )
 

@@ -25,7 +25,9 @@ default_overlap_seconds = 300    # re-scan window to avoid boundary gaps
 type = "raindrop"
 enabled = true
 schedule = "daily"               # advisory; honored by `backup --only-due`
-reconcile_every_runs = 7         # every Nth run does a full reconcile (edits + deletions)
+reconcile_every_runs = 7
+# keep_revisions = 50           # prune each item's history to the newest N
+#                               # during `dbs maintain` (0/omitted = keep all)         # every Nth run does a full reconcile (edits + deletions)
 collection_id = 0                # 0 = all collections except Trash
 nested = true
 page_size = 50                   # Raindrop max is 50
