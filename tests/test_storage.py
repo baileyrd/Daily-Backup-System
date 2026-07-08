@@ -333,3 +333,77 @@ def test_duplicate_external_id_within_one_batch_upserts(tmp_path):
     assert rows[0]["content_hash"] == "h2"
     assert rows[0]["revision"] == 2
     storage.close()
+
+
+# --- full-text search (FTS5, with LIKE fallback) ----------------------------
+
+
+def _fts_seed(storage):
+    src, run = _setup(storage)
+    it1 = _item("1", "h1")
+    it1.title = "Quick start guide"
+    it1.body = "the brown fox jumps over the lazy dog"
+    it2 = _item("2", "h2")
+    it2.title = "Hello World"
+    it2.body = "unrelated content"
+    storage.upsert_items(src.id, run, [it1, it2])
+    return src, run
+
+
+def test_fts_matches_all_words_across_title_and_body(storage):
+    _fts_seed(storage)
+    assert storage._fts_enabled  # bundled SQLite ships FTS5
+    # "quick" is in item 1's title, "fox" in its body — LIKE's single
+    # substring scan could never match this query.
+    items, total = storage.browse_items(ExportQuery(), text="quick fox")
+    assert total == 1 and items[0]["external_id"] == "1"
+
+
+def test_fts_prefix_matches_final_token(storage):
+    _fts_seed(storage)
+    items, total = storage.browse_items(ExportQuery(), text="hell")
+    assert total == 1 and items[0]["external_id"] == "2"
+
+
+def test_fts_operator_characters_are_inert(storage):
+    _fts_seed(storage)
+    # MATCH operators in user input must not crash or change semantics.
+    for q in ('he said: "hi" AND *', "NOT fox", "title:fox"):
+        _, total = storage.browse_items(ExportQuery(), text=q)
+        assert total == 0, q
+    # ...while plain multi-word search still works.
+    _, total = storage.browse_items(ExportQuery(), text="brown dog")
+    assert total == 1
+
+
+def test_fts_index_follows_updates(storage):
+    src, run = _fts_seed(storage)
+    it = _item("1", "h1-changed")
+    it.title = "Quick start guide"
+    it.body = "now about turtles"
+    run2 = storage.begin_run(src.id, "test:fake", "incremental", None)
+    storage.upsert_items(src.id, run2, [it])
+    _, total_old = storage.browse_items(ExportQuery(), text="fox")
+    _, total_new = storage.browse_items(ExportQuery(), text="turtles")
+    assert (total_old, total_new) == (0, 1)
+
+
+def test_fts_backfills_a_pre_fts_database(storage):
+    src, run = _fts_seed(storage)
+    storage.conn.execute("DROP TRIGGER items_fts_ai")
+    storage.conn.execute("DROP TRIGGER items_fts_ad")
+    storage.conn.execute("DROP TRIGGER items_fts_au")
+    storage.conn.execute("DROP TABLE items_fts")
+    storage.migrate()  # re-running the ensure-step rebuilds and backfills
+    _, total = storage.browse_items(ExportQuery(), text="quick fox")
+    assert total == 1
+
+
+def test_like_fallback_when_fts_unavailable(storage):
+    _fts_seed(storage)
+    storage._fts_enabled = False
+    items, total = storage.browse_items(ExportQuery(), text="hello")
+    assert total == 1 and items[0]["external_id"] == "2"
+    # LIKE is a single-substring scan: the cross-field query finds nothing.
+    _, total = storage.browse_items(ExportQuery(), text="quick fox")
+    assert total == 0

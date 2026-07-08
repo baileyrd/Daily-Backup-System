@@ -49,6 +49,7 @@ class SqliteStorage(Storage):
         self.path = str(path)
         self._clock = clock
         self._depth = 0
+        self._fts_enabled = False  # set by migrate() -> _ensure_fts()
         # Per-run media-archiving toggles, set by upsert_items().
         self._store_media = False
         self._max_media_bytes = 0
@@ -74,6 +75,56 @@ class SqliteStorage(Storage):
 
     def migrate(self) -> None:
         migrations.migrate(self.conn)
+        self._fts_enabled = self._ensure_fts()
+
+    def _ensure_fts(self) -> bool:
+        """Create/refresh the FTS5 index over ``items(title, body)``.
+
+        Deliberately NOT a numbered migration: a Python built without the
+        FTS5 module would fail a migration permanently, whereas this
+        ensure-step just returns False and ``browse_items`` falls back to
+        LIKE. External-content table + triggers keep the index in sync with
+        every write path; the backfill runs once (index empty, items not).
+        """
+        existed = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='items_fts'"
+        ).fetchone() is not None
+        try:
+            self.conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5("
+                "title, body, content='items', content_rowid='id')"
+            )
+        except sqlite3.OperationalError:
+            return False  # SQLite built without FTS5
+        self.conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS items_fts_ai AFTER INSERT ON items BEGIN "
+            "INSERT INTO items_fts(rowid, title, body) VALUES (new.id, new.title, new.body); "
+            "END"
+        )
+        self.conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS items_fts_ad AFTER DELETE ON items BEGIN "
+            "INSERT INTO items_fts(items_fts, rowid, title, body) "
+            "VALUES ('delete', old.id, old.title, old.body); "
+            "END"
+        )
+        # UPDATE OF title, body: the unchanged-item path (last_seen bump) and
+        # the soft-delete sweep never touch those columns, so no index churn.
+        self.conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS items_fts_au AFTER UPDATE OF title, body "
+            "ON items BEGIN "
+            "INSERT INTO items_fts(items_fts, rowid, title, body) "
+            "VALUES ('delete', old.id, old.title, old.body); "
+            "INSERT INTO items_fts(rowid, title, body) VALUES (new.id, new.title, new.body); "
+            "END"
+        )
+        if not existed:
+            # First enable on a pre-FTS database: build the index from the
+            # existing rows. ('rebuild' is FTS5's own backfill for
+            # external-content tables — a bare COUNT can't detect emptiness
+            # here, since reads pass through to the content table.)
+            with self.transaction():
+                self.conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')")
+        return True
 
     def close(self) -> None:
         try:
@@ -653,25 +704,52 @@ class SqliteStorage(Storage):
     def browse_items(
         self, query: ExportQuery, *, text: str | None = None, limit: int = 50, offset: int = 0
     ) -> tuple[list[ItemRow], int]:
-        where, params = _build_filter(query, table="i")
+        base_where, base_params = _build_filter(query, table="i")
+        # Text search: FTS5 when available (all-words, case-insensitive,
+        # final-token prefix so search-as-you-type works), falling back to
+        # the original LIKE substring scan — both when SQLite lacks the FTS5
+        # module and when a pathological query string trips MATCH's parser.
+        attempts: list[tuple[str, list[Any]]] = []
+        if text and self._fts_enabled:
+            attempts.append((
+                base_where + " AND i.id IN "
+                "(SELECT rowid FROM items_fts WHERE items_fts MATCH ?)",
+                [*base_params, _fts_match_query(text)],
+            ))
         if text:
-            where += " AND (i.title LIKE ? ESCAPE '\\' OR i.body LIKE ? ESCAPE '\\')"
             like = _like_pattern(text)
-            params = [*params, like, like]
-        total = int(
-            self.conn.execute(
-                f"SELECT COUNT(*) FROM items i JOIN sources s ON s.id = i.source_id WHERE {where}",
-                params,
-            ).fetchone()[0]
-        )
-        sql = (
-            "SELECT i.*, s.name AS source_name, s.type AS source_type, "
-            "(SELECT COUNT(*) FROM media m WHERE m.item_id = i.id) AS media_count "
-            "FROM items i JOIN sources s ON s.id = i.source_id "
-            f"WHERE {where} ORDER BY i.item_created_at DESC, i.id DESC LIMIT ? OFFSET ?"
-        )
-        rows = self.conn.execute(sql, [*params, max(1, limit), max(0, offset)]).fetchall()
-        return [_row_to_browse_item(r) for r in rows], total
+            attempts.append((
+                base_where + " AND (i.title LIKE ? ESCAPE '\\' OR i.body LIKE ? ESCAPE '\\')",
+                [*base_params, like, like],
+            ))
+        else:
+            attempts.append((base_where, list(base_params)))
+
+        last_exc: sqlite3.OperationalError | None = None
+        for where, params in attempts:
+            try:
+                total = int(
+                    self.conn.execute(
+                        f"SELECT COUNT(*) FROM items i "
+                        f"JOIN sources s ON s.id = i.source_id WHERE {where}",
+                        params,
+                    ).fetchone()[0]
+                )
+                sql = (
+                    "SELECT i.*, s.name AS source_name, s.type AS source_type, "
+                    "(SELECT COUNT(*) FROM media m WHERE m.item_id = i.id) AS media_count "
+                    "FROM items i JOIN sources s ON s.id = i.source_id "
+                    f"WHERE {where} ORDER BY i.item_created_at DESC, i.id DESC LIMIT ? OFFSET ?"
+                )
+                rows = self.conn.execute(
+                    sql, [*params, max(1, limit), max(0, offset)]
+                ).fetchall()
+                return [_row_to_browse_item(r) for r in rows], total
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                continue
+        assert last_exc is not None
+        raise last_exc
 
     def get_item(self, item_id: int) -> ItemRow | None:
         row = self.conn.execute(
@@ -934,6 +1012,23 @@ def _row_to_browse_item(row: sqlite3.Row) -> ItemRow:
         "deleted_at": row["deleted_at"],
         "media_count": int(row["media_count"]),
     }
+
+
+def _fts_match_query(text: str) -> str:
+    """A safe FTS5 MATCH expression from free user text.
+
+    Each whitespace token becomes a quoted phrase (so MATCH operators like
+    ``AND``/``NOT``/``*``/``:`` in user input can't change the query's
+    meaning), implicitly ANDed; the final token gets a ``*`` prefix-match so
+    typing "hell" still finds "Hello". Embedded quotes are doubled per FTS5
+    escaping rules.
+    """
+    tokens = [t.replace('"', '""') for t in text.split()]
+    if not tokens:
+        return '""'
+    quoted = [f'"{t}"' for t in tokens]
+    quoted[-1] += "*"
+    return " ".join(quoted)
 
 
 def _like_pattern(text: str) -> str:

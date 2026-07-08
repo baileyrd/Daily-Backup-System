@@ -103,9 +103,12 @@ it you can:
 - **run a backup** (one source or all) and watch a **live progress bar** —
   it streams the engine's progress events over Server-Sent Events;
 - **browse what's actually stored** (the *Browse* tab) — filter items by
-  source/type/date/text search, page through the results, and open a detail
-  drawer with the raw payload and any archived media; a metrics strip shows
-  item/revision/media counts per source and kind;
+  source/type/date and **full-text search** over titles and bodies (SQLite
+  FTS5: all words must match, across fields, with prefix matching on the
+  last word; falls back to plain substring search on SQLite builds without
+  FTS5), page through the results, and open a detail drawer with the raw
+  payload and any archived media; a metrics strip shows item/revision/media
+  counts per source and kind;
 - browse installed **connectors** (capabilities, config schema, readiness);
 - **install** a connector's optional dependencies and run reddit's one-time
   **browser login** — see *Getting connectors working* below;

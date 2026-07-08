@@ -25,7 +25,7 @@ Smaller fixes that didn't make the twenty are collected in the appendix.
 | 14 | `dbs doctor` + dependency self-update | could | M |
 | 15 | Concurrent `backup_all` | could | L |
 | 16 | Query & index tuning for scale | could | M |
-| 17 | Full-text search (FTS5) | could | M |
+| 17 | Full-text search (FTS5) — **shipped** | could | M |
 | 18 | Make the dormant contract surface real | should | M |
 | 19 | New connectors + shared browser helper | could | M–L each |
 | 20 | CI/tooling maturity (lint, types, coverage) — **mostly shipped** | should | S–M |
@@ -223,7 +223,7 @@ join); cross-source ordering (`s.name, item_created_at`) and the global
 `item_created_at DESC` sort have no covering index; `media` has no partial
 index for `data IS NOT NULL` scans. All additive, low-risk migrations.
 
-### 17. Full-text search (FTS5) — [could], M
+### 17. Full-text search (FTS5) — [could], M — SHIPPED
 
 Browse search is `LIKE '%q%'` over title/body — no ranking, no tokenization,
 full scans. SQLite's FTS5 is built for exactly this: an external-content
