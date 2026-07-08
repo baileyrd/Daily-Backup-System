@@ -18,7 +18,7 @@ import pytest
 
 from dbs.core.engine import Engine
 from dbs.core.errors import ConnectorAuthError
-from dbs.core.models import BackupItem, Checkpoint, ReconcileMarker
+from dbs.core.models import BackupItem, ReconcileMarker
 from dbs.connectors.skool import (
     SkoolConfig,
     SkoolConnector,
@@ -319,7 +319,7 @@ def test_parse_lessons_unwraps_course_keyed_nodes():
         {"course": {"id": "l2", "metadata": {"title": "Standalone"}}, "children": []},
     ]}}}}
     out = _parse_lessons(cd)
-    assert [(l["lessonId"], l["title"]) for l in out] == [
+    assert [(les["lessonId"], les["title"]) for les in out] == [
         ("l1", "Lesson 1"), ("l2", "Standalone"),
     ]
     assert out[0]["moduleTitle"] == "Module 1"
@@ -337,7 +337,7 @@ def test_parse_lessons_tolerates_plain_nodes():
         {"id": "l2", "metadata": {"title": "Standalone"}},
     ]}}}}
     out = _parse_lessons(cd)
-    assert [l["lessonId"] for l in out] == ["l1", "l2"]
+    assert [les["lessonId"] for les in out] == ["l1", "l2"]
     assert out[0]["moduleTitle"] == "Module 1"
 
 

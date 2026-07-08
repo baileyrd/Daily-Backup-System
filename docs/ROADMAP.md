@@ -28,7 +28,7 @@ Smaller fixes that didn't make the twenty are collected in the appendix.
 | 17 | Full-text search (FTS5) | could | M |
 | 18 | Make the dormant contract surface real | should | M |
 | 19 | New connectors + shared browser helper | could | M–L each |
-| 20 | CI/tooling maturity (lint, types, coverage) | should | S–M |
+| 20 | CI/tooling maturity (lint, types, coverage) — **mostly shipped** | should | S–M |
 
 ---
 
@@ -280,7 +280,7 @@ launch/HeadlessChrome-UA-scrub logic from `reddit.py` and `skool.py` into a
 shared `connectors/_playwright.py`, so anti-bot handling evolves in one
 place before a third copy appears.
 
-### 20. CI/tooling maturity — [should], S–M
+### 20. CI/tooling maturity — [should], S–M — SHIPPED (ruff + coverage gate + 3.13 + extras job + single-sourced version; mypy/pyright and frontend tests deferred)
 
 The code is thoroughly typed and lint-clean by convention, but nothing
 enforces it: CI is `pytest -q` on 3.11/3.12 only. Add: **ruff** (the code
