@@ -502,6 +502,11 @@ class SkoolConnector(Connector):
             stats: Counter[str] = Counter()
             data = self._classroom_next_data(page, slug, ctx)
             if data is None:
+                # Same shape of gap as the course-level fetch failure below:
+                # every course and lesson of this community is absent from
+                # this run's live_ids, so fetch() must skip deletion detection
+                # rather than reconcile against incomplete data.
+                yield {"_kind": "_partial_enumeration"}
                 continue
             props = (data.get("props") or {}).get("pageProps") or {}
             render = props.get("renderData") or {}

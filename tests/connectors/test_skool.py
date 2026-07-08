@@ -175,6 +175,20 @@ def test_partial_enumeration_marker_suppresses_reconcile_even_unfiltered():
     assert any(isinstance(e, BackupItem) for e in events)
 
 
+def test_walk_flags_partial_when_community_classroom_fails_to_load(tmp_path):
+    # A community whose classroom page yields no __NEXT_DATA__ leaves every
+    # course and lesson it contains out of live_ids — the same gap as a failed
+    # course fetch. _walk must emit the partial-enumeration sentinel rather
+    # than skip silently, or the sweep would soft-delete the whole community.
+    class _NoData(SkoolConnector):
+        def _classroom_next_data(self, page, slug, ctx, course_slug=None):
+            return None
+
+    cfg = SkoolConfig(communities=["c1"], downloads_dir=str(tmp_path))
+    out = list(_NoData()._walk(object(), cfg, tmp_path, _ctx(cfg)))
+    assert {"_kind": "_partial_enumeration"} in out
+
+
 def test_discover_communities_raises_instead_of_silent_zero_item_backup(tmp_path):
     # A degraded session that resolves the home page but never redirects to
     # /login (so _require_login sees nothing wrong) used to just warn and

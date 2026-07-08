@@ -122,8 +122,16 @@ class YouTubeConnector(Connector):
         live_ids: set[str] = set()
         cursor: dict[str, Any] = {}
         seen_lists = 0
+        failed_lists: list[str] = []
 
         for list_label, raw in self._acquire(ctx):
+            if raw.get("__list_failed__"):
+                # A list that failed to load (expired cookie, private feed,
+                # extractor breakage) leaves its items out of live_ids; note it
+                # so the ReconcileMarker below is suppressed and the engine's
+                # sweep can't falsely soft-delete that whole list.
+                failed_lists.append(list_label)
+                continue
             item = self._to_item(list_label, raw)
             if item is not None:
                 # A playlist can contain the same video twice; keep the first
@@ -145,7 +153,17 @@ class YouTubeConnector(Connector):
 
         cursor["lists_done"] = seen_lists
         yield Checkpoint(Cursor(dict(cursor)), note="final")
-        yield ReconcileMarker(live_ids=live_ids)
+        if failed_lists:
+            # Partial enumeration: same shape of gap as skool's
+            # communities/courses filter — reconciling against incomplete
+            # data would sweep everything the failed list(s) contain.
+            ctx.logger.warning(
+                "youtube: %d list(s) failed to load (%s) — partial enumeration, "
+                "deletion detection skipped this run",
+                len(failed_lists), ", ".join(failed_lists),
+            )
+        else:
+            yield ReconcileMarker(live_ids=live_ids)
 
     # -- acquisition (the only yt-dlp-touching part; overridden in tests) ---
 
@@ -186,8 +204,14 @@ class YouTubeConnector(Connector):
             yield from self._dump_list(cfg, cookiefile, label, source_url, end, ctx)
 
         if cfg.playlists:
-            for label, source_url in self._discover_playlists(cfg, cookiefile, ctx):
-                yield from self._dump_list(cfg, cookiefile, label, source_url, None, ctx)
+            discovered = self._discover_playlists(cfg, cookiefile, ctx)
+            if discovered is None:
+                # Discovery itself failed: every playlist is missing from this
+                # run, not just one — flag the enumeration as partial.
+                yield "playlists", {"__list_failed__": True}
+            else:
+                for label, source_url in discovered:
+                    yield from self._dump_list(cfg, cookiefile, label, source_url, None, ctx)
 
     def _make_ydl(self, cfg: YouTubeConfig, cookiefile: Path | None, playlist_end: int | None) -> Any:
         import yt_dlp
@@ -224,9 +248,13 @@ class YouTubeConnector(Connector):
             info = ydl.extract_info(source_url, download=False)
         except yt_dlp.utils.DownloadError as err:  # type: ignore[attr-defined]
             ctx.logger.warning("youtube: %s not accessible: %s", label, err)
+            # Truncating silently would let the reconcile sweep soft-delete
+            # this list's items; tell fetch() the enumeration is partial.
+            yield label, {"__list_failed__": True}
             return
         if info is None:  # ignoreerrors swallows the top-level failure
             ctx.logger.warning("youtube: %s not accessible (check cookies)", label)
+            yield label, {"__list_failed__": True}
             return
         entries = [e for e in (info.get("entries") or []) if e]
         from ..core import utcnow
@@ -244,8 +272,12 @@ class YouTubeConnector(Connector):
 
     def _discover_playlists(
         self, cfg: YouTubeConfig, cookiefile: Path | None, ctx: RunContext
-    ) -> list[tuple[str, str]]:
-        """Return (label, url) for each playlist the account owns."""
+    ) -> list[tuple[str, str]] | None:
+        """Return (label, url) for each playlist the account owns.
+
+        ``None`` means discovery *failed* (as opposed to "the account has no
+        playlists") — the caller must treat the run as a partial enumeration.
+        """
         import yt_dlp
 
         ydl = self._make_ydl(cfg, cookiefile, None)
@@ -255,9 +287,12 @@ class YouTubeConnector(Connector):
             )
         except yt_dlp.utils.DownloadError as err:  # type: ignore[attr-defined]
             ctx.logger.warning("youtube: could not list playlists: %s", err)
-            return []
+            return None
+        if info is None:  # ignoreerrors swallows the top-level failure
+            ctx.logger.warning("youtube: could not list playlists (check cookies)")
+            return None
         out: list[tuple[str, str]] = []
-        for e in (info or {}).get("entries") or []:
+        for e in info.get("entries") or []:
             if not e:
                 continue
             pid = e.get("id")
