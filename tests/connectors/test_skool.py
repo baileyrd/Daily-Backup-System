@@ -10,6 +10,8 @@ exercised through fabricated blobs and a fake page (mirroring reddit's
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -28,6 +30,22 @@ from dbs.connectors.skool import (
 from conftest import make_ctx, registered
 
 SECRETS_ENV = {"SKOOL_SESSION_DIR": "/tmp/skool-session"}
+
+
+def _ytdlp(monkeypatch):
+    """The real yt_dlp when installed, else a stand-in module.
+
+    The _download_hls tests only monkeypatch ``YoutubeDL`` on the module, so
+    CI — which installs no [skool] extra — can run them too. A plain
+    ``import yt_dlp`` here kept this suite red in CI for exactly that reason.
+    """
+    try:
+        import yt_dlp
+    except ImportError:
+        yt_dlp = types.ModuleType("yt_dlp")
+        yt_dlp.YoutubeDL = None  # placeholder; every test monkeypatches it
+        monkeypatch.setitem(sys.modules, "yt_dlp", yt_dlp)
+    return yt_dlp
 
 
 def _community(slug="comm-a", name="Community A", updated="2024-01-01T00:00:00Z"):
@@ -1001,7 +1019,7 @@ def test_fetch_rejects_undeclared_video_cookies_file_env():
 
 
 def test_download_hls_attaches_cookies_for_external_only(tmp_path, monkeypatch):
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
     from dbs.core.secrets import Secrets
 
     captured: list[dict] = []
@@ -1045,7 +1063,7 @@ def test_download_hls_cookiefile_wins_over_cookies_from_browser(tmp_path, monkey
     # captured cookie FILE works fine. Never send both to yt-dlp: the file
     # always wins when one is available, so a from_browser fallback left in
     # config can't reintroduce that failure.
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
     from dbs.core.secrets import Secrets
 
     captured: list[dict] = []
@@ -1088,7 +1106,7 @@ def test_download_hls_cookiefile_wins_over_cookies_from_browser(tmp_path, monkey
 def test_download_hls_passes_extractor_args_for_external_only(tmp_path, monkeypatch):
     # A fallback for "Sign in to confirm you're not a bot" persisting even
     # with valid cookies: an alternate emulated player_client.
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
 
     captured: list[dict] = []
 
@@ -1122,7 +1140,7 @@ def test_download_hls_wires_js_runtime_opts_for_every_download(tmp_path, monkeyp
     # The actual fix for a persistent bot-check: yt-dlp needs a JS runtime to
     # solve YouTube's challenge. Applies to every download, not just external
     # (harmless/unused for Skool's own CDN, but simplest to always pass).
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
     from dbs.connectors import skool as skool_mod
 
     captured: list[dict] = []
@@ -1167,7 +1185,7 @@ def test_download_hls_logs_cookie_and_js_runtime_state(tmp_path, monkeypatch, ca
     # line must reach the user: it's logged at INFO because the CLI now
     # configures the "dbs" logger for it (see test_cli.py) — assert it's
     # actually emitted, not just that it wouldn't crash.
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
     from dbs.connectors import skool as skool_mod
 
     class _FakeYDL:
@@ -1245,7 +1263,7 @@ def test_ytdlp_logger_forwards_warnings_always_debug_only_when_verbose():
 
 
 def test_download_hls_wires_ytdlp_logger_per_video_debug(tmp_path, monkeypatch):
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
     from dbs.connectors.skool import _YtdlpLogger
 
     captured: list[dict] = []
@@ -1325,7 +1343,7 @@ def test_classify_video_error_permanent_vs_transient():
 
 
 def test_download_hls_returns_unavailable_for_permanently_gone_videos(tmp_path, monkeypatch):
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
 
     class _FakeYDL:
         def __init__(self, opts):
@@ -1353,7 +1371,7 @@ def test_download_hls_stall_watchdog_returns_failed(tmp_path, monkeypatch, caplo
     # A wedged yt-dlp call (fragment loop, hung JS-challenge subprocess) is
     # abandoned by the stall watchdog and classified "failed" — transient,
     # retried on a later run — instead of blocking the whole backup forever.
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
 
     from dbs.connectors import skool as skool_mod
     from dbs.connectors._util import WatchdogTimeout
@@ -1389,7 +1407,7 @@ def test_download_hls_stall_watchdog_returns_failed(tmp_path, monkeypatch, caplo
 def test_download_hls_wires_stall_watchdog_with_progress_heartbeat(tmp_path, monkeypatch):
     # The real download runs under the watchdog with the configured stall
     # timeout, and both download and postprocessor hooks feed the heartbeat.
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
 
     from dbs.connectors import skool as skool_mod
 
