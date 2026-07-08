@@ -322,6 +322,124 @@ def test_update_ytdlp_dry_run():
     assert "pip install --upgrade yt-dlp[default]" in result.stdout
 
 
+def _seed_items(tmp_path):
+    """Insert items straight through the storage layer (no network): two live
+    notes and one deleted link, under a source named 'rd'."""
+    import json as _json
+
+    from dbs.storage.base import PreparedItem
+    from dbs.storage.sqlite import SqliteStorage
+
+    def prepared(ext_id, kind, title, *, deleted=False):
+        return PreparedItem(
+            external_id=ext_id, item_kind=kind, title=title,
+            url=f"https://example/{ext_id}", body=f"body of {title}",
+            tags=["t"], item_created_at="2024-01-01T00:00:00Z",
+            item_updated_at="2024-01-01T00:00:00Z", content_hash=f"h-{ext_id}",
+            raw_json=_json.dumps({"id": ext_id}), deleted=deleted,
+        )
+
+    storage = SqliteStorage(tmp_path / "dbs.sqlite3")
+    src = storage.upsert_source("rd", "raindrop", "test:raindrop", "{}", 1)
+    run = storage.begin_run(src.id, "test:raindrop", "full", None)
+    storage.upsert_items(src.id, run, [
+        prepared("1", "note", "Alpha note"),
+        prepared("2", "note", "Beta note"),
+        prepared("3", "link", "Gone link", deleted=True),
+    ])
+    storage.close()
+
+
+def test_items_and_stats_empty_db(tmp_path):
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    result = runner.invoke(app, ["--config", str(cfg), "items"])
+    assert result.exit_code == 0, result.output
+    assert "No items matched" in result.stdout
+    result = runner.invoke(app, ["--config", str(cfg), "stats"])
+    assert result.exit_code == 0, result.output
+    assert "0 live" in result.stdout
+    assert "No items stored yet" in result.stdout
+
+
+def test_items_lists_filters_and_pages(tmp_path):
+    import json as _json
+
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    _seed_items(tmp_path)
+
+    # Default listing: live items only, with a total footer.
+    result = runner.invoke(app, ["--config", str(cfg), "items"])
+    assert result.exit_code == 0, result.output
+    assert "Alpha note" in result.stdout and "Beta note" in result.stdout
+    assert "Gone link" not in result.stdout
+    assert "1-2 of 2" in result.stdout
+
+    result = runner.invoke(app, ["--config", str(cfg), "items", "--include-deleted"])
+    assert "Gone link" in result.stdout and "[deleted]" in result.stdout
+
+    # Kind filter + text search, via the machine-readable envelope
+    # (same shape as the web UI's GET /api/items).
+    result = runner.invoke(
+        app, ["--config", str(cfg), "items", "--type", "note", "-q", "alpha", "--json"]
+    )
+    data = _json.loads(result.stdout)
+    assert data["total"] == 1
+    assert data["items"][0]["title"] == "Alpha note"
+
+    # Pagination: page size 1 still reports the full total and hints the next page.
+    result = runner.invoke(app, ["--config", str(cfg), "items", "-n", "1"])
+    assert "1-1 of 2" in result.stdout and "--offset 1" in result.stdout
+
+
+def test_items_detail_and_missing_id(tmp_path):
+    import json as _json
+
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    _seed_items(tmp_path)
+
+    listing = _json.loads(
+        runner.invoke(app, ["--config", str(cfg), "items", "-q", "alpha", "--json"]).stdout
+    )
+    item_id = listing["items"][0]["id"]
+
+    result = runner.invoke(app, ["--config", str(cfg), "items", str(item_id)])
+    assert result.exit_code == 0, result.output
+    assert "Alpha note" in result.stdout
+    assert "raw:" in result.stdout  # the verbatim payload is part of the detail view
+
+    detail = _json.loads(
+        runner.invoke(app, ["--config", str(cfg), "items", str(item_id), "--json"]).stdout
+    )
+    assert detail["external_id"] == "1" and detail["raw"] == {"id": "1"}
+    assert detail["media"] == []
+
+    result = runner.invoke(app, ["--config", str(cfg), "items", "999999"])
+    assert result.exit_code == 1
+    assert "no such item" in result.output
+
+
+def test_stats_reports_counts(tmp_path):
+    import json as _json
+
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    _seed_items(tmp_path)
+
+    result = runner.invoke(app, ["--config", str(cfg), "stats"])
+    assert result.exit_code == 0, result.output
+    assert "2 live, 1 deleted (3 total)" in result.stdout
+    assert "rd" in result.stdout and "note" in result.stdout and "link" in result.stdout
+
+    data = _json.loads(runner.invoke(app, ["--config", str(cfg), "stats", "--json"]).stdout)
+    assert data["revision_count"] == 3
+    assert {(r["source"], r["kind"], r["live"]) for r in data["by_source_kind"]} == {
+        ("rd", "link", 0), ("rd", "note", 2),
+    }
+
+
 def test_verify_archive_command(tmp_path):
     cfg = tmp_path / "dbs.toml"
     runner.invoke(app, ["--config", str(cfg), "init"])
