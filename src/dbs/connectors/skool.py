@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from collections import Counter, deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +54,7 @@ from typing import Any, Iterator
 from pydantic import BaseModel, ConfigDict, Field
 
 from ._tiptap import _md_link_text, tiptap_markdown
+from ._util import run_with_watchdog
 
 from ..core import (
     AuthCapture,
@@ -269,6 +271,17 @@ class SkoolConfig(BaseModel):
         default=False,
         description="Forward yt-dlp's full diagnostic chain into the run log. "
                      "Noisy — enable only while debugging a stubborn video.",
+    )
+    # Stall watchdog for the yt-dlp call itself (yt-dlp's Python API has no
+    # call-level timeout, so a hung download would otherwise block the whole
+    # scheduled run forever). Measures time WITHOUT progress — a download
+    # hook resets the clock — so a big-but-healthy video is never cut off.
+    # Mirrors skool-downloader's 180s VIDEO_STALL_TIMEOUT_MS.
+    video_stall_timeout: int = Field(
+        default=180, ge=0,
+        description="Abandon a video download after this many seconds without "
+                     "progress; the video is retried on a later run. 0 = no "
+                     "watchdog.",
     )
     # Write a markdown note of each lesson page (url2obs-convention frontmatter,
     # body converted from Skool's editor JSON, links to the downloaded media)
@@ -1156,9 +1169,30 @@ class SkoolConnector(Connector):
             extractor_args, js_runtimes or "none (nodejs-wheel not installed/found)",
         )
         opts["logger"] = _YtdlpLogger(ctx.logger, cfg.video_debug)
-        try:
+        # Stall watchdog: yt-dlp's Python API has no call-level timeout, so a
+        # wedged download (fragment loop, hung JS-challenge subprocess) would
+        # otherwise block the run forever. Download + postprocessor hooks feed
+        # the heartbeat, so only genuine no-progress time counts; on timeout
+        # the call is abandoned and classified "failed" (retried next run).
+        last_activity = [time.monotonic()]
+
+        def _beat(_info: dict[str, Any]) -> None:
+            last_activity[0] = time.monotonic()
+
+        opts["progress_hooks"] = [_beat]
+        opts["postprocessor_hooks"] = [_beat]
+
+        def _do_download() -> None:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
+
+        try:
+            run_with_watchdog(
+                _do_download,
+                timeout=float(cfg.video_stall_timeout),
+                heartbeat=lambda: last_activity[0],
+                description=f"skool video download {dest.name}",
+            )
         except Exception as exc:  # noqa: BLE001 - includes DownloadError; best-effort
             kind = _classify_video_error(exc)
             if kind == "unavailable":

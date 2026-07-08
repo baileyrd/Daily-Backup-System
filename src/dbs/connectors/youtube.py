@@ -31,6 +31,7 @@ from typing import Any, Iterator
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ._util import WatchdogTimeout, run_with_watchdog
 from ..core import (
     AuthCapture,
     BackupItem,
@@ -60,6 +61,15 @@ class YouTubeConfig(BaseModel):
     history: bool = False  # huge and timestamp-less via this route; opt-in
     playlists: bool = True
     max_history: int = Field(default=5000, ge=1)
+    # Wall-clock cap per list extraction (yt-dlp's Python API has no
+    # call-level timeout; a hung extraction would otherwise block the whole
+    # scheduled run forever). A timed-out list is treated exactly like a
+    # failed one: flagged, and deletion detection is skipped for the run.
+    extract_timeout: int = Field(
+        default=600, ge=0,
+        description="Abandon a list extraction after this many seconds; the "
+                     "run continues with the list marked failed. 0 = no cap.",
+    )
     # Auth: either a cookies.txt path (via the secret below) or a browser name.
     cookies_file_env: str = "YOUTUBE_COOKIES_FILE"
     cookies_from_browser: str | None = None
@@ -245,7 +255,15 @@ class YouTubeConnector(Connector):
 
         ydl = self._make_ydl(cfg, cookiefile, playlist_end)
         try:
-            info = ydl.extract_info(source_url, download=False)
+            info = run_with_watchdog(
+                lambda: ydl.extract_info(source_url, download=False),
+                timeout=float(cfg.extract_timeout),
+                description=f"youtube list {label}",
+            )
+        except WatchdogTimeout as err:
+            ctx.logger.warning("youtube: %s timed out: %s", label, err)
+            yield label, {"__list_failed__": True}
+            return
         except yt_dlp.utils.DownloadError as err:  # type: ignore[attr-defined]
             ctx.logger.warning("youtube: %s not accessible: %s", label, err)
             # Truncating silently would let the reconcile sweep soft-delete
@@ -282,9 +300,16 @@ class YouTubeConnector(Connector):
 
         ydl = self._make_ydl(cfg, cookiefile, None)
         try:
-            info = ydl.extract_info(
-                "https://www.youtube.com/feed/playlists", download=False
+            info = run_with_watchdog(
+                lambda: ydl.extract_info(
+                    "https://www.youtube.com/feed/playlists", download=False
+                ),
+                timeout=float(cfg.extract_timeout),
+                description="youtube playlist discovery",
             )
+        except WatchdogTimeout as err:
+            ctx.logger.warning("youtube: playlist discovery timed out: %s", err)
+            return None
         except yt_dlp.utils.DownloadError as err:  # type: ignore[attr-defined]
             ctx.logger.warning("youtube: could not list playlists: %s", err)
             return None

@@ -53,18 +53,18 @@ transient video failure classification, wiring up the previously-dead
 `videoUnavailable` field). Two more gaps were found but deliberately NOT
 implemented yet — noted here so they aren't rediscovered from scratch:
 
-- **No stall/hang watchdog around the yt-dlp call.** The reference wraps
-  every download in a 180s wall-clock timeout (`VIDEO_STALL_TIMEOUT_MS` in
-  `downloader.ts`) that kills a hung child process via `AbortController`.
-  `_download_hls` (`src/dbs/connectors/skool.py`) calls `ydl.download()`
-  synchronously with no timeout — if yt-dlp (or a JS-runtime subprocess it
-  shells out to) hangs, the whole connector run blocks indefinitely.
-  Deferred because yt-dlp's Python API has no built-in call-level timeout;
-  a robust fix needs a worker-thread-with-timeout (Python threads can't be
-  force-killed, so "kill" would really mean "abandon and move on while it
-  keeps running in the background") — a meaningfully different mechanism
-  from the reference's subprocess-kill, worth designing deliberately rather
-  than bolting on.
+- **No stall/hang watchdog around the yt-dlp call. (SHIPPED)** Implemented
+  as the deliberately-designed worker-thread watchdog this entry called
+  for: `run_with_watchdog` (`src/dbs/connectors/_util.py`) runs the call on
+  a daemon thread and *abandons* it past the deadline (Python threads can't
+  be force-killed; the abandoned worker dies via its own socket timeouts or
+  with the process). `_download_hls` uses it as a **stall** deadline —
+  download/postprocessor hooks feed a heartbeat, so a big-but-healthy video
+  is never cut off (`video_stall_timeout`, default 180s to mirror the
+  reference's `VIDEO_STALL_TIMEOUT_MS`; 0 disables). The YouTube connector
+  wraps its list extractions with a plain wall-clock cap
+  (`extract_timeout`, default 600s); a timed-out list is flagged like a
+  failed one, so deletion detection is skipped for the run.
 - **No yt-dlp self-update mechanism.** The reference ships a `skool
   update-ytdlp` command and recommends running it weekly for unattended
   installs (its own yt-dlp binary is fetched from GitHub releases, unpinned,

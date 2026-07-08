@@ -223,6 +223,27 @@ def test_dump_list_yields_failure_sentinel_on_none_info(monkeypatch):
     assert out == [("watch-later", {"__list_failed__": True})]
 
 
+def test_dump_list_timeout_yields_failure_sentinel(monkeypatch):
+    from dbs.connectors import youtube as youtube_mod
+    from dbs.connectors._util import WatchdogTimeout
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", _fake_ytdlp_module())
+    monkeypatch.setattr(
+        YouTubeConnector, "_make_ydl", lambda self, cfg, cookiefile, end: object()
+    )
+
+    def _times_out(fn, **kwargs):
+        raise WatchdogTimeout("youtube list liked: no completion in 600s")
+
+    monkeypatch.setattr(youtube_mod, "run_with_watchdog", _times_out)
+    out = list(YouTubeConnector()._dump_list(
+        YouTubeConfig(), None, "liked", "https://x", None, _ctx()
+    ))
+    # A hung extraction is treated exactly like a failed list: flagged, so
+    # fetch() suppresses the ReconcileMarker and nothing is falsely swept.
+    assert out == [("liked", {"__list_failed__": True})]
+
+
 def test_playlist_discovery_failure_flags_partial(monkeypatch):
     monkeypatch.setitem(sys.modules, "yt_dlp", _fake_ytdlp_module())
     monkeypatch.setattr(
