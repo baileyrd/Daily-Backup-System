@@ -64,3 +64,28 @@ def test_interrupted_runs_warn(storage, tmp_path):
     checks = _by_name(_svc(storage, tmp_path).doctor())
     assert checks["runs.interrupted"].status == "warn"
     assert "resumes" in checks["runs.interrupted"].detail
+
+
+def test_stale_source_warns(storage, tmp_path):
+    from datetime import datetime, timezone
+
+    from dbs.storage.base import BatchResult
+
+    src = storage.upsert_source("s", "raindrop", "test:raindrop", "{}", 1)
+    run = storage.begin_run(src.id, "test:raindrop", "full", None)
+    storage.finish_run(run, "success", BatchResult(),
+                       items_seen=1, cursor_after=None, error=None)
+    rd = SourceConfig(name="s", type="raindrop", options={})
+
+    # Fresh clock (storage's FixedClock stamped ~2024-01-01): no staleness.
+    svc = _svc(storage, tmp_path, sources=[rd],
+               secret_store={"RAINDROP_TOKEN": "tok"})
+    svc.clock = lambda: datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+    names = {c.name for c in svc.doctor()}
+    assert "source.s.staleness" not in names
+
+    # A week later with a daily cadence: stale.
+    svc.clock = lambda: datetime(2024, 1, 8, tzinfo=timezone.utc)
+    checks = {c.name: c for c in svc.doctor()}
+    assert checks["source.s.staleness"].status == "warn"
+    assert "twice the daily cadence" in checks["source.s.staleness"].detail

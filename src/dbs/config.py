@@ -34,7 +34,7 @@ import os
 import re
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -79,6 +79,12 @@ class Config(BaseModel):
     # an explicit per-source dir (e.g. skool's downloads_dir).
     download_root: str = "downloads"
     default_overlap_seconds: int = 300
+    # Webhook POSTed on backup completion (JSON with "text"/"content" keys —
+    # Slack/Discord-compatible out of the box). A backup tool's classic
+    # failure is failing silently for months; this is the alarm. The URL may
+    # be a ${ENV} reference. notify_on: failure (default) | warning | always.
+    notify_url: str | None = None
+    notify_on: Literal["failure", "warning", "always"] = "failure"
     sources: dict[str, SourceConfig] = {}
     connectors: dict[str, ConnectorOverride] = {}
     base_dir: Path = Path(".")
@@ -167,6 +173,8 @@ def load_config(path: str | Path) -> Config:
             export_dir=dbs_section.get("export_dir", "exports"),
             download_root=dbs_section.get("download_root", "downloads"),
             default_overlap_seconds=int(dbs_section.get("default_overlap_seconds", 300)),
+            notify_url=dbs_section.get("notify_url"),
+            notify_on=dbs_section.get("notify_on", "failure"),
             sources=sources,
             connectors=connectors,
             base_dir=path.resolve().parent,

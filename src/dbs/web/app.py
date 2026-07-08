@@ -16,6 +16,7 @@ import dataclasses
 import hmac
 import json
 import os
+import re
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -961,9 +962,25 @@ def create_app(
                     "NotebookLM login required or expired — use the “NotebookLM login” "
                     "button (or run `notebooklm login` on the host), then retry."
                 ) from exc
+            report_md = researchmod.render_report(result)
+            # Persist the report — job history is in-memory, so before this a
+            # server restart silently discarded minutes of NotebookLM work.
+            report_path: str | None = None
+            try:
+                reports_dir = base_dir / "research"
+                reports_dir.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                slug = re.sub(r"[^A-Za-z0-9._-]+", "-", spec["topic"]).strip("-")[:60]
+                dest = reports_dir / f"report-{stamp}-{slug or 'topic'}.md"
+                dest.write_text(report_md, encoding="utf-8")
+                report_path = str(dest)
+                emit(f"Report saved to {dest}")
+            except OSError as exc:
+                emit(f"warning: could not save the report to disk: {exc}")
             return {
                 "topic": spec["topic"],
-                "report": researchmod.render_report(result),
+                "report": report_md,
+                "report_path": report_path,
                 "indexed": len(result.indexed_videos),
                 "total": len(result.outcomes),
                 "notebook_id": result.notebook_id,

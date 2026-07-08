@@ -304,6 +304,7 @@ def backup(
             raise typer.Exit(4)
 
         renderer.close()
+        svc.notify_results(results)  # webhook alerting (no-op unless configured)
         typer.secho("Backup results:", bold=True)
         for r in results:
             _print_run(r)

@@ -11,6 +11,10 @@ database = "dbs.sqlite3"          # SQLite file (created automatically)
 export_dir = "exports"           # default output directory for exports
 download_root = "downloads"      # each source downloads into <download_root>/<source-name>
 default_overlap_seconds = 300    # re-scan window to avoid boundary gaps
+# Webhook alerting: POSTed after each backup batch (JSON with "text"/"content"
+# keys -- Slack/Discord-compatible as-is). notify_on: failure | warning | always.
+# notify_url = "${DBS_NOTIFY_URL}"   # or the URL directly; ${ENV} refs work
+# notify_on = "failure"
 
 # --- Sources --------------------------------------------------------------
 # Each [sources.NAME] block configures one backup source. The 'type' selects a

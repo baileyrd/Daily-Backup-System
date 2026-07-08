@@ -557,6 +557,54 @@ class BackupService:
             "connector_schema_versions": connector_schema_versions,
         }
 
+    # -- notifications --------------------------------------------------------
+
+    def notify_results(self, results: list[RunResult]) -> bool:
+        """POST the batch outcome to ``[dbs] notify_url`` when ``notify_on``
+        matches. Best-effort by contract: a webhook failure is logged, never
+        raised — alerting must not break the backup. Returns True when a
+        notification was actually sent.
+
+        The JSON body carries the summary under both ``text`` (Slack) and
+        ``content`` (Discord) plus the full per-run results, so common
+        webhook receivers render it with zero configuration.
+        """
+        url = self.config.notify_url
+        if not url or not results:
+            return False
+        bad = [r for r in results if r.status in (RunStatus.FAILED, RunStatus.PARTIAL)]
+        warned = [r for r in results if r.warnings and r not in bad]
+        if self.config.notify_on == "failure" and not bad:
+            return False
+        if self.config.notify_on == "warning" and not (bad or warned):
+            return False
+
+        ok = len(results) - len(bad) - len(warned)
+        lines = [
+            f"dbs backup: {ok} ok, {len(bad)} failed/partial, "
+            f"{len(warned)} with warnings"
+        ]
+        for r in bad:
+            lines.append(f"• {r.source}: {r.status.value} — {r.error or 'no error detail'}")
+        for r in warned:
+            lines.append(f"• {r.source}: success with warnings — {'; '.join(r.warnings)}")
+        text = "\n".join(lines)
+        payload = {
+            "text": text,
+            "content": text,
+            "results": [r.to_dict() for r in results],
+        }
+        try:
+            client = self.http_factory() if self.http_factory else httpx.Client(timeout=10.0)
+            try:
+                client.post(url, json=payload).raise_for_status()
+            finally:
+                client.close()
+        except Exception as exc:  # noqa: BLE001 - alerting must never break a backup
+            logger.warning("notification webhook failed: %s", exc)
+            return False
+        return True
+
     # -- restore --------------------------------------------------------------
 
     def restore(self, path: str | Path, *, dry_run: bool = False) -> RestoreReport:
@@ -782,6 +830,27 @@ class BackupService:
                      else f"none of {', '.join(declared)} is set — the run "
                           f"will fail at auth"),
                 ))
+            # Staleness: no successful run within 2x the schedule cadence —
+            # the classic "backups have been silently failing for months".
+            source = self.storage.get_source(name)
+            if source is not None:
+                from .timeutil import parse_iso
+
+                last_ok = next(
+                    (parse_iso(r["started_at"])
+                     for r in self.storage.recent_runs(source.id, 50)
+                     if r.get("status") == "success" and r.get("started_at")),
+                    None,
+                )
+                slack = _SCHEDULE_SLACK.get(
+                    (sc.schedule or "daily").lower(), _SCHEDULE_SLACK["daily"]
+                )
+                if last_ok is not None and self.clock() - last_ok > 2 * slack:
+                    checks.append(DoctorCheck(
+                        f"source.{name}.staleness", "warn",
+                        f"last successful backup was {last_ok.isoformat()} — "
+                        f"more than twice the {sc.schedule or 'daily'} cadence ago",
+                    ))
 
         try:
             ytdlp_version = importlib.metadata.version("yt-dlp")

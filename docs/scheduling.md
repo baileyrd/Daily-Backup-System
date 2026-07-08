@@ -32,6 +32,11 @@ right tool for headless machines where nothing stays running.
 
 A wrapper can alert on non-zero, and treat `2` as a warning vs. `3` as an error.
 
+Or skip the wrapper: set `notify_url` (and optionally `notify_on =
+"failure" | "warning" | "always"`) in `[dbs]` and every backup batch —
+CLI, web UI, or the built-in scheduler — POSTs its outcome as JSON with
+`text`/`content` keys, rendering as-is in Slack and Discord webhooks.
+
 ## cron
 
 ```cron
