@@ -13,6 +13,7 @@ not in the core — :func:`create_app` raises a helpful error if they're missing
 from __future__ import annotations
 
 import dataclasses
+import hmac
 import json
 import os
 import shutil
@@ -20,8 +21,32 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# Names a request may legitimately arrive under when serving localhost-only.
+# "testserver" is Starlette's TestClient default; bare single-label names
+# don't resolve on the public internet, so allowing it doesn't reopen the
+# DNS-rebinding hole (an attacker needs a resolvable domain they control).
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "testserver"})
+
+
+def _host_is_local(host_header: str) -> bool:
+    host = (host_header or "").strip().lower()
+    if host.startswith("["):  # bracketed IPv6, e.g. [::1]:8000
+        end = host.find("]")
+        host = host[1:end] if end != -1 else host
+    elif host.count(":") == 1:  # name:port (a bare IPv6 has >1 colon)
+        host = host.split(":", 1)[0]
+    return host in _LOCAL_HOSTS
+
+
+def _origin_is_local(origin: str) -> bool:
+    try:
+        return (urlsplit(origin).hostname or "") in _LOCAL_HOSTS
+    except ValueError:
+        return False
 
 
 def _missing_deps(exc: ModuleNotFoundError) -> RuntimeError:
@@ -89,7 +114,12 @@ _FORMAT_META = {
 }
 
 
-def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
+def create_app(
+    config_path: str = "dbs.toml",
+    *,
+    allow_setup: bool = False,
+    auth_token: str | None = None,
+):
     """Build the FastAPI app bound to a config file. Raises if deps are absent.
 
     ``allow_setup`` enables the privileged setup actions (install deps, browser
@@ -97,12 +127,18 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
     callers (e.g. tests); the ``dbs serve`` CLI passes ``True`` unless
     ``--no-setup`` is given, so setup is on by default for actual end users —
     turn it off explicitly with ``--no-setup`` on a shared machine.
+
+    ``auth_token`` (``dbs serve --token``) requires a bearer token — via
+    ``Authorization: Bearer …`` or a ``?token=`` query parameter (the latter so
+    ``EventSource`` streams and download links can authenticate) — on every
+    ``/api`` call, and is mandatory for non-localhost binds.
     """
     try:
         from fastapi import Body, FastAPI, HTTPException, Query
         from fastapi.responses import (
             FileResponse,
             HTMLResponse,
+            JSONResponse,
             Response,
             StreamingResponse,
         )
@@ -147,6 +183,51 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
 
     app = FastAPI(title="Daily Backup System", version=__version__)
 
+    # -- security gate (Host / Origin / optional bearer token) ---------------
+
+    def _token_ok(request) -> bool:
+        if auth_token is None:
+            return False
+        authz = request.headers.get("authorization", "")
+        supplied = (
+            authz[7:].strip()
+            if authz.lower().startswith("bearer ")
+            else request.query_params.get("token", "")
+        )
+        return bool(supplied) and hmac.compare_digest(supplied, auth_token)
+
+    @app.middleware("http")
+    async def _security_gate(request, call_next):
+        # DNS-rebinding defense: a rebound hostname reaches this server with
+        # the attacker's domain in Host. Without a token configured, only
+        # loopback names are recognized; with one, the token is the gate.
+        if auth_token is None and not _host_is_local(request.headers.get("host", "")):
+            return JSONResponse(
+                {"detail": "unrecognized Host header (DNS-rebinding defense) — "
+                           "serve with --token to use a non-local hostname"},
+                status_code=400,
+            )
+        # CSRF defense: browsers always send Origin on cross-origin non-GET
+        # requests; same-origin/local tools either omit it or send a local one.
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not _token_ok(request):
+            origin = request.headers.get("origin")
+            if origin and not _origin_is_local(origin):
+                return JSONResponse(
+                    {"detail": "cross-origin requests are not allowed"},
+                    status_code=403,
+                )
+        # Opt-in bearer token: required on every /api call once configured
+        # (the static SPA itself stays reachable so it can pick the token up).
+        if (
+            auth_token is not None
+            and request.url.path.startswith("/api")
+            and not _token_ok(request)
+        ):
+            return JSONResponse(
+                {"detail": "missing or invalid token"}, status_code=401
+            )
+        return await call_next(request)
+
     # -- metadata -----------------------------------------------------------
 
     @app.get("/api/meta")
@@ -157,6 +238,7 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
             "config_path": str(config_path),
             "formats": sorted(EXPORTERS),
             "setup_enabled": allow_setup,
+            "auth_required": auth_token is not None,
         }
 
     # -- read views ---------------------------------------------------------
@@ -409,6 +491,12 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
         """Remove a secret from the .env file (does not touch the process env)."""
         svc = open_service()
         try:
+            # Same allow-list as POST — the two must stay symmetric.
+            if name not in _allowed_secret_names(svc):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{name!r} is not a declared secret of any installed connector",
+                )
             env_path = svc.config.base_dir / ".env"
             removed = envfile.unset_var(env_path, name)
             return {"name": name, "removed": removed}

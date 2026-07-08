@@ -546,8 +546,25 @@ def serve(
              "On by default for local use; pass --no-setup to disable. These shell "
              "out / open a browser on the host.",
     ),
+    token: Optional[str] = typer.Option(
+        None, "--token",
+        help="Require this bearer token on every API call (open the UI once at "
+             "/?token=... and it stores it locally). Mandatory when binding to "
+             "a non-localhost address.",
+    ),
 ) -> None:
     """Launch the web management UI (requires the [web] extra)."""
+    is_local = host in ("127.0.0.1", "localhost", "::1", "")
+    if not is_local and not token:
+        # The API can read every backup and write secrets; off-localhost it
+        # must not be reachable unauthenticated. This used to be a warning.
+        typer.secho(
+            f"Refusing to bind to {host} without --token: the API is otherwise "
+            f"unauthenticated (it can read your backups and write secrets).\n"
+            f"Bind to 127.0.0.1 (the default), or pass --token <secret>.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(4)
     try:
         import uvicorn
 
@@ -562,16 +579,21 @@ def serve(
 
     # The app factory reads this config path on every request, so it always
     # reflects the latest on-disk config (e.g. sources added via the UI).
-    app_instance = create_app(_state["config"], allow_setup=allow_setup)
+    app_instance = create_app(_state["config"], allow_setup=allow_setup, auth_token=token)
     typer.secho(f"Serving Daily Backup System UI at http://{host}:{port}", fg=typer.colors.GREEN)
     typer.echo(f"  (config: {_state['config']})  —  press Ctrl+C to stop")
-    is_local = host in ("127.0.0.1", "localhost", "::1", "")
+    if token:
+        typer.echo(
+            f"  token auth ON — open http://{host}:{port}/?token=<your token> "
+            f"once; the UI stores it locally"
+        )
     if allow_setup and not is_local:
-        # Setup actions shell out / open a browser; exposing them off-localhost is
-        # a real risk. Loudly warn (but don't block — the user asked for this host).
+        # Reachable-network setup actions are still worth a shout even with
+        # the token gate: anyone who obtains the token can trigger installs
+        # and browser logins on this host.
         typer.secho(
             f"  WARNING: setup actions are ENABLED and bound to {host} (not localhost).\n"
-            "  Anyone who can reach this port could trigger installs/logins. "
+            "  Anyone with the token can trigger installs/logins on this host. "
             "Use --no-setup to disable.",
             fg=typer.colors.RED, bold=True,
         )

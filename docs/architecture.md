@@ -44,7 +44,11 @@ for the improvement roadmap see [ROADMAP.md](ROADMAP.md).
   the UI go through `dbs.web.envfile` into `.env` (never the config),
   restricted to names a connector declares as a secret, and are never read
   back — the secrets API reports only set/unset status. It binds to localhost
-  and is unauthenticated by design (local, single-user use). Optional
+  by default (local, single-user use) behind a small security gate: non-local
+  `Host` headers are rejected (DNS-rebinding defense), cross-origin
+  state-changing requests are blocked (CSRF defense), and a non-localhost
+  bind requires `dbs serve --token`, which gates every `/api` call on a
+  bearer token (header or `?token=` for `EventSource`/downloads). Optional
   **setup actions** (`dbs.web.setup`) can install a connector's declared
   `pip_requirements` and run a connector's declared interactive **auth
   capture** as background jobs; the executed commands are derived from
