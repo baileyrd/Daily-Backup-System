@@ -273,3 +273,30 @@ def test_maintain_command_vacuum_and_snapshot(tmp_path):
     assert result.exit_code == 0
     data = _json.loads(result.stdout)
     assert data["optimized"] is True and data["vacuumed"] is False
+
+
+def test_restore_command_ndjson(tmp_path):
+    import json as _json
+
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    bundle = tmp_path / "backup.ndjson"
+    bundle.write_text(_json.dumps({
+        "source": "rd", "type": "raindrop", "external_id": "1",
+        "item_kind": "link", "title": "First", "url": "https://a",
+        "body": None, "tags": [], "created_at": "2024-01-01T00:00:00Z",
+        "updated_at": "2024-01-01T00:00:00Z", "content_hash": "h1",
+        "deleted": False, "raw": {"_id": 1},
+    }) + "\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["--config", str(cfg), "restore", str(bundle), "--json"])
+    assert result.exit_code == 0, result.stdout
+    data = _json.loads(result.stdout)
+    assert data["created"] == 1 and data["sources"] == ["rd"]
+
+    # A second restore is a no-op; a bad bundle exits 4 with a clear message.
+    result = runner.invoke(app, ["--config", str(cfg), "restore", str(bundle), "--json"])
+    assert _json.loads(result.stdout)["unchanged"] == 1
+    result = runner.invoke(app, ["--config", str(cfg), "restore", str(tmp_path / "nope.zip")])
+    assert result.exit_code == 4
+    assert "no such file" in result.stdout

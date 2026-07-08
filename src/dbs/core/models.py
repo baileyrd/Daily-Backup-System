@@ -352,6 +352,38 @@ class MaintenanceReport:
         }
 
 
+@dataclass(slots=True)
+class RestoreReport:
+    """Result of replaying an export back into the database. Plain data."""
+
+    path: str
+    dry_run: bool
+    sources: list[str]
+    fetched: int = 0
+    created: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    deleted: int = 0
+    revisions_skipped: int = 0
+    media_skipped: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "dry_run": self.dry_run,
+            "sources": list(self.sources),
+            "fetched": self.fetched,
+            "created": self.created,
+            "updated": self.updated,
+            "unchanged": self.unchanged,
+            "deleted": self.deleted,
+            "revisions_skipped": self.revisions_skipped,
+            "media_skipped": self.media_skipped,
+            "warnings": list(self.warnings),
+        }
+
+
 __all__ = [
     "utcnow",
     "MediaRef",
@@ -371,6 +403,7 @@ __all__ = [
     "VerifyIssue",
     "VerifyReport",
     "MaintenanceReport",
+    "RestoreReport",
     "Capabilities",
     "ItemKind",
 ]
