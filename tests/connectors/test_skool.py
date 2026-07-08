@@ -1349,6 +1349,91 @@ def test_download_hls_returns_unavailable_for_permanently_gone_videos(tmp_path, 
     assert not dest.exists()
 
 
+def test_download_hls_stall_watchdog_returns_failed(tmp_path, monkeypatch, caplog):
+    # A wedged yt-dlp call (fragment loop, hung JS-challenge subprocess) is
+    # abandoned by the stall watchdog and classified "failed" — transient,
+    # retried on a later run — instead of blocking the whole backup forever.
+    import yt_dlp
+
+    from dbs.connectors import skool as skool_mod
+    from dbs.connectors._util import WatchdogTimeout
+
+    class _NeverCalled:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def download(self, urls):  # pragma: no cover - watchdog fires first
+            raise AssertionError("watchdog should have abandoned the call")
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _NeverCalled)
+
+    def _times_out(fn, **kwargs):
+        raise WatchdogTimeout("skool video download video.mp4: no progress in 180s")
+
+    monkeypatch.setattr(skool_mod, "run_with_watchdog", _times_out)
+    conn = SkoolConnector()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path), video_cookies_file_env=None)
+    dest = tmp_path / "video.mp4"
+    with caplog.at_level("WARNING", logger="test"):
+        status = conn._download_hls("https://youtu.be/x", dest, cfg, _ctx(cfg), external=True)
+    assert status == "failed"  # transient — retried, never marked permanently gone
+    assert any("no progress" in r.message for r in caplog.records)
+
+
+def test_download_hls_wires_stall_watchdog_with_progress_heartbeat(tmp_path, monkeypatch):
+    # The real download runs under the watchdog with the configured stall
+    # timeout, and both download and postprocessor hooks feed the heartbeat.
+    import yt_dlp
+
+    from dbs.connectors import skool as skool_mod
+
+    captured: dict = {}
+
+    class _OkYDL:
+        def __init__(self, opts):
+            captured["opts"] = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def download(self, urls):
+            dest = Path(captured["opts"]["outtmpl"])
+            dest.write_bytes(b"video-bytes")
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _OkYDL)
+
+    def _record_watchdog(fn, *, timeout, description, heartbeat=None):
+        captured["timeout"] = timeout
+        captured["heartbeat"] = heartbeat
+        return fn()
+
+    monkeypatch.setattr(skool_mod, "run_with_watchdog", _record_watchdog)
+    conn = SkoolConnector()
+    cfg = SkoolConfig(
+        downloads_dir=str(tmp_path), video_cookies_file_env=None,
+        video_stall_timeout=42,
+    )
+    dest = tmp_path / "video.mp4"
+    assert conn._download_hls("https://youtu.be/x", dest, cfg, _ctx(cfg), external=True) == "ok"
+    assert captured["timeout"] == 42.0
+    assert captured["heartbeat"] is not None
+    opts = captured["opts"]
+    assert opts["progress_hooks"] and opts["postprocessor_hooks"]
+    # The hooks advance the heartbeat the watchdog reads.
+    before = captured["heartbeat"]()
+    opts["progress_hooks"][0]({"status": "downloading"})
+    assert captured["heartbeat"]() >= before
+
+
 def _video_lesson(**kw):
     lesson = {"lessonId": "l1", "title": "Lesson 1", "moduleTitle": "Module 1"}
     lesson.update(kw)
