@@ -26,7 +26,7 @@ Smaller fixes that didn't make the twenty are collected in the appendix.
 | 15 | Concurrent `backup_all` | could | L |
 | 16 | Query & index tuning for scale — **shipped** | could | M |
 | 17 | Full-text search (FTS5) — **shipped** | could | M |
-| 18 | Make the dormant contract surface real | should | M |
+| 18 | Make the dormant contract surface real — **shipped** | should | M |
 | 19 | New connectors + shared browser helper | could | M–L each |
 | 20 | CI/tooling maturity (lint, types, coverage) — **mostly shipped** | should | S–M |
 
@@ -236,7 +236,7 @@ sources it mirrors.
 
 ## E. Platform & ecosystem
 
-### 18. Make the dormant contract surface real — [should], M
+### 18. Make the dormant contract surface real — [should], M — SHIPPED (--limit engine-enforced, overlap implemented, enumerate_ids removed, tunables in [dbs]; (major,minor) versioning + *_env redesign deferred — both change the plugin contract and deserve their own decision)
 
 Several promises in the contract have no implementation behind them; each is
 a trap for connector authors. Decide implement-or-remove for each:

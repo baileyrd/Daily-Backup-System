@@ -137,6 +137,19 @@ class Engine:
             connector.open(ctx)
             for event in connector.fetch(ctx):
                 if isinstance(event, BackupItem):
+                    if ctx.limit is not None and items_seen >= ctx.limit:
+                        # Engine-enforced item cap (backup --limit): a smoke
+                        # test / first-run bound that works for EVERY
+                        # connector, none of which need to know about it. A
+                        # truncated run must never sweep — see below.
+                        warning = (
+                            f"stopped after {items_seen} item(s) "
+                            f"(--limit {ctx.limit}); deletion detection skipped"
+                        )
+                        warnings.append(warning)
+                        ctx.logger.warning("%s: %s", ctx.source_name, warning)
+                        reconcile_live = None
+                        break
                     items_seen += 1
                     buffer.append(self._prepare(event, caps, volatile, valid_kinds))
                     if len(buffer) >= self.batch_max:

@@ -269,6 +269,11 @@ def backup(
     force_full: bool = typer.Option(False, "--force-full", help="Full refetch, ignore cursor."),
     reconcile: bool = typer.Option(False, "--reconcile", help="Force a reconcile (edits + deletions)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show the chosen mode without running."),
+    limit: Optional[int] = typer.Option(
+        None, "--limit", min=1,
+        help="Stop each source after N items (smoke tests / first-run bound). "
+             "A limited run never runs deletion detection.",
+    ),
     progress: Optional[bool] = typer.Option(
         None, "--progress/--no-progress",
         help="Show a live progress status line (default: auto — on for a TTY).",
@@ -280,14 +285,14 @@ def backup(
     renderer = _ProgressRenderer(enabled=show_progress)
     try:
         if all_sources:
-            results = svc.backup_all(only_due=only_due, on_progress=renderer)
+            results = svc.backup_all(only_due=only_due, limit=limit, on_progress=renderer)
         elif source:
             try:
                 results = [
                     svc.backup_source(
                         source, force_full=force_full,
                         force_reconcile=reconcile, dry_run=dry_run,
-                        on_progress=renderer,
+                        limit=limit, on_progress=renderer,
                     )
                 ]
             except SourceLockedError as exc:  # subclass of BackupRunError — must come first
