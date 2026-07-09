@@ -115,9 +115,13 @@ const LOADERS = {};
 function switchTab(tab) {
   // "Add source" lives under Sources in the nav.
   const navTab = tab === "add" ? "sources" : tab;
-  $$(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.tab === navTab));
+  // Source sub-links all share data-tab="source" — match on the source name too.
+  $$(".nav-item").forEach((b) => b.classList.toggle("active",
+    b.dataset.tab === navTab && (navTab !== "source" || b.dataset.source === SOURCE_PAGE.name)));
   $$(".tab").forEach((s) => s.classList.toggle("hidden", s.id !== "tab-" + tab));
-  $("#crumb").textContent = TAB_TITLES[tab] || tab;
+  $("#crumb").textContent = tab === "source"
+    ? `Library / ${SOURCE_PAGE.name}`
+    : (TAB_TITLES[tab] || tab);
   if (LOADERS[tab]) LOADERS[tab]();
 }
 $$(".nav-item").forEach((btn) => {
@@ -346,6 +350,7 @@ async function loadDashboard() {
   } catch (e) { toast(e.message, "err"); return; }
 
   updateHealthChip(rows);
+  updateNavSources(rows);
   $("#nav-source-count").textContent = rows.length || "";
 
   const totals = metrics.by_source_kind.reduce(
@@ -415,6 +420,7 @@ async function loadSources() {
   } catch (e) { toast(e.message, "err"); return; }
   CONNECTOR_BY_TYPE = Object.fromEntries(conns.map((c) => [c.type, c]));
   updateHealthChip(rows);
+  updateNavSources(rows);
   $("#nav-source-count").textContent = rows.length || "";
 
   list.innerHTML = "";
@@ -500,6 +506,7 @@ async function loadBrowseChips() {
   let rows;
   try { rows = await api("/api/status"); } catch (_) { return; }
   SOURCE_NAMES = rows.map((r) => r.name);
+  updateNavSources(rows);
   box.innerHTML = "";
   BROWSE_SOURCES.forEach((name) => {
     if (!rows.some((r) => r.name === name)) BROWSE_SOURCES.delete(name);
@@ -676,13 +683,7 @@ async function loadBrowseGrouped() {
     head.append(el("span", { className: "aux mono", textContent: `${num(data.total)} items` }));
     if (data.total > data.items.length) {
       const all = el("button", { className: "btn ghost small", textContent: "View all →" });
-      all.addEventListener("click", () => {
-        BROWSE_SOURCES.clear();
-        BROWSE_SOURCES.add(name);
-        browseOffset = 0;
-        loadBrowseChips();
-        loadBrowse();
-      });
+      all.addEventListener("click", () => openSourcePage(name));
       head.append(all);
     }
     box.append(el("section", { className: "lib-section" }, head, cardGrid(data.items)));
@@ -825,6 +826,164 @@ async function openItemDrawer(id) {
 }
 $("#item-drawer-close").addEventListener("click", closeDrawer);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+
+// --- source pages (Library sub-pages, one per source) ------------------------
+// Each configured source gets its own page — all of its metadata (status,
+// config, per-kind counts, recent runs) plus a paginated card view of its
+// items. Reached via the dynamic sub-links rendered under Library in the nav.
+
+const SOURCE_PAGE = { name: null, offset: 0 };
+const SRC_LIMIT = 50;
+
+function updateNavSources(rows) {
+  const box = $("#nav-lib-sub");
+  box.innerHTML = "";
+  const onSourceTab = !$("#tab-source").classList.contains("hidden");
+  rows.forEach((s) => {
+    const btn = el("button", {
+      className: "nav-item sub" + (onSourceTab && SOURCE_PAGE.name === s.name ? " active" : ""),
+      dataset: { tab: "source", source: s.name },
+    });
+    btn.append(el("span", { className: "sub-name", textContent: s.name }));
+    if (s.live_items) btn.append(el("span", { className: "count", textContent: num(s.live_items) }));
+    btn.addEventListener("click", () => openSourcePage(s.name));
+    box.append(btn);
+  });
+}
+
+function openSourcePage(name) {
+  if (SOURCE_PAGE.name !== name) {
+    SOURCE_PAGE.name = name;
+    SOURCE_PAGE.offset = 0;
+    $("#src-q").value = "";
+    const del = $("#src-deleted");
+    del.classList.remove("on");
+    del.setAttribute("aria-pressed", "false");
+  }
+  switchTab("source");
+}
+
+async function loadSourcePage() {
+  const name = SOURCE_PAGE.name;
+  if (!name) { switchTab("browse"); return; }
+  let status, metrics, sources, runs;
+  try {
+    [status, metrics, sources, runs] = await Promise.all([
+      api("/api/status?source=" + encodeURIComponent(name)),
+      api("/api/metrics"),
+      api("/api/sources"),
+      api(`/api/history?source=${encodeURIComponent(name)}&limit=8`),
+    ]);
+  } catch (e) { toast(e.message, "err"); return; }
+  const s = status[0] || {};
+  const cfg = sources.find((r) => r.name === name) || {};
+
+  $("#src-title").textContent = name;
+  $("#src-desc").textContent = `${s.type || "?"} source` + (s.enabled ? "" : " · disabled");
+
+  const run = $("#src-run");
+  run.disabled = !s.enabled;
+  if (s.enabled) delete run.dataset.srcDisabled; else run.dataset.srcDisabled = "1";
+  if (s.requires_vpn) run.dataset.vpn = "1"; else delete run.dataset.vpn;
+  refreshVpn([s]);
+
+  const tiles = $("#src-tiles");
+  tiles.innerHTML = "";
+  tiles.append(
+    tile("Live items", num(s.live_items ?? 0), s.deleted_items ? `${num(s.deleted_items)} deleted` : "", "flat"),
+    tile("Runs", num(s.run_count ?? 0), s.last_mode ? `last mode: ${s.last_mode}` : "", "flat"),
+    tile("Last run", s.last_run_at ? fmtWhen(s.last_run_at) : "never",
+      s.last_run_status || "run a backup to get started",
+      s.last_run_status === "success" ? "up" : s.last_run_status ? "warn" : "flat"),
+  );
+
+  const kv = $("#src-kv");
+  kv.innerHTML = "";
+  const pair = (k, v) => { if (v != null && v !== "") kv.append(el("dt", { textContent: k }), el("dd", { textContent: v })); };
+  pair("Connector", s.type);
+  pair("Enabled", s.enabled ? "yes" : "no");
+  pair("Schedule", cfg.schedule);
+  pair("VPN", s.requires_vpn ? "runs through the VPN tunnel" : null);
+  pair("Total items", num(s.total_items ?? 0));
+  pair("Deleted", num(s.deleted_items ?? 0));
+  pair("Watermark", s.watermark);
+  if (s.has_interrupted_runs) pair("Note", "has interrupted runs");
+
+  // Per-kind breakdown for just this source.
+  const kindsBox = $("#src-kinds");
+  kindsBox.innerHTML = "";
+  const kinds = metrics.by_source_kind.filter((r) => r.source === name);
+  if (kinds.length) {
+    const tbody = el("tbody");
+    kinds.forEach((r) => tbody.append(el("tr", {},
+      el("td", {}, el("span", { className: "badge neutral", textContent: r.kind })),
+      el("td", { className: "mono num", textContent: num(r.live) }),
+      el("td", { className: "mono num", textContent: num(r.deleted) }),
+    )));
+    kindsBox.append(el("div", { className: "card table-wrap" },
+      el("table", {},
+        el("thead", {}, el("tr", {},
+          el("th", { textContent: "Kind" }),
+          el("th", { className: "num", textContent: "Live" }),
+          el("th", { className: "num", textContent: "Deleted" }))),
+        tbody,
+      )));
+  }
+
+  const feed = $("#src-feed");
+  feed.innerHTML = "";
+  if (!runs.length) feed.append(el("div", { className: "empty-row", textContent: "No runs yet." }));
+  else runs.forEach((r) => feed.append(feedItem(r)));
+
+  loadSourceItems();
+}
+LOADERS.source = loadSourcePage;
+
+function srcParams() {
+  const qs = new URLSearchParams();
+  qs.append("source", SOURCE_PAGE.name);
+  const q = $("#src-q").value.trim();
+  if (q) qs.set("q", q);
+  if ($("#src-deleted").classList.contains("on")) qs.set("include_deleted", "true");
+  qs.set("limit", SRC_LIMIT);
+  qs.set("offset", SOURCE_PAGE.offset);
+  return qs;
+}
+
+async function loadSourceItems() {
+  const box = $("#src-cards");
+  box.innerHTML = "";
+  let data;
+  try { data = await api("/api/items?" + srcParams()); }
+  catch (e) { toast(e.message, "err"); return; }
+  if (!data.items.length) {
+    box.append(el("div", { className: "empty-row", textContent: "No items match these filters." }));
+  } else {
+    box.append(cardGrid(data.items));
+  }
+  $("#src-count").textContent = data.total
+    ? `${data.offset + 1}–${Math.min(data.offset + data.items.length, data.total)} of ${num(data.total)}`
+    : "0 results";
+  $("#src-prev").disabled = data.offset <= 0;
+  $("#src-next").disabled = data.offset + data.items.length >= data.total;
+}
+
+$("#src-refresh").addEventListener("click", loadSourcePage);
+$("#src-run").addEventListener("click", () => startBackup({ source: SOURCE_PAGE.name }));
+$("#src-filters").addEventListener("submit", (e) => { e.preventDefault(); SOURCE_PAGE.offset = 0; loadSourceItems(); });
+$("#src-deleted").addEventListener("click", (e) => {
+  const chip = e.currentTarget;
+  chip.classList.toggle("on");
+  chip.setAttribute("aria-pressed", chip.classList.contains("on") ? "true" : "false");
+  SOURCE_PAGE.offset = 0;
+  loadSourceItems();
+});
+$("#src-prev").addEventListener("click", () => { SOURCE_PAGE.offset = Math.max(0, SOURCE_PAGE.offset - SRC_LIMIT); loadSourceItems(); });
+$("#src-next").addEventListener("click", () => { SOURCE_PAGE.offset += SRC_LIMIT; loadSourceItems(); });
+$("#src-export").addEventListener("click", () => {
+  $("#export-source").value = SOURCE_PAGE.name;
+  switchTab("export");
+});
 
 // --- connectors ------------------------------------------------------------
 

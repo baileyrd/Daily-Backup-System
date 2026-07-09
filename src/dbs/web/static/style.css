@@ -185,6 +185,19 @@ nav#tabs { display: flex; flex-direction: column; gap: 4px; }
 .nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .nav-item.active svg { opacity: 1; }
 .nav-item .count { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+
+/* Library sub-links — one per configured source, rendered dynamically. */
+.nav-sub { display: flex; flex-direction: column; gap: 2px; }
+.nav-sub:not(:empty) { margin: 2px 0 4px; }
+.nav-item.sub {
+  padding: 5px 10px 5px 34px;
+  font-size: 12.5px;
+}
+.nav-item.sub .sub-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .sidebar-foot {
   margin-top: auto;
   padding: 14px 10px 0;
