@@ -201,6 +201,7 @@ class RedditConnector(Connector):
         requires_auth=True,
         supports_rate_limit_backoff=False,
         paginated=True,
+        concurrency="serial",  # drives a real Playwright browser
     )
     # The capture timestamp churns every run; strip it before hashing so an
     # otherwise-unchanged saved item never spawns a spurious revision.

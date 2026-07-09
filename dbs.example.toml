@@ -6,6 +6,9 @@ database = "dbs.sqlite3"          # SQLite file (created automatically)
 export_dir = "exports"           # default output directory for exports
 download_root = "downloads"      # each source downloads into <download_root>/<source-name>
 default_overlap_seconds = 300    # re-scan window to avoid boundary gaps
+# parallel = 1                   # back up N sources at once with --all (CLI
+#                                # --parallel overrides; browser-heavy
+#                                # connectors never overlap each other)
 
 # --- Sources --------------------------------------------------------------
 # Each [sources.NAME] block configures one backup source. The 'type' selects a

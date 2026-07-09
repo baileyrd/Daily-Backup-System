@@ -45,7 +45,10 @@ CLI, web UI, or the built-in scheduler — POSTs its outcome as JSON with
 ```
 
 Use `backup --all --only-due` if you run more frequently but want at most one run
-per source per day.
+per source per day. With many sources, add `--parallel N` (or set `parallel = N`
+under `[dbs]`, which the web scheduler honors too) to back up several sources at
+once; browser/downloader-heavy connectors (reddit, skool, youtube) still run
+one at a time among themselves.
 
 ## systemd (user) timer
 

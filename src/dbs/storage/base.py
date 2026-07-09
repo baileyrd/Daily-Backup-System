@@ -95,6 +95,15 @@ class Storage(ABC):
     def transaction(self) -> "AbstractContextManager[None]":
         """A unit of work: commit on success, roll back on exception."""
 
+    def spawn(self) -> "Storage | None":
+        """A new, independent connection to the same underlying database, for
+        use by a worker thread (``backup --all --parallel N``). The caller owns
+        the returned storage and must :meth:`close` it. ``None`` means this
+        backend cannot provide one (e.g. an in-memory database) and the caller
+        must fall back to sequential execution on the original connection.
+        """
+        return None
+
     # -- sources ------------------------------------------------------------
 
     @abstractmethod
