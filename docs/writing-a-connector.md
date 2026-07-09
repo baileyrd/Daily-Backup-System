@@ -105,6 +105,7 @@ reconcile.
 | `produces_media` | `BackupItem.media` is persisted to the `media` table. |
 | `requires_auth` | Must declare at least one `secret_keys`. |
 | `supports_rate_limit_backoff` | The managed HTTP client pre-throttles + honors `Retry-After`. |
+| `concurrency` | `"parallel"` (default) may run alongside other sources under `backup --all --parallel N`; declare `"serial"` if the connector is resource-heavy (drives a real browser, bulk downloads) so at most one serial-class source runs at a time. |
 
 Contradictory combinations are rejected at registration (`assert_coherent`).
 

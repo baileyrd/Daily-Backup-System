@@ -96,6 +96,11 @@ class Config(BaseModel):
     http_rate_limit_per_min: int = 120
     batch_max: int = 500
     sweep_safety_fraction: float = 0.5
+    # Worker pool size for `backup --all` (the CLI flag --parallel overrides).
+    # 1 = strictly sequential (the default). Connectors that declare
+    # concurrency="serial" (browser/downloader-heavy) never overlap each other
+    # regardless of this setting.
+    parallel: int = 1
     sources: dict[str, SourceConfig] = {}
     connectors: dict[str, ConnectorOverride] = {}
     base_dir: Path = Path(".")
@@ -191,6 +196,7 @@ def load_config(path: str | Path) -> Config:
             http_rate_limit_per_min=int(dbs_section.get("http_rate_limit_per_min", 120)),
             batch_max=int(dbs_section.get("batch_max", 500)),
             sweep_safety_fraction=float(dbs_section.get("sweep_safety_fraction", 0.5)),
+            parallel=int(dbs_section.get("parallel", 1)),
             sources=sources,
             connectors=connectors,
             base_dir=path.resolve().parent,

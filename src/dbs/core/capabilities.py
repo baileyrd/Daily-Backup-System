@@ -92,6 +92,12 @@ class Capabilities:
         The connector/HTTP layer honors rate-limit backoff (429/Retry-After).
     paginated:
         The source is paginated.
+    concurrency:
+        How this connector behaves when ``backup --all --parallel N`` runs
+        several sources at once. ``"parallel"`` (default) — safe to run
+        alongside any other source. ``"serial"`` — resource-heavy (drives a
+        real browser or a bulk downloader); at most one serial-class source
+        runs at a time, though parallel-class sources may still run alongside.
     """
 
     supports_incremental: bool = False
@@ -105,6 +111,7 @@ class Capabilities:
     requires_auth: bool = True
     supports_rate_limit_backoff: bool = False
     paginated: bool = True
+    concurrency: str = "parallel"
 
     def assert_coherent(self) -> None:
         """Raise :class:`ValueError` on internally contradictory flag combinations."""
@@ -114,6 +121,10 @@ class Capabilities:
             )
         if self.media_inline and not self.produces_media:
             raise ValueError("media_inline=True requires produces_media=True")
+        if self.concurrency not in ("parallel", "serial"):
+            raise ValueError(
+                f"concurrency must be 'parallel' or 'serial', not {self.concurrency!r}"
+            )
 
 
 __all__ = ["Capabilities", "ItemKind", "AuthCapture"]

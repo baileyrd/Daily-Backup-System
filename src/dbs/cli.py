@@ -283,6 +283,12 @@ def backup(
         help="Stop each source after N items (smoke tests / first-run bound). "
              "A limited run never runs deletion detection.",
     ),
+    parallel: Optional[int] = typer.Option(
+        None, "--parallel", min=1,
+        help="With --all: back up to N sources at once (default: the "
+             "'parallel' config key, i.e. 1). Browser/downloader-heavy "
+             "connectors never overlap each other.",
+    ),
     progress: Optional[bool] = typer.Option(
         None, "--progress/--no-progress",
         help="Show a live progress status line (default: auto — on for a TTY).",
@@ -294,7 +300,10 @@ def backup(
     renderer = _ProgressRenderer(enabled=show_progress)
     try:
         if all_sources:
-            results = svc.backup_all(only_due=only_due, limit=limit, on_progress=renderer)
+            results = svc.backup_all(
+                only_due=only_due, limit=limit, parallel=parallel,
+                on_progress=renderer,
+            )
         elif source:
             try:
                 results = [

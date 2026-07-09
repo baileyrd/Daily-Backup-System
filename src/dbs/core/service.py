@@ -12,6 +12,8 @@ import json
 import logging
 import os
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterator, Mapping
@@ -149,8 +151,13 @@ class BackupService:
         dry_run: bool = False,
         limit: int | None = None,
         on_progress: ProgressCallback | None = None,
+        _reap: bool = True,
     ) -> RunResult:
-        self.storage.reap_interrupted_runs()
+        # Crash recovery: flip stale 'running' runs to 'interrupted'. backup_all
+        # reaps ONCE up front and passes _reap=False, because with parallel
+        # workers a sibling's genuinely-running run must never be reaped.
+        if _reap:
+            self.storage.reap_interrupted_runs()
         sc = self.config.sources.get(name)
         if sc is None:
             raise BackupRunError(f"No such source: {name!r}")
@@ -249,8 +256,12 @@ class BackupService:
         only_due: bool = False,
         continue_on_error: bool = True,
         limit: int | None = None,
+        parallel: int | None = None,
         on_progress: ProgressCallback | None = None,
     ) -> list[RunResult]:
+        # Reap once, up front, while no run of ours is live yet — a per-source
+        # reap inside a parallel batch would flip siblings' running runs.
+        self.storage.reap_interrupted_runs()
         # Resolve the work-list up front so progress can report a determinate
         # cross-source position ("source 2 of 5").
         due = [
@@ -259,12 +270,28 @@ class BackupService:
             if sc.enabled and (not only_due or self._is_due(name, sc))
         ]
         total = len(due)
-        results: list[RunResult] = []
+        workers = max(1, parallel if parallel is not None else self.config.parallel)
+        if workers > 1 and total > 1:
+            results = self._backup_all_parallel(
+                due,
+                workers=min(workers, total),
+                continue_on_error=continue_on_error,
+                limit=limit,
+                on_progress=on_progress,
+            )
+            if results is not None:
+                return results
+            logger.warning(
+                "storage cannot serve parallel workers; backing up sequentially"
+            )
+        results = []
         for index, (name, sc) in enumerate(due, start=1):
             framed = self._frame_progress(on_progress, index, total)
             try:
                 results.append(
-                    self.backup_source(name, limit=limit, on_progress=framed)
+                    self.backup_source(
+                        name, limit=limit, on_progress=framed, _reap=False
+                    )
                 )
             except Exception as exc:  # isolation: one source must not abort others
                 if not continue_on_error:
@@ -277,6 +304,123 @@ class BackupService:
                     )
                 )
         return results
+
+    def _backup_all_parallel(
+        self,
+        due: list[tuple[str, SourceConfig]],
+        *,
+        workers: int,
+        continue_on_error: bool,
+        limit: int | None,
+        on_progress: ProgressCallback | None,
+    ) -> list[RunResult] | None:
+        """Run the work-list on a bounded thread pool (``--parallel N``).
+
+        Coordination model: each worker thread gets its own storage connection
+        (``Storage.spawn``) wrapped in its own service/engine, so no SQLite
+        connection ever crosses a thread; WAL + ``busy_timeout`` arbitrate the
+        single writer slot, and the existing per-source lock table prevents
+        double-running a source. Connectors declaring ``concurrency="serial"``
+        (browser/downloader-heavy) additionally share one gate, so at most one
+        of them runs at a time. Returns ``None`` when the storage backend
+        cannot provide worker connections (in-memory DB) — the caller falls
+        back to the sequential path.
+        """
+        probe = self.storage.spawn()
+        if probe is None:
+            return None
+        probe.close()
+
+        # Progress callbacks now arrive from several threads; renderers were
+        # written for one. Serialize delivery so they never interleave.
+        progress_lock = threading.Lock()
+        safe_progress: ProgressCallback | None = None
+        if on_progress is not None:
+            def _locked(ev) -> None:
+                with progress_lock:
+                    on_progress(ev)
+            safe_progress = _locked
+
+        serial_gate = threading.Lock()  # at most one "serial" connector at a time
+        local = threading.local()
+        spawned: list[BackupService] = []
+        spawned_lock = threading.Lock()
+
+        def service_for_thread() -> "BackupService":
+            svc = getattr(local, "svc", None)
+            if svc is None:
+                storage = self.storage.spawn()
+                if storage is None:  # probed above; defensive for odd backends
+                    raise BackupRunError("storage cannot serve a parallel worker")
+                svc = BackupService(
+                    storage, self.config, self.registry,
+                    secret_store=self.secret_store,
+                    http_factory=self.http_factory, clock=self.clock,
+                )
+                local.svc = svc
+                with spawned_lock:
+                    spawned.append(svc)
+            return svc
+
+        total = len(due)
+
+        def run_one(index: int, name: str, sc: SourceConfig) -> RunResult:
+            framed = self._frame_progress(safe_progress, index, total)
+            svc = service_for_thread()
+            serial = False
+            try:
+                rc = self.registry.get(sc.type)
+                serial = rc.cls.capabilities.concurrency == "serial"
+            except Exception:  # noqa: BLE001 - unknown type fails in backup_source
+                pass
+            if serial:
+                with serial_gate:
+                    return svc.backup_source(
+                        name, limit=limit, on_progress=framed, _reap=False
+                    )
+            return svc.backup_source(
+                name, limit=limit, on_progress=framed, _reap=False
+            )
+
+        results: list[RunResult | None] = [None] * total
+        first_exc: Exception | None = None
+        try:
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="dbs-backup"
+            ) as pool:
+                futures = {
+                    pool.submit(run_one, i, name, sc): (i, name)
+                    for i, (name, sc) in enumerate(due, start=1)
+                }
+                for fut in as_completed(futures):
+                    index, name = futures[fut]
+                    if fut.cancelled():  # continue_on_error=False cancels the tail
+                        continue
+                    try:
+                        results[index - 1] = fut.result()
+                    except Exception as exc:  # isolation, as in the sequential path
+                        if not continue_on_error:
+                            if first_exc is None:
+                                first_exc = exc
+                                for other in futures:
+                                    other.cancel()  # in-flight sources still finish
+                            continue
+                        now = self.clock()
+                        results[index - 1] = RunResult(
+                            source=name, status=RunStatus.FAILED, started_at=now,
+                            finished_at=now, error=f"{type(exc).__name__}: {exc}",
+                        )
+        finally:
+            for svc in spawned:
+                try:
+                    svc.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        if first_exc is not None:
+            raise first_exc
+        # Results keep the config order; cancelled slots exist only on the
+        # continue_on_error=False path, which raises above.
+        return [r for r in results if r is not None]
 
     @staticmethod
     def _frame_progress(

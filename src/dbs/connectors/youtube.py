@@ -113,6 +113,7 @@ class YouTubeConnector(Connector):
         requires_auth=True,
         supports_rate_limit_backoff=False,
         paginated=True,
+        concurrency="serial",  # yt-dlp extraction/downloads are resource-heavy
     )
     # The capture timestamp churns every run, and view_count drifts constantly;
     # strip both before hashing so a video never spawns revisions for them alone.

@@ -20,6 +20,9 @@ default_overlap_seconds = 300    # re-scan window to avoid boundary gaps
 # http_rate_limit_per_min = 120  # pre-emptive throttle for rate-limited APIs
 # batch_max = 500                # engine buffer size between commits
 # sweep_safety_fraction = 0.5    # refuse reconcile sweeps deleting more than this
+# parallel = 1                   # back up N sources at once with --all (CLI
+#                                # --parallel overrides; browser-heavy
+#                                # connectors never overlap each other)
 
 # --- Sources --------------------------------------------------------------
 # Each [sources.NAME] block configures one backup source. The 'type' selects a

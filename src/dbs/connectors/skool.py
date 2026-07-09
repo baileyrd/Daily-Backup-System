@@ -359,6 +359,7 @@ class SkoolConnector(Connector):
         requires_auth=True,
         supports_rate_limit_backoff=False,
         paginated=False,
+        concurrency="serial",  # drives a real Playwright browser + HLS downloads
     )
     # Skool rewrites `updatedAt` constantly; strip it before hashing to avoid
     # revision spam on otherwise-unchanged lessons.

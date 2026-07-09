@@ -23,7 +23,7 @@ Smaller fixes that didn't make the twenty are collected in the appendix.
 | 12 | Web auth + CSRF/Origin/Host protection — **shipped** | should | M |
 | 13 | Notifications + persistent job history — **shipped** | could | M |
 | 14 | `dbs doctor` + dependency self-update — **shipped** | could | M |
-| 15 | Concurrent `backup_all` | could | L |
+| 15 | Concurrent `backup_all` — **shipped** | could | L |
 | 16 | Query & index tuning for scale — **shipped** | could | M |
 | 17 | Full-text search (FTS5) — **shipped** | could | M |
 | 18 | Make the dormant contract surface real — **shipped** | should | M |
@@ -202,7 +202,7 @@ the manual monthly step the README currently prescribes.
 
 ## D. Performance & scale
 
-### 15. Concurrent `backup_all` — [could], L
+### 15. Concurrent `backup_all` — [could], L — SHIPPED (`--parallel N` / `[dbs] parallel`; connection-per-worker with WAL + BEGIN IMMEDIATE; browser/downloader-heavy connectors serialized via `Capabilities.concurrency="serial"`)
 
 Sources back up strictly sequentially, so wall-clock time is the sum of all
 sources even though each is mostly blocked on remote I/O. A bounded worker

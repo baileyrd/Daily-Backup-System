@@ -53,8 +53,10 @@ class SqliteStorage(Storage):
         # Per-run media-archiving toggles, set by upsert_items().
         self._store_media = False
         self._max_media_bytes = 0
-        is_memory = self.path in (":memory:", "") or self.path.startswith("file::memory:")
-        if not is_memory:
+        self._is_memory = (
+            self.path in (":memory:", "") or self.path.startswith("file::memory:")
+        )
+        if not self._is_memory:
             Path(self.path).expanduser().parent.mkdir(parents=True, exist_ok=True)
             self.path = str(Path(self.path).expanduser())
         self.conn = sqlite3.connect(self.path, isolation_level=None)
@@ -66,7 +68,10 @@ class SqliteStorage(Storage):
         cur.execute("PRAGMA journal_mode=WAL")
         cur.execute("PRAGMA synchronous=NORMAL")
         cur.execute("PRAGMA foreign_keys=ON")
-        cur.execute("PRAGMA busy_timeout=5000")
+        # Generous: under `backup --all --parallel N` several worker connections
+        # share the single WAL writer slot, and one worker's flush (which can
+        # include media blobs) must not time out another's commit.
+        cur.execute("PRAGMA busy_timeout=30000")
 
     def _now(self) -> str:
         return iso_z(self._clock())
@@ -135,11 +140,30 @@ class SqliteStorage(Storage):
         except sqlite3.Error:
             pass
 
+    def spawn(self) -> "SqliteStorage | None":
+        """A fresh connection to the same database file for a worker thread.
+
+        WAL mode makes multi-connection use safe (single writer, arbitrated by
+        ``busy_timeout``); an in-memory database is connection-private, so
+        there is nothing to spawn and callers must run sequentially.
+        """
+        if self._is_memory:
+            return None
+        worker = SqliteStorage(self.path, clock=self._clock)
+        # The schema already exists (the primary connection migrated); FTS
+        # sync happens via in-database triggers, so no ensure-step is needed.
+        worker._fts_enabled = self._fts_enabled
+        return worker
+
     @contextmanager
     def transaction(self) -> Iterator[None]:
         outermost = self._depth == 0
         if outermost:
-            self.conn.execute("BEGIN")
+            # IMMEDIATE: take the write lock up front. Every transaction()
+            # here writes, and a deferred read->write upgrade under concurrent
+            # writers fails instantly with SQLITE_BUSY instead of honoring
+            # busy_timeout — IMMEDIATE makes contending workers queue politely.
+            self.conn.execute("BEGIN IMMEDIATE")
         self._depth += 1
         try:
             yield
