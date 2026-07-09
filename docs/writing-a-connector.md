@@ -105,6 +105,7 @@ reconcile.
 | `produces_media` | `BackupItem.media` is persisted to the `media` table. |
 | `requires_auth` | Must declare at least one `secret_keys`. |
 | `supports_rate_limit_backoff` | The managed HTTP client pre-throttles + honors `Retry-After`. |
+| `concurrency` | `"parallel"` (default) may run alongside other sources under `backup --all --parallel N`; declare `"serial"` if the connector is resource-heavy (drives a real browser, bulk downloads) so at most one serial-class source runs at a time. |
 
 Contradictory combinations are rejected at registration (`assert_coherent`).
 
@@ -175,7 +176,14 @@ when you wrap a browser/SDK source rather than a REST endpoint:
   `TransientFetchError` / `ConnectorConfigError` instead of returning a short
   list. A raise aborts *before* the soft-delete sweep, so a flaky run can't
   falsely delete your data (the engine also refuses to sweep >50% of live items,
-  but don't rely on that guard).
+  but don't rely on that guard). If you'd rather *continue* past a localized
+  failure (one list/course of many) and keep the rest of the run's progress,
+  you must then treat the run as a **partial enumeration**: skip yielding the
+  `ReconcileMarker` entirely for that run, so the items the failed portion
+  contains can't be falsely swept. The built-in `skool` (a
+  `"_partial_enumeration"` record from its walk) and `youtube` (a
+  `__list_failed__` record per failed list) connectors both do exactly this —
+  deletion detection simply resumes on the next fully-enumerated run.
 - **Keep the acquisition step overridable** (e.g. a `_acquire(self, ctx)` method
   that yields raw records) and put the pure `raw → BackupItem` mapping next to
   it. Tests then subclass and override `_acquire` to inject fabricated records,

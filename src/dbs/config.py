@@ -39,7 +39,7 @@ import os
 import re
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -47,7 +47,7 @@ from .core.errors import ConfigError
 
 _RESERVED_SOURCE_KEYS = {
     "type", "enabled", "schedule", "reconcile_every_runs", "store_media", "max_media_mb",
-    "requires_vpn",
+    "requires_vpn", "keep_revisions",
 }
 _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _SECRET_KEY_HINTS = ("token", "secret", "password", "api_key", "apikey", "access_key")
@@ -68,6 +68,10 @@ class SourceConfig(BaseModel):
     # Back up this source only through the configured VPN wrapper (see
     # Config.vpn_exec) — for connectors whose upstream IP-blocks the host.
     requires_vpn: bool = False
+    # Prune each item's revision history to the newest N during `dbs
+    # maintain` (0 = keep everything). The current row and the newest
+    # revision are always kept; items are never touched.
+    keep_revisions: int = 0
     options: dict[str, Any] = {}
 
 
@@ -93,6 +97,23 @@ class Config(BaseModel):
     # Used only for sources with requires_vpn = true.
     vpn_exec: str = "sudo vpn-netns exec"
     vpn_status: str = "sudo vpn-netns status"
+    # Webhook POSTed on backup completion (JSON with "text"/"content" keys —
+    # Slack/Discord-compatible out of the box). A backup tool's classic
+    # failure is failing silently for months; this is the alarm. The URL may
+    # be a ${ENV} reference. notify_on: failure (default) | warning | always.
+    notify_url: str | None = None
+    notify_on: Literal["failure", "warning", "always"] = "failure"
+    # Engine/HTTP tunables. The defaults suit typical APIs; raise/lower for
+    # slow servers or aggressive rate limits without touching code.
+    http_timeout: float = 30.0
+    http_rate_limit_per_min: int = 120
+    batch_max: int = 500
+    sweep_safety_fraction: float = 0.5
+    # Worker pool size for `backup --all` (the CLI flag --parallel overrides).
+    # 1 = strictly sequential (the default). Connectors that declare
+    # concurrency="serial" (browser/downloader-heavy) never overlap each other
+    # regardless of this setting.
+    parallel: int = 1
     sources: dict[str, SourceConfig] = {}
     connectors: dict[str, ConnectorOverride] = {}
     base_dir: Path = Path(".")
@@ -168,6 +189,7 @@ def load_config(path: str | Path) -> Config:
             store_media=bool(body.get("store_media", False)),
             max_media_mb=int(body.get("max_media_mb", 0) or 0),
             requires_vpn=bool(body.get("requires_vpn", False)),
+            keep_revisions=int(body.get("keep_revisions", 0) or 0),
             options=options,
         )
 
@@ -184,6 +206,13 @@ def load_config(path: str | Path) -> Config:
             default_overlap_seconds=int(dbs_section.get("default_overlap_seconds", 300)),
             vpn_exec=str(dbs_section.get("vpn_exec", "sudo vpn-netns exec")),
             vpn_status=str(dbs_section.get("vpn_status", "sudo vpn-netns status")),
+            notify_url=dbs_section.get("notify_url"),
+            notify_on=dbs_section.get("notify_on", "failure"),
+            http_timeout=float(dbs_section.get("http_timeout", 30.0)),
+            http_rate_limit_per_min=int(dbs_section.get("http_rate_limit_per_min", 120)),
+            batch_max=int(dbs_section.get("batch_max", 500)),
+            sweep_safety_fraction=float(dbs_section.get("sweep_safety_fraction", 0.5)),
+            parallel=int(dbs_section.get("parallel", 1)),
             sources=sources,
             connectors=connectors,
             base_dir=path.resolve().parent,

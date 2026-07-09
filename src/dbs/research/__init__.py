@@ -9,13 +9,6 @@ questions, and render a markdown research report. See
 
 from __future__ import annotations
 
-# Runtime deps of the `[research]` extra, declared here (like a connector's
-# `pip_requirements`) so the web UI's install button derives its pip command
-# from trusted package metadata, never from client input. Keep in sync with
-# pyproject.toml's `research` extra.
-PIP_REQUIREMENTS = ("yt-dlp[default]>=2026.1.29", "nodejs-wheel>=22", "notebooklm-py[browser]")
-RUNTIME_IMPORTS = ("yt_dlp", "notebooklm")
-
 from .models import (
     AnalysisAnswer,
     IndexOutcome,
@@ -27,6 +20,13 @@ from .models import (
 from .from_backup import videos_from_rows
 from .pipeline import run_pipeline, run_pipeline_for_videos
 from .report import render_report
+
+# Runtime deps of the `[research]` extra, declared here (like a connector's
+# `pip_requirements`) so the web UI's install button derives its pip command
+# from trusted package metadata, never from client input. Keep in sync with
+# pyproject.toml's `research` extra.
+PIP_REQUIREMENTS = ("yt-dlp[default]>=2026.1.29", "nodejs-wheel>=22", "notebooklm-py[browser]")
+RUNTIME_IMPORTS = ("yt_dlp", "notebooklm")
 
 __all__ = [
     "PIP_REQUIREMENTS",

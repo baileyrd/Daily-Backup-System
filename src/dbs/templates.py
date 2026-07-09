@@ -11,6 +11,18 @@ database = "dbs.sqlite3"          # SQLite file (created automatically)
 export_dir = "exports"           # default output directory for exports
 download_root = "downloads"      # each source downloads into <download_root>/<source-name>
 default_overlap_seconds = 300    # re-scan window to avoid boundary gaps
+# Webhook alerting: POSTed after each backup batch (JSON with "text"/"content"
+# keys -- Slack/Discord-compatible as-is). notify_on: failure | warning | always.
+# notify_url = "${DBS_NOTIFY_URL}"   # or the URL directly; ${ENV} refs work
+# notify_on = "failure"
+# Engine/HTTP tunables (defaults shown; uncomment to change):
+# http_timeout = 30.0            # seconds per HTTP request (managed client)
+# http_rate_limit_per_min = 120  # pre-emptive throttle for rate-limited APIs
+# batch_max = 500                # engine buffer size between commits
+# sweep_safety_fraction = 0.5    # refuse reconcile sweeps deleting more than this
+# parallel = 1                   # back up N sources at once with --all (CLI
+#                                # --parallel overrides; browser-heavy
+#                                # connectors never overlap each other)
 
 # --- Sources --------------------------------------------------------------
 # Each [sources.NAME] block configures one backup source. The 'type' selects a
@@ -21,7 +33,9 @@ default_overlap_seconds = 300    # re-scan window to avoid boundary gaps
 type = "raindrop"
 enabled = true
 schedule = "daily"               # advisory; honored by `backup --only-due`
-reconcile_every_runs = 7         # every Nth run does a full reconcile (edits + deletions)
+reconcile_every_runs = 7
+# keep_revisions = 50           # prune each item's history to the newest N
+#                               # during `dbs maintain` (0/omitted = keep all)         # every Nth run does a full reconcile (edits + deletions)
 collection_id = 0                # 0 = all collections except Trash
 nested = true
 page_size = 50                   # Raindrop max is 50

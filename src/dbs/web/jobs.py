@@ -38,6 +38,23 @@ from ..core.models import ProgressEvent, RunResult
 _SENTINEL = object()
 
 
+_MAX_BUFFERED_EVENTS = 1000
+
+
+def _evict_finished(by_id: dict, *, keep: int) -> None:
+    """Drop all but the newest ``keep`` finished jobs (caller holds the lock).
+
+    Job-manager history is ephemeral UI state — the durable record of every
+    run is the sync_runs table (and, for research, the report file on disk).
+    """
+    finished = sorted(
+        (j for j in by_id.values() if j.status != "running"),
+        key=lambda j: j.id,
+    )
+    for job in finished[:-keep] if keep else finished:
+        del by_id[job.id]
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -126,6 +143,7 @@ class JobManager:
             job = BackupJob(id=self._counter, spec=dict(spec))
             self._current = job
             self._by_id[job.id] = job
+            _evict_finished(self._by_id, keep=20)
         thread = threading.Thread(target=self._run, args=(job,), daemon=True)
         thread.start()
         return job
@@ -151,6 +169,11 @@ class JobManager:
     def _broadcast_raw(self, job: BackupJob, payload: dict[str, Any]) -> None:
         with self._lock:
             job.events.append(payload)
+            # Bound memory: a long-lived server must not hold every item event
+            # of every run forever. Late stream subscribers replay only this
+            # tail; results/status live separately and are never trimmed.
+            if len(job.events) > _MAX_BUFFERED_EVENTS:
+                del job.events[: len(job.events) - _MAX_BUFFERED_EVENTS]
             for q in job._queues:
                 q.put(payload)
 
@@ -210,6 +233,11 @@ class JobManager:
                         on_progress=on_progress,
                     )
                 ]
+            try:
+                # webhook alerting (no-op unless configured)
+                svc.notify_results([r for r in results if isinstance(r, RunResult)])
+            except Exception:  # noqa: BLE001 - alerting must never fail the job
+                pass
             return [r.to_dict() if isinstance(r, RunResult) else r for r in results]
         finally:
             try:

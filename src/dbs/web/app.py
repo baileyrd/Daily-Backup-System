@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -27,8 +28,32 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# Names a request may legitimately arrive under when serving localhost-only.
+# "testserver" is Starlette's TestClient default; bare single-label names
+# don't resolve on the public internet, so allowing it doesn't reopen the
+# DNS-rebinding hole (an attacker needs a resolvable domain they control).
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "testserver"})
+
+
+def _host_is_local(host_header: str) -> bool:
+    host = (host_header or "").strip().lower()
+    if host.startswith("["):  # bracketed IPv6, e.g. [::1]:8000
+        end = host.find("]")
+        host = host[1:end] if end != -1 else host
+    elif host.count(":") == 1:  # name:port (a bare IPv6 has >1 colon)
+        host = host.split(":", 1)[0]
+    return host in _LOCAL_HOSTS
+
+
+def _origin_is_local(origin: str) -> bool:
+    try:
+        return (urlsplit(origin).hostname or "") in _LOCAL_HOSTS
+    except ValueError:
+        return False
 
 
 def _missing_deps(exc: ModuleNotFoundError) -> RuntimeError:
@@ -215,7 +240,13 @@ _FORMAT_META = {
 }
 
 
-def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
+def create_app(
+    config_path: str = "dbs.toml",
+    *,
+    allow_setup: bool = False,
+    auth_token: str | None = None,
+    schedule_seconds: float | None = None,
+):
     """Build the FastAPI app bound to a config file. Raises if deps are absent.
 
     ``allow_setup`` enables the privileged setup actions (install deps, browser
@@ -223,12 +254,24 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
     callers (e.g. tests); the ``dbs serve`` CLI passes ``True`` unless
     ``--no-setup`` is given, so setup is on by default for actual end users —
     turn it off explicitly with ``--no-setup`` on a shared machine.
+
+    ``auth_token`` (``dbs serve --token``) requires a bearer token — via
+    ``Authorization: Bearer …`` or a ``?token=`` query parameter (the latter so
+    ``EventSource`` streams and download links can authenticate) — on every
+    ``/api`` call, and is mandatory for non-localhost binds.
+
+    ``schedule_seconds`` (``dbs serve --schedule``) starts a background loop
+    that checks every N seconds whether any enabled source's ``schedule``
+    cadence has elapsed and, if so, starts a normal ``only_due`` backup job —
+    the same job the Backup button creates, so it shows up in the UI's live
+    progress and history like any other run.
     """
     try:
         from fastapi import Body, FastAPI, HTTPException, Query
         from fastapi.responses import (
             FileResponse,
             HTMLResponse,
+            JSONResponse,
             Response,
             StreamingResponse,
         )
@@ -276,7 +319,92 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
     # setup tasks — a separate manager so one doesn't block the other.
     research_mgr = SetupManager()
 
-    app = FastAPI(title="Daily Backup System", version=__version__)
+    # -- built-in scheduler (opt-in: dbs serve --schedule) --------------------
+
+    scheduler_lifespan = None
+    if schedule_seconds:
+        import logging
+        import threading
+        from contextlib import asynccontextmanager
+
+        sched_log = logging.getLogger("dbs.web.scheduler")
+        stop_scheduler = threading.Event()
+
+        def _scheduler_loop() -> None:
+            # wait() first so startup never fires an instant surprise backup;
+            # the first check happens one interval in.
+            while not stop_scheduler.wait(schedule_seconds):
+                try:
+                    svc = BackupService.from_config_file(config_path)
+                    try:
+                        due = svc.due_sources()
+                    finally:
+                        svc.close()
+                    if not due:
+                        continue
+                    sched_log.info("scheduler: %s due — starting backup", ", ".join(due))
+                    jobs.start({"all": True, "only_due": True})
+                except JobAlreadyRunning:
+                    pass  # a run is in flight; the next tick re-checks
+                except Exception:  # noqa: BLE001 - the loop must survive anything
+                    sched_log.warning("scheduler tick failed", exc_info=True)
+
+        @asynccontextmanager
+        async def scheduler_lifespan(app):  # noqa: ARG001 - FastAPI's contract
+            threading.Thread(
+                target=_scheduler_loop, daemon=True, name="dbs-scheduler"
+            ).start()
+            yield
+            stop_scheduler.set()
+
+    app = FastAPI(
+        title="Daily Backup System", version=__version__, lifespan=scheduler_lifespan
+    )
+
+    # -- security gate (Host / Origin / optional bearer token) ---------------
+
+    def _token_ok(request) -> bool:
+        if auth_token is None:
+            return False
+        authz = request.headers.get("authorization", "")
+        supplied = (
+            authz[7:].strip()
+            if authz.lower().startswith("bearer ")
+            else request.query_params.get("token", "")
+        )
+        return bool(supplied) and hmac.compare_digest(supplied, auth_token)
+
+    @app.middleware("http")
+    async def _security_gate(request, call_next):
+        # DNS-rebinding defense: a rebound hostname reaches this server with
+        # the attacker's domain in Host. Without a token configured, only
+        # loopback names are recognized; with one, the token is the gate.
+        if auth_token is None and not _host_is_local(request.headers.get("host", "")):
+            return JSONResponse(
+                {"detail": "unrecognized Host header (DNS-rebinding defense) — "
+                           "serve with --token to use a non-local hostname"},
+                status_code=400,
+            )
+        # CSRF defense: browsers always send Origin on cross-origin non-GET
+        # requests; same-origin/local tools either omit it or send a local one.
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not _token_ok(request):
+            origin = request.headers.get("origin")
+            if origin and not _origin_is_local(origin):
+                return JSONResponse(
+                    {"detail": "cross-origin requests are not allowed"},
+                    status_code=403,
+                )
+        # Opt-in bearer token: required on every /api call once configured
+        # (the static SPA itself stays reachable so it can pick the token up).
+        if (
+            auth_token is not None
+            and request.url.path.startswith("/api")
+            and not _token_ok(request)
+        ):
+            return JSONResponse(
+                {"detail": "missing or invalid token"}, status_code=401
+            )
+        return await call_next(request)
 
     # -- metadata -----------------------------------------------------------
 
@@ -288,6 +416,8 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
             "config_path": str(config_path),
             "formats": sorted(EXPORTERS),
             "setup_enabled": allow_setup,
+            "auth_required": auth_token is not None,
+            "scheduler_enabled": bool(schedule_seconds),
         }
 
     # -- read views ---------------------------------------------------------
@@ -614,6 +744,12 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
         """Remove a secret from the .env file (does not touch the process env)."""
         svc = open_service()
         try:
+            # Same allow-list as POST — the two must stay symmetric.
+            if name not in _allowed_secret_names(svc):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{name!r} is not a declared secret of any installed connector",
+                )
             env_path = svc.config.base_dir / ".env"
             removed = envfile.unset_var(env_path, name)
             return {"name": name, "removed": removed}
@@ -1032,9 +1168,25 @@ def create_app(config_path: str = "dbs.toml", *, allow_setup: bool = False):
                     "NotebookLM login required or expired — use the “NotebookLM login” "
                     "button (or run `notebooklm login` on the host), then retry."
                 ) from exc
+            report_md = researchmod.render_report(result)
+            # Persist the report — job history is in-memory, so before this a
+            # server restart silently discarded minutes of NotebookLM work.
+            report_path: str | None = None
+            try:
+                reports_dir = base_dir / "research"
+                reports_dir.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                slug = re.sub(r"[^A-Za-z0-9._-]+", "-", spec["topic"]).strip("-")[:60]
+                dest = reports_dir / f"report-{stamp}-{slug or 'topic'}.md"
+                dest.write_text(report_md, encoding="utf-8")
+                report_path = str(dest)
+                emit(f"Report saved to {dest}")
+            except OSError as exc:
+                emit(f"warning: could not save the report to disk: {exc}")
             return {
                 "topic": spec["topic"],
-                "report": researchmod.render_report(result),
+                "report": report_md,
+                "report_path": report_path,
                 "indexed": len(result.indexed_videos),
                 "total": len(result.outcomes),
                 "notebook_id": result.notebook_id,

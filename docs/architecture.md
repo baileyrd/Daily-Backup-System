@@ -4,7 +4,11 @@ Daily Backup System (`dbs`) is a single Python package (`src/dbs`) with a
 UI-agnostic application core, a plugin model for sources, and two thin
 renderers (a CLI and an optional local web UI) that share that core unchanged.
 This document is the system-level reference; diagrams referenced below live in
-[`docs/diagrams/`](diagrams/) as standalone SVGs.
+[`docs/diagrams/`](diagrams/) as standalone SVGs. For the evaluative deep dive
+(as-built review, strengths, tensions, risks) see
+[architecture-analysis.md](architecture-analysis.md); for the engineering
+principles the code practices see [coding-philosophy.md](coding-philosophy.md);
+for the improvement roadmap see [ROADMAP.md](ROADMAP.md).
 
 ## System overview
 
@@ -40,7 +44,11 @@ This document is the system-level reference; diagrams referenced below live in
   the UI go through `dbs.web.envfile` into `.env` (never the config),
   restricted to names a connector declares as a secret, and are never read
   back — the secrets API reports only set/unset status. It binds to localhost
-  and is unauthenticated by design (local, single-user use). Optional
+  by default (local, single-user use) behind a small security gate: non-local
+  `Host` headers are rejected (DNS-rebinding defense), cross-origin
+  state-changing requests are blocked (CSRF defense), and a non-localhost
+  bind requires `dbs serve --token`, which gates every `/api` call on a
+  bearer token (header or `?token=` for `EventSource`/downloads). Optional
   **setup actions** (`dbs.web.setup`) can install a connector's declared
   `pip_requirements` and run a connector's declared interactive **auth
   capture** as background jobs; the executed commands are derived from

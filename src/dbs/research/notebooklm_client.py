@@ -102,7 +102,7 @@ async def add_source(client: Any, notebook_id: str, url: str) -> None:
     (the whole session is unusable) and is deliberately NOT caught here — it
     propagates to the CLI boundary unchanged.
     """
-    notebooklm = _import_notebooklm()
+    _import_notebooklm()  # friendly error before the bare from-import below
     from notebooklm.exceptions import (
         SourceAddError,
         SourceProcessingError,

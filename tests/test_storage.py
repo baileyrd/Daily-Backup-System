@@ -102,6 +102,71 @@ def test_native_delete_inserts_as_deleted(storage):
     assert row["deleted"] == 1
 
 
+def test_still_deleted_item_with_changed_payload_stays_deleted(storage):
+    """Regression: a deleted item whose payload changes must not be resurrected.
+
+    A native-deletes source (e.g. Raindrop's trash poll) can re-emit a trash
+    item with a mutated payload; the update must record the change while the
+    item stays deleted, preserving the original deletion time.
+    """
+    src, run = _setup(storage)
+    storage.upsert_items(src.id, run, [_item("9", "h1", deleted=True)])
+    first = storage.conn.execute(
+        "SELECT deleted, deleted_at FROM items WHERE external_id='9'"
+    ).fetchone()
+    assert first["deleted"] == 1 and first["deleted_at"] is not None
+
+    run2 = storage.begin_run(src.id, "test:fake", "incremental", None)
+    res = storage.upsert_items(src.id, run2, [_item("9", "h2", deleted=True)])
+    assert res.updated == 1 and res.undeleted == 0
+
+    row = storage.conn.execute(
+        "SELECT deleted, deleted_at, content_hash, revision "
+        "FROM items WHERE external_id='9'"
+    ).fetchone()
+    assert row["deleted"] == 1                       # not resurrected
+    assert row["deleted_at"] == first["deleted_at"]  # original time preserved
+    assert row["content_hash"] == "h2"               # the change was recorded
+    assert row["revision"] == 2
+
+
+def test_maintain_reports_stats(storage):
+    src, run = _setup(storage)
+    storage.upsert_items(src.id, run, [_item("1", "h1")])
+    stats = storage.maintain()
+    assert stats["wal_checkpointed"] is True
+    assert stats["optimized"] is True
+    assert stats["vacuumed"] is False
+    assert stats["size_after"] > 0
+
+    stats = storage.maintain(vacuum=True)
+    assert stats["vacuumed"] is True
+
+
+def test_vacuum_into_snapshot_is_a_complete_database(storage, tmp_path):
+    src, run = _setup(storage)
+    storage.upsert_items(src.id, run, [_item("1", "h1"), _item("2", "h2")])
+    dest = tmp_path / "backups" / "snap.sqlite3"  # parent dir gets created
+    size = storage.vacuum_into(dest)
+    assert size > 0 and dest.exists()
+
+    # The snapshot is a complete, standalone database (WAL already folded in).
+    snap = SqliteStorage(dest)
+    try:
+        n = snap.conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        assert n == 2
+    finally:
+        snap.close()
+
+
+def test_vacuum_into_refuses_existing_destination(storage, tmp_path):
+    dest = tmp_path / "snap.sqlite3"
+    dest.write_bytes(b"do not clobber")
+    with pytest.raises(FileExistsError):
+        storage.vacuum_into(dest)
+    assert dest.read_bytes() == b"do not clobber"
+
+
 def test_cursor_save_load_and_watermark_monotonic(storage):
     src, run = _setup(storage)
     storage.save_cursor(src.id, Cursor({"a": 1}), "2024-01-01T00:00:00Z", run)
@@ -268,3 +333,151 @@ def test_duplicate_external_id_within_one_batch_upserts(tmp_path):
     assert rows[0]["content_hash"] == "h2"
     assert rows[0]["revision"] == 2
     storage.close()
+
+
+# --- full-text search (FTS5, with LIKE fallback) ----------------------------
+
+
+def _fts_seed(storage):
+    src, run = _setup(storage)
+    it1 = _item("1", "h1")
+    it1.title = "Quick start guide"
+    it1.body = "the brown fox jumps over the lazy dog"
+    it2 = _item("2", "h2")
+    it2.title = "Hello World"
+    it2.body = "unrelated content"
+    storage.upsert_items(src.id, run, [it1, it2])
+    return src, run
+
+
+def test_fts_matches_all_words_across_title_and_body(storage):
+    _fts_seed(storage)
+    assert storage._fts_enabled  # bundled SQLite ships FTS5
+    # "quick" is in item 1's title, "fox" in its body — LIKE's single
+    # substring scan could never match this query.
+    items, total = storage.browse_items(ExportQuery(), text="quick fox")
+    assert total == 1 and items[0]["external_id"] == "1"
+
+
+def test_fts_prefix_matches_final_token(storage):
+    _fts_seed(storage)
+    items, total = storage.browse_items(ExportQuery(), text="hell")
+    assert total == 1 and items[0]["external_id"] == "2"
+
+
+def test_fts_operator_characters_are_inert(storage):
+    _fts_seed(storage)
+    # MATCH operators in user input must not crash or change semantics.
+    for q in ('he said: "hi" AND *', "NOT fox", "title:fox"):
+        _, total = storage.browse_items(ExportQuery(), text=q)
+        assert total == 0, q
+    # ...while plain multi-word search still works.
+    _, total = storage.browse_items(ExportQuery(), text="brown dog")
+    assert total == 1
+
+
+def test_fts_index_follows_updates(storage):
+    src, run = _fts_seed(storage)
+    it = _item("1", "h1-changed")
+    it.title = "Quick start guide"
+    it.body = "now about turtles"
+    run2 = storage.begin_run(src.id, "test:fake", "incremental", None)
+    storage.upsert_items(src.id, run2, [it])
+    _, total_old = storage.browse_items(ExportQuery(), text="fox")
+    _, total_new = storage.browse_items(ExportQuery(), text="turtles")
+    assert (total_old, total_new) == (0, 1)
+
+
+def test_fts_backfills_a_pre_fts_database(storage):
+    src, run = _fts_seed(storage)
+    storage.conn.execute("DROP TRIGGER items_fts_ai")
+    storage.conn.execute("DROP TRIGGER items_fts_ad")
+    storage.conn.execute("DROP TRIGGER items_fts_au")
+    storage.conn.execute("DROP TABLE items_fts")
+    storage.migrate()  # re-running the ensure-step rebuilds and backfills
+    _, total = storage.browse_items(ExportQuery(), text="quick fox")
+    assert total == 1
+
+
+def test_like_fallback_when_fts_unavailable(storage):
+    _fts_seed(storage)
+    storage._fts_enabled = False
+    items, total = storage.browse_items(ExportQuery(), text="hello")
+    assert total == 1 and items[0]["external_id"] == "2"
+    # LIKE is a single-substring scan: the cross-field query finds nothing.
+    _, total = storage.browse_items(ExportQuery(), text="quick fox")
+    assert total == 0
+
+
+# --- sweep scale + scale indexes (migration 0004) ----------------------------
+
+
+def test_soft_delete_sweep_handles_large_live_sets(storage):
+    # >400 live ids exercises the temp-table chunking of the anti-join sweep.
+    src, run = _setup(storage)
+    items = [_item(str(i), f"h{i}") for i in range(450)]
+    storage.upsert_items(src.id, run, items)
+    run2 = storage.begin_run(src.id, "test:fake", "reconcile", None)
+    live = {str(i) for i in range(450)} - {"7", "133", "449"}
+    assert storage.soft_delete_missing(src.id, live, run2) == 3
+    _t, live_n, gone = storage.item_counts(src.id)
+    assert (live_n, gone) == (447, 3)
+    # Repeat sweeps stay correct (the temp table is cleared between calls).
+    assert storage.soft_delete_missing(src.id, live, run2) == 0
+
+
+def test_scale_indexes_exist(storage):
+    names = {r[0] for r in storage.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'"
+    )}
+    assert "idx_items_created_global" in names
+    assert "idx_media_with_data" in names
+
+
+def test_prune_revisions_keeps_newest_n_per_item(storage):
+    src, run = _setup(storage)
+    # Item "1" accumulates 4 revisions; item "2" has just one.
+    for i, h in enumerate(["h1", "h2", "h3", "h4"]):
+        r = storage.begin_run(src.id, "test:fake", "incremental", None) if i else run
+        storage.upsert_items(src.id, r, [_item("1", h)])
+    storage.upsert_items(src.id, run, [_item("2", "x1")])
+
+    deleted = storage.prune_revisions(src.id, keep=2)
+    assert deleted == 2  # revisions 1 and 2 of item "1"
+    revs = [r["revision"] for r in storage.conn.execute(
+        "SELECT rv.revision FROM item_revisions rv JOIN items i ON i.id=rv.item_id "
+        "WHERE i.external_id='1' ORDER BY rv.revision"
+    )]
+    assert revs == [3, 4]  # newest 2 kept
+    # Item "2" (fewer than keep) and the items table are untouched.
+    n2 = storage.conn.execute(
+        "SELECT COUNT(*) FROM item_revisions rv JOIN items i ON i.id=rv.item_id "
+        "WHERE i.external_id='2'"
+    ).fetchone()[0]
+    assert n2 == 1
+    row = storage.conn.execute(
+        "SELECT content_hash, revision FROM items WHERE external_id='1'"
+    ).fetchone()
+    assert row["content_hash"] == "h4" and row["revision"] == 4
+
+
+def test_prune_revisions_scopes_to_the_source(storage):
+    src, run = _setup(storage)
+    other = storage.upsert_source("s2", "fake", "test:fake", "{}", 1)
+    run2 = storage.begin_run(other.id, "test:fake", "full", None)
+    for h in ["a1", "a2", "a3"]:
+        storage.upsert_items(other.id, run2, [_item("9", h)])
+    storage.upsert_items(src.id, run, [_item("1", "h1")])
+
+    assert storage.prune_revisions(src.id, keep=1) == 0  # nothing to trim here
+    total_other = storage.conn.execute(
+        "SELECT COUNT(*) FROM item_revisions rv JOIN items i ON i.id=rv.item_id "
+        "WHERE i.source_id=?", (other.id,)
+    ).fetchone()[0]
+    assert total_other == 3  # untouched
+
+
+def test_prune_revisions_zero_keeps_everything(storage):
+    src, run = _setup(storage)
+    storage.upsert_items(src.id, run, [_item("1", "h1")])
+    assert storage.prune_revisions(src.id, keep=0) == 0

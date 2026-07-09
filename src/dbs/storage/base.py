@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Iterator
 
 from ..core.models import Cursor
@@ -94,6 +95,15 @@ class Storage(ABC):
     def transaction(self) -> "AbstractContextManager[None]":
         """A unit of work: commit on success, roll back on exception."""
 
+    def spawn(self) -> "Storage | None":
+        """A new, independent connection to the same underlying database, for
+        use by a worker thread (``backup --all --parallel N``). The caller owns
+        the returned storage and must :meth:`close` it. ``None`` means this
+        backend cannot provide one (e.g. an in-memory database) and the caller
+        must fall back to sequential execution on the original connection.
+        """
+        return None
+
     # -- sources ------------------------------------------------------------
 
     @abstractmethod
@@ -125,6 +135,7 @@ class Storage(ABC):
         items_seen: int,
         cursor_after: str | None,
         error: str | None,
+        warnings: list[str] | None = None,
     ) -> None: ...
 
     @abstractmethod
@@ -235,6 +246,34 @@ class Storage(ABC):
 
     @abstractmethod
     def integrity_check(self) -> str: ...
+
+    # Maintenance is backend-specific housekeeping; backends without any
+    # (or a future server-side backend that manages itself) can keep the
+    # no-op defaults, mirroring iter_media_blobs above.
+    def maintain(self, *, vacuum: bool = False) -> dict[str, Any]:
+        """Housekeeping pass (e.g. WAL checkpoint, planner stats, VACUUM).
+
+        Returns backend-specific stats; at minimum a ``path`` plus
+        ``wal_checkpointed`` / ``optimized`` / ``vacuumed`` booleans and
+        ``size_before`` / ``size_after`` byte counts (0 when unknown).
+        """
+        return {
+            "path": "", "wal_checkpointed": False, "optimized": False,
+            "vacuumed": False, "size_before": 0, "size_after": 0,
+        }
+
+    def prune_revisions(self, source_id: int, keep: int) -> int:
+        """Delete all but the newest ``keep`` revisions of each of the
+        source's items (0 = keep everything). Returns rows deleted. Items
+        themselves are never touched — only their history is trimmed."""
+        return 0
+
+    def vacuum_into(self, dest: str | Path) -> int:
+        """Write a consistent single-file snapshot to ``dest`` (must not
+        exist) and return its size in bytes. The snapshot is safe to copy
+        off-machine — unlike copying a live WAL-mode database file, which
+        silently drops everything still in the ``-wal`` sidecar."""
+        raise NotImplementedError("this backend does not support snapshots")
 
 
 # Imported at the bottom to avoid a cycle at module import time.

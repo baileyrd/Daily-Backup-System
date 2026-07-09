@@ -15,10 +15,36 @@ const el = (tag, props = {}, ...kids) => {
   return n;
 };
 
+// --- auth token (dbs serve --token) -----------------------------------------
+// Picked up once from ?token=... (then scrubbed from the URL), stored locally,
+// attached to every api() call; URL-based consumers (EventSource, downloads)
+// carry it as a query parameter via withToken() since they can't set headers.
+
+const TOKEN_KEY = "dbs-token";
+(function pickupToken() {
+  const params = new URLSearchParams(location.search);
+  const t = params.get("token");
+  if (t) {
+    localStorage.setItem(TOKEN_KEY, t);
+    params.delete("token");
+    const qs = params.toString();
+    history.replaceState(null, "", location.pathname + (qs ? "?" + qs : ""));
+  }
+})();
+
+function withToken(path) {
+  const t = localStorage.getItem(TOKEN_KEY);
+  if (!t) return path;
+  return path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(t);
+}
+
 async function api(path, opts = {}) {
+  const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  const t = localStorage.getItem(TOKEN_KEY);
+  if (t) headers["Authorization"] = "Bearer " + t;
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
     ...opts,
+    headers,
   });
   if (!res.ok) {
     let detail = res.statusText;
@@ -126,7 +152,8 @@ async function loadMeta() {
     META = m;
     $("#meta-version").textContent = `dbs v${m.tool_version}`;
     $("#meta").textContent = `core API v${m.core_api_version}\n${m.config_path}`
-      + (m.setup_enabled ? "\nsetup enabled" : "");
+      + (m.setup_enabled ? "\nsetup enabled" : "")
+      + (m.scheduler_enabled ? "\nscheduler on" : "");
     const fmt = $("#export-format");
     fmt.innerHTML = "";
     m.formats.forEach((f) => fmt.append(el("option", { value: f, textContent: f })));
@@ -210,12 +237,15 @@ function sourceRow(s, { compact = false } = {}) {
   row.append(el("span", { className: "sname", textContent: s.name }));
   row.append(el("span", { className: "stype", textContent: s.type }));
   if (s.requires_vpn) row.append(el("span", { className: "badge info vpn-pill", textContent: "VPN" }));
+  if (s.due_now) row.append(el("span", { className: "badge warn", textContent: "due now" }));
   row.append(s.last_run_status ? badge(s.last_run_status) : badge("", s.enabled ? "no runs yet" : "disabled"));
+  const nextDue = !compact && !s.due_now && s.next_due_at
+    ? ` · due ${fmtWhen(s.next_due_at)}` : "";
   row.append(el("span", {
     className: "slast",
     textContent: compact
       ? `${fmtWhen(s.last_run_at)}`
-      : `${num(s.live_items)} items · ${num(s.run_count)} runs`,
+      : `${num(s.live_items)} items · ${num(s.run_count)} runs${nextDue}`,
   }));
 
   const ac = CONNECTOR_BY_TYPE[s.type] && CONNECTOR_BY_TYPE[s.type].auth_capture;
@@ -441,7 +471,8 @@ async function loadHistory() {
         el("td", { className: "mono num", textContent: num(r.items_created ?? 0) }),
         el("td", { className: "mono num", textContent: num(r.items_updated ?? 0) }),
         el("td", { className: "mono num", textContent: num(r.items_deleted ?? 0) }),
-        el("td", { className: "muted", textContent: r.error || "—" }),
+        el("td", { className: "muted",
+                   textContent: [r.error, ...(r.warnings || [])].filter(Boolean).join(" — ") || "—" }),
       ));
     });
   } catch (e) { toast(e.message, "err"); }
@@ -569,7 +600,7 @@ function listTag(it) {
 // derives its thumbnail from the video id.
 function thumbUrl(it) {
   const derivable = it.type === "youtube" && it.url && /[?&]v=[\w-]{11}/.test(it.url);
-  return it.thumbnail || derivable ? `/api/thumb/${it.id}` : null;
+  return it.thumbnail || derivable ? withToken(`/api/thumb/${it.id}`) : null;
 }
 
 function itemCard(it) {
@@ -780,11 +811,11 @@ async function openItemDrawer(id) {
     item.media.forEach((m) => {
       const isImage = m.has_data && (m.mime || "").startsWith("image/");
       if (isImage) {
-        mediaBox.append(el("img", { src: `/api/media/${m.id}`, alt: m.filename || "", className: "media-thumb" }));
+        mediaBox.append(el("img", { src: withToken(`/api/media/${m.id}`), alt: m.filename || "", className: "media-thumb" }));
       } else {
         const label = `${m.filename || m.kind} (${m.byte_size != null ? fmtBytes(m.byte_size) : "not stored"})`;
         mediaBox.append(m.has_data
-          ? el("a", { href: `/api/media/${m.id}`, textContent: label })
+          ? el("a", { href: withToken(`/api/media/${m.id}`), textContent: label })
           : el("span", { className: "tag", textContent: label }));
       }
     });
@@ -898,7 +929,7 @@ function streamSetup(jobId, title) {
   $("#setup-log-title").textContent = title;
   log.textContent = "";
   card.classList.remove("hidden");
-  setupES = new EventSource(`/api/setup/${jobId}/stream`);
+  setupES = new EventSource(withToken(`/api/setup/${jobId}/stream`));
   setupES.onmessage = (m) => {
     const { line } = JSON.parse(m.data);
     log.textContent += line + "\n";
@@ -1160,7 +1191,7 @@ $("#export-form").addEventListener("submit", (e) => {
   if ($("#export-deleted").checked) qs.set("include_deleted", "true");
   if ($("#export-revisions").checked) qs.set("include_revisions", "true");
   if ($("#export-noraw").checked) qs.set("no_raw", "true");
-  window.location.assign("/api/export?" + qs.toString());
+  window.location.assign(withToken("/api/export?" + qs.toString()));
 });
 
 // --- research (YouTube -> NotebookLM -> report) ------------------------------
@@ -1278,7 +1309,7 @@ function openResearchProgress(job) {
   log.textContent = "";
   panel.classList.remove("hidden");
 
-  researchES = new EventSource(`/api/research/${job.id}/stream`);
+  researchES = new EventSource(withToken(`/api/research/${job.id}/stream`));
   researchES.onmessage = (m) => {
     const { line } = JSON.parse(m.data);
     log.textContent += line + "\n";
@@ -1290,7 +1321,7 @@ function openResearchProgress(job) {
     const snap = JSON.parse(m.data);
     if (snap.status === "done" && snap.result) {
       $("#research-report").textContent = snap.result.report;
-      $("#research-download").href = `/api/research/${snap.id}/report`;
+      $("#research-download").href = withToken(`/api/research/${snap.id}/report`);
       $("#research-result").classList.remove("hidden");
       toast(`Research complete — ${snap.result.indexed}/${snap.result.total} videos indexed.`, "ok");
     } else {
@@ -1364,7 +1395,7 @@ function openProgress(job) {
   let doneCount = 0;
   let total = job.spec.all ? null : 1;
 
-  activeES = new EventSource(`/api/backup/${job.id}/stream`);
+  activeES = new EventSource(withToken(`/api/backup/${job.id}/stream`));
   activeES.onmessage = (m) => {
     const ev = JSON.parse(m.data);
     if (ev.source_total) total = ev.source_total;
@@ -1399,7 +1430,8 @@ function openProgress(job) {
 function addResult(r) {
   if (r.status === "failed") progressHadFailure = true;
   const line = `${r.source}: ${r.status} [${r.mode}] +${r.created} ~${r.updated} =${r.unchanged} ✕${r.deleted} (fetched ${r.fetched})`;
-  $("#progress-results").append(el("div", { className: "mono " + statusClass(r.status), textContent: line + (r.error ? `  — ${r.error}` : "") }));
+  const notes = [r.error, ...(r.warnings || [])].filter(Boolean);
+  $("#progress-results").append(el("div", { className: "mono " + statusClass(r.status), textContent: line + (notes.length ? `  — ${notes.join(" — ")}` : "") }));
 }
 
 let progressHideTimer = null;

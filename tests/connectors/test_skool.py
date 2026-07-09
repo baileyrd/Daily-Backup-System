@@ -10,13 +10,15 @@ exercised through fabricated blobs and a fake page (mirroring reddit's
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
 from dbs.core.engine import Engine
 from dbs.core.errors import ConnectorAuthError
-from dbs.core.models import BackupItem, Checkpoint, ReconcileMarker
+from dbs.core.models import BackupItem, ReconcileMarker
 from dbs.connectors.skool import (
     SkoolConfig,
     SkoolConnector,
@@ -28,6 +30,22 @@ from dbs.connectors.skool import (
 from conftest import make_ctx, registered
 
 SECRETS_ENV = {"SKOOL_SESSION_DIR": "/tmp/skool-session"}
+
+
+def _ytdlp(monkeypatch):
+    """The real yt_dlp when installed, else a stand-in module.
+
+    The _download_hls tests only monkeypatch ``YoutubeDL`` on the module, so
+    CI — which installs no [skool] extra — can run them too. A plain
+    ``import yt_dlp`` here kept this suite red in CI for exactly that reason.
+    """
+    try:
+        import yt_dlp
+    except ImportError:
+        yt_dlp = types.ModuleType("yt_dlp")
+        yt_dlp.YoutubeDL = None  # placeholder; every test monkeypatches it
+        monkeypatch.setitem(sys.modules, "yt_dlp", yt_dlp)
+    return yt_dlp
 
 
 def _community(slug="comm-a", name="Community A", updated="2024-01-01T00:00:00Z"):
@@ -175,6 +193,20 @@ def test_partial_enumeration_marker_suppresses_reconcile_even_unfiltered():
     assert any(isinstance(e, BackupItem) for e in events)
 
 
+def test_walk_flags_partial_when_community_classroom_fails_to_load(tmp_path):
+    # A community whose classroom page yields no __NEXT_DATA__ leaves every
+    # course and lesson it contains out of live_ids — the same gap as a failed
+    # course fetch. _walk must emit the partial-enumeration sentinel rather
+    # than skip silently, or the sweep would soft-delete the whole community.
+    class _NoData(SkoolConnector):
+        def _classroom_next_data(self, page, slug, ctx, course_slug=None):
+            return None
+
+    cfg = SkoolConfig(communities=["c1"], downloads_dir=str(tmp_path))
+    out = list(_NoData()._walk(object(), cfg, tmp_path, _ctx(cfg)))
+    assert {"_kind": "_partial_enumeration"} in out
+
+
 def test_discover_communities_raises_instead_of_silent_zero_item_backup(tmp_path):
     # A degraded session that resolves the home page but never redirects to
     # /login (so _require_login sees nothing wrong) used to just warn and
@@ -287,7 +319,7 @@ def test_parse_lessons_unwraps_course_keyed_nodes():
         {"course": {"id": "l2", "metadata": {"title": "Standalone"}}, "children": []},
     ]}}}}
     out = _parse_lessons(cd)
-    assert [(l["lessonId"], l["title"]) for l in out] == [
+    assert [(les["lessonId"], les["title"]) for les in out] == [
         ("l1", "Lesson 1"), ("l2", "Standalone"),
     ]
     assert out[0]["moduleTitle"] == "Module 1"
@@ -305,7 +337,7 @@ def test_parse_lessons_tolerates_plain_nodes():
         {"id": "l2", "metadata": {"title": "Standalone"}},
     ]}}}}
     out = _parse_lessons(cd)
-    assert [l["lessonId"] for l in out] == ["l1", "l2"]
+    assert [les["lessonId"] for les in out] == ["l1", "l2"]
     assert out[0]["moduleTitle"] == "Module 1"
 
 
@@ -987,7 +1019,7 @@ def test_fetch_rejects_undeclared_video_cookies_file_env():
 
 
 def test_download_hls_attaches_cookies_for_external_only(tmp_path, monkeypatch):
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
     from dbs.core.secrets import Secrets
 
     captured: list[dict] = []
@@ -1031,7 +1063,7 @@ def test_download_hls_cookiefile_wins_over_cookies_from_browser(tmp_path, monkey
     # captured cookie FILE works fine. Never send both to yt-dlp: the file
     # always wins when one is available, so a from_browser fallback left in
     # config can't reintroduce that failure.
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
     from dbs.core.secrets import Secrets
 
     captured: list[dict] = []
@@ -1074,7 +1106,7 @@ def test_download_hls_cookiefile_wins_over_cookies_from_browser(tmp_path, monkey
 def test_download_hls_passes_extractor_args_for_external_only(tmp_path, monkeypatch):
     # A fallback for "Sign in to confirm you're not a bot" persisting even
     # with valid cookies: an alternate emulated player_client.
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
 
     captured: list[dict] = []
 
@@ -1108,7 +1140,7 @@ def test_download_hls_wires_js_runtime_opts_for_every_download(tmp_path, monkeyp
     # The actual fix for a persistent bot-check: yt-dlp needs a JS runtime to
     # solve YouTube's challenge. Applies to every download, not just external
     # (harmless/unused for Skool's own CDN, but simplest to always pass).
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
     from dbs.connectors import skool as skool_mod
 
     captured: list[dict] = []
@@ -1153,7 +1185,7 @@ def test_download_hls_logs_cookie_and_js_runtime_state(tmp_path, monkeypatch, ca
     # line must reach the user: it's logged at INFO because the CLI now
     # configures the "dbs" logger for it (see test_cli.py) — assert it's
     # actually emitted, not just that it wouldn't crash.
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
     from dbs.connectors import skool as skool_mod
 
     class _FakeYDL:
@@ -1231,7 +1263,7 @@ def test_ytdlp_logger_forwards_warnings_always_debug_only_when_verbose():
 
 
 def test_download_hls_wires_ytdlp_logger_per_video_debug(tmp_path, monkeypatch):
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
     from dbs.connectors.skool import _YtdlpLogger
 
     captured: list[dict] = []
@@ -1311,7 +1343,7 @@ def test_classify_video_error_permanent_vs_transient():
 
 
 def test_download_hls_returns_unavailable_for_permanently_gone_videos(tmp_path, monkeypatch):
-    import yt_dlp
+    yt_dlp = _ytdlp(monkeypatch)
 
     class _FakeYDL:
         def __init__(self, opts):
@@ -1333,6 +1365,91 @@ def test_download_hls_returns_unavailable_for_permanently_gone_videos(tmp_path, 
     assert conn._download_hls("https://youtu.be/x", dest, cfg, _ctx(cfg), external=True) \
         == "unavailable"
     assert not dest.exists()
+
+
+def test_download_hls_stall_watchdog_returns_failed(tmp_path, monkeypatch, caplog):
+    # A wedged yt-dlp call (fragment loop, hung JS-challenge subprocess) is
+    # abandoned by the stall watchdog and classified "failed" — transient,
+    # retried on a later run — instead of blocking the whole backup forever.
+    yt_dlp = _ytdlp(monkeypatch)
+
+    from dbs.connectors import skool as skool_mod
+    from dbs.connectors._util import WatchdogTimeout
+
+    class _NeverCalled:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def download(self, urls):  # pragma: no cover - watchdog fires first
+            raise AssertionError("watchdog should have abandoned the call")
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _NeverCalled)
+
+    def _times_out(fn, **kwargs):
+        raise WatchdogTimeout("skool video download video.mp4: no progress in 180s")
+
+    monkeypatch.setattr(skool_mod, "run_with_watchdog", _times_out)
+    conn = SkoolConnector()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path), video_cookies_file_env=None)
+    dest = tmp_path / "video.mp4"
+    with caplog.at_level("WARNING", logger="test"):
+        status = conn._download_hls("https://youtu.be/x", dest, cfg, _ctx(cfg), external=True)
+    assert status == "failed"  # transient — retried, never marked permanently gone
+    assert any("no progress" in r.message for r in caplog.records)
+
+
+def test_download_hls_wires_stall_watchdog_with_progress_heartbeat(tmp_path, monkeypatch):
+    # The real download runs under the watchdog with the configured stall
+    # timeout, and both download and postprocessor hooks feed the heartbeat.
+    yt_dlp = _ytdlp(monkeypatch)
+
+    from dbs.connectors import skool as skool_mod
+
+    captured: dict = {}
+
+    class _OkYDL:
+        def __init__(self, opts):
+            captured["opts"] = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def download(self, urls):
+            dest = Path(captured["opts"]["outtmpl"])
+            dest.write_bytes(b"video-bytes")
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _OkYDL)
+
+    def _record_watchdog(fn, *, timeout, description, heartbeat=None):
+        captured["timeout"] = timeout
+        captured["heartbeat"] = heartbeat
+        return fn()
+
+    monkeypatch.setattr(skool_mod, "run_with_watchdog", _record_watchdog)
+    conn = SkoolConnector()
+    cfg = SkoolConfig(
+        downloads_dir=str(tmp_path), video_cookies_file_env=None,
+        video_stall_timeout=42,
+    )
+    dest = tmp_path / "video.mp4"
+    assert conn._download_hls("https://youtu.be/x", dest, cfg, _ctx(cfg), external=True) == "ok"
+    assert captured["timeout"] == 42.0
+    assert captured["heartbeat"] is not None
+    opts = captured["opts"]
+    assert opts["progress_hooks"] and opts["postprocessor_hooks"]
+    # The hooks advance the heartbeat the watchdog reads.
+    before = captured["heartbeat"]()
+    opts["progress_hooks"][0]({"status": "downloading"})
+    assert captured["heartbeat"]() >= before
 
 
 def _video_lesson(**kw):

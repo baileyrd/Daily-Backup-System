@@ -7,6 +7,9 @@ checkpointing, reconcile, and (through the engine) deletion/change-detection.
 
 from __future__ import annotations
 
+import sys
+import types
+
 from dbs.core.engine import Engine
 from dbs.core.models import BackupItem, Checkpoint, ReconcileMarker
 from dbs.core.secrets import Secrets
@@ -141,6 +144,118 @@ def test_volatile_capture_and_views_do_not_spawn_revisions(storage):
     assert r2.updated == 0
     revs = storage.conn.execute("SELECT COUNT(*) FROM item_revisions").fetchone()[0]
     assert revs == 1
+
+
+# --- partial enumeration: a failed list must never trigger the sweep -------
+
+
+def test_failed_list_suppresses_reconcile_marker():
+    conn = _connector([
+        _entry("a", "watch-later", list_end=True),
+        ("liked", {"__list_failed__": True}),
+    ])
+    events = list(conn.fetch(_ctx()))
+    assert [e for e in events if isinstance(e, ReconcileMarker)] == []
+    # The healthy list still lands, and the final checkpoint is intact.
+    items = [e for e in events if isinstance(e, BackupItem)]
+    assert [i.external_id for i in items] == ["watch-later:a"]
+    assert any(isinstance(e, Checkpoint) and e.note == "final" for e in events)
+
+
+def test_engine_skips_sweep_when_a_list_fails(storage):
+    src, r1 = _run(storage, _connector([
+        _entry("a", "watch-later", list_end=True),
+        _entry("b", "liked", list_end=True),
+    ]))
+    assert r1.created == 2
+
+    # "liked" fails to load next run (expired cookie, extractor breakage):
+    # its item must NOT be swept just because it's absent from live_ids.
+    _src, r2 = _run(storage, _connector([
+        _entry("a", "watch-later", list_end=True),
+        ("liked", {"__list_failed__": True}),
+    ]))
+    assert r2.deleted == 0
+    total, live, gone = storage.item_counts(src.id)
+    assert (total, live, gone) == (2, 2, 0)
+
+
+def _fake_ytdlp_module():
+    mod = types.ModuleType("yt_dlp")
+
+    class DownloadError(Exception):
+        pass
+
+    mod.utils = types.SimpleNamespace(DownloadError=DownloadError)
+    return mod
+
+
+def test_dump_list_yields_failure_sentinel_on_download_error(monkeypatch):
+    fake = _fake_ytdlp_module()
+    monkeypatch.setitem(sys.modules, "yt_dlp", fake)
+
+    class _Boom:
+        def extract_info(self, url, download=False):
+            raise fake.utils.DownloadError("HTTP Error 403")
+
+    monkeypatch.setattr(
+        YouTubeConnector, "_make_ydl", lambda self, cfg, cookiefile, end: _Boom()
+    )
+    out = list(YouTubeConnector()._dump_list(
+        YouTubeConfig(), None, "liked", "https://x", None, _ctx()
+    ))
+    assert out == [("liked", {"__list_failed__": True})]
+
+
+def test_dump_list_yields_failure_sentinel_on_none_info(monkeypatch):
+    monkeypatch.setitem(sys.modules, "yt_dlp", _fake_ytdlp_module())
+
+    class _NoneYdl:
+        def extract_info(self, url, download=False):
+            return None  # ignoreerrors swallowed the top-level failure
+
+    monkeypatch.setattr(
+        YouTubeConnector, "_make_ydl", lambda self, cfg, cookiefile, end: _NoneYdl()
+    )
+    out = list(YouTubeConnector()._dump_list(
+        YouTubeConfig(), None, "watch-later", "https://x", None, _ctx()
+    ))
+    assert out == [("watch-later", {"__list_failed__": True})]
+
+
+def test_dump_list_timeout_yields_failure_sentinel(monkeypatch):
+    from dbs.connectors import youtube as youtube_mod
+    from dbs.connectors._util import WatchdogTimeout
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", _fake_ytdlp_module())
+    monkeypatch.setattr(
+        YouTubeConnector, "_make_ydl", lambda self, cfg, cookiefile, end: object()
+    )
+
+    def _times_out(fn, **kwargs):
+        raise WatchdogTimeout("youtube list liked: no completion in 600s")
+
+    monkeypatch.setattr(youtube_mod, "run_with_watchdog", _times_out)
+    out = list(YouTubeConnector()._dump_list(
+        YouTubeConfig(), None, "liked", "https://x", None, _ctx()
+    ))
+    # A hung extraction is treated exactly like a failed list: flagged, so
+    # fetch() suppresses the ReconcileMarker and nothing is falsely swept.
+    assert out == [("liked", {"__list_failed__": True})]
+
+
+def test_playlist_discovery_failure_flags_partial(monkeypatch):
+    monkeypatch.setitem(sys.modules, "yt_dlp", _fake_ytdlp_module())
+    monkeypatch.setattr(
+        YouTubeConnector, "_discover_playlists",
+        lambda self, cfg, cookiefile, ctx: None,  # None = discovery failed
+    )
+    cfg = YouTubeConfig(
+        watch_later=False, liked=False, history=False, playlists=True,
+        cookies_from_browser="chrome",
+    )
+    out = list(YouTubeConnector()._acquire(_ctx(cfg)))
+    assert out == [("playlists", {"__list_failed__": True})]
 
 
 def test_duplicate_video_within_one_list_yielded_once():

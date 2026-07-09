@@ -106,6 +106,7 @@ def make_ctx(
     store_media: bool = False,
     max_media_bytes: int = 0,
     download_dir=None,
+    limit=None,
 ) -> RunContext:
     return RunContext(
         source_id=source_id,
@@ -122,6 +123,7 @@ def make_ctx(
         store_media=store_media,
         max_media_bytes=max_media_bytes,
         download_dir=download_dir,
+        limit=limit,
     )
 
 

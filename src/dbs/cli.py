@@ -129,6 +129,15 @@ def _parse_date(value: Optional[str]) -> Optional[datetime]:
     return dt
 
 
+def _human_bytes(n: int) -> str:
+    value = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024:
+            return f"{int(value)} B" if unit == "B" else f"{value:,.1f} {unit}"
+        value /= 1024
+    return f"{value:,.1f} TiB"
+
+
 def _status_color(status: str) -> str:
     return {
         "success": typer.colors.GREEN,
@@ -148,9 +157,15 @@ def _print_run(r: RunResult) -> None:
     )
     if r.error:
         typer.secho(f"      error: {r.error}", fg=typer.colors.RED)
+    for w in r.warnings:
+        typer.secho(f"      warning: {w}", fg=typer.colors.YELLOW)
 
 
 def _exit_code(results: list[RunResult]) -> int:
+    # Warnings deliberately don't change the exit code: a success-with-caveats
+    # run (e.g. a legitimately empty source) exiting non-zero would be a
+    # permanent false alarm for cron. Caveats are rendered above and persist
+    # in `dbs history`.
     statuses = {r.status for r in results}
     if RunStatus.FAILED in statuses:
         return 3
@@ -263,6 +278,17 @@ def backup(
     force_full: bool = typer.Option(False, "--force-full", help="Full refetch, ignore cursor."),
     reconcile: bool = typer.Option(False, "--reconcile", help="Force a reconcile (edits + deletions)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show the chosen mode without running."),
+    limit: Optional[int] = typer.Option(
+        None, "--limit", min=1,
+        help="Stop each source after N items (smoke tests / first-run bound). "
+             "A limited run never runs deletion detection.",
+    ),
+    parallel: Optional[int] = typer.Option(
+        None, "--parallel", min=1,
+        help="With --all: back up to N sources at once (default: the "
+             "'parallel' config key, i.e. 1). Browser/downloader-heavy "
+             "connectors never overlap each other.",
+    ),
     progress: Optional[bool] = typer.Option(
         None, "--progress/--no-progress",
         help="Show a live progress status line (default: auto — on for a TTY).",
@@ -274,14 +300,17 @@ def backup(
     renderer = _ProgressRenderer(enabled=show_progress)
     try:
         if all_sources:
-            results = svc.backup_all(only_due=only_due, on_progress=renderer)
+            results = svc.backup_all(
+                only_due=only_due, limit=limit, parallel=parallel,
+                on_progress=renderer,
+            )
         elif source:
             try:
                 results = [
                     svc.backup_source(
                         source, force_full=force_full,
                         force_reconcile=reconcile, dry_run=dry_run,
-                        on_progress=renderer,
+                        limit=limit, on_progress=renderer,
                     )
                 ]
             except SourceLockedError as exc:  # subclass of BackupRunError — must come first
@@ -298,6 +327,7 @@ def backup(
             raise typer.Exit(4)
 
         renderer.close()
+        svc.notify_results(results)  # webhook alerting (no-op unless configured)
         typer.secho("Backup results:", bold=True)
         for r in results:
             _print_run(r)
@@ -358,8 +388,148 @@ def history(
             )
             if run.get("error"):
                 typer.secho(f"    {run['error']}", fg=typer.colors.RED)
+            for w in run.get("warnings") or []:
+                typer.secho(f"    warning: {w}", fg=typer.colors.YELLOW)
     finally:
         svc.close()
+
+
+def _print_item_detail(item: dict) -> None:
+    typer.secho(item["title"] or item["url"] or item["external_id"], bold=True)
+    typer.echo(f"  source:    {item['source']} ({item['type']})")
+    typer.echo(f"  kind:      {item['item_kind']}   external id: {item['external_id']}")
+    if item["url"]:
+        typer.echo(f"  url:       {item['url']}")
+    if item["tags"]:
+        typer.echo(f"  tags:      {', '.join(item['tags'])}")
+    typer.echo(
+        f"  created:   {item['created_at'] or '-'}   updated: "
+        f"{item['updated_at'] or '-'}   revision: {item['revision']}"
+    )
+    if item["deleted"]:
+        typer.secho(f"  deleted:   yes ({item['deleted_at'] or 'unknown when'})", fg=typer.colors.RED)
+    if item["body"]:
+        body = item["body"]
+        if len(body) > 500:
+            body = body[:500] + f"… [{len(item['body']):,} chars total; --json for all]"
+        typer.echo("  body:      " + body.replace("\n", "\n             "))
+    media = item.get("media") or []
+    if media:
+        typer.echo(f"  media ({len(media)}):")
+        for m in media:
+            state = "archived" if m["has_data"] else (m["local_path"] or "not archived")
+            size = f", {_human_bytes(m['byte_size'])}" if m["byte_size"] else ""
+            typer.echo(f"    [{m['id']}] {m['filename'] or m['url']} ({m['mime'] or '?'}{size}) — {state}")
+    typer.echo("  raw:")
+    typer.echo("    " + json.dumps(item.get("raw"), indent=2, ensure_ascii=False).replace("\n", "\n    "))
+
+
+@app.command()
+def items(
+    item_id: Optional[int] = typer.Argument(
+        None, metavar="[ID]",
+        help="Show one item's full detail (raw payload + media list) instead of listing.",
+    ),
+    source: Optional[list[str]] = typer.Option(None, "--source", help="Filter by source name (repeatable)."),
+    item_type: Optional[list[str]] = typer.Option(None, "--type", help="Filter by item kind (repeatable)."),
+    search: Optional[str] = typer.Option(
+        None, "--search", "-q",
+        help="Full-text search over titles and bodies (FTS5: all words, prefix "
+             "match on the last; plain substring fallback without FTS5).",
+    ),
+    since: Optional[str] = typer.Option(None, "--since", help="Only items created on/after (YYYY-MM-DD)."),
+    until: Optional[str] = typer.Option(None, "--until", help="Only items created on/before."),
+    include_deleted: bool = typer.Option(False, "--include-deleted"),
+    limit: int = typer.Option(50, "--limit", "-n", min=1, max=500, help="Page size."),
+    offset: int = typer.Option(0, "--offset", min=0, help="Skip the first N matches (pagination)."),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Browse what's actually stored — the CLI counterpart of the web UI's
+    Browse tab. Lists items newest-first (filterable, searchable, paginated);
+    with ID, shows that one item's full detail instead."""
+    svc = _service()
+    try:
+        if item_id is not None:
+            item = svc.get_item(item_id)
+            if item is None:
+                typer.secho(f"no such item {item_id}", fg=typer.colors.RED, err=True)
+                raise typer.Exit(1)
+            if json_out:
+                typer.echo(json.dumps(item, indent=2, ensure_ascii=False))
+            else:
+                _print_item_detail(item)
+            return
+        query = ExportQuery(
+            sources=list(source) if source else None,
+            item_types=list(item_type) if item_type else None,
+            since=_parse_date(since),
+            until=_parse_date(until),
+            include_deleted=include_deleted,
+        )
+        rows, total = svc.browse_items(query, text=search, limit=limit, offset=offset)
+        if json_out:
+            # Same envelope as the web UI's GET /api/items.
+            typer.echo(json.dumps(
+                {"items": rows, "total": total, "limit": limit, "offset": offset},
+                indent=2, ensure_ascii=False,
+            ))
+            return
+        if not rows:
+            if total:
+                typer.echo(f"No items at offset {offset} ({total:,} total matches).")
+            else:
+                typer.echo("No items matched.")
+            return
+        for r in rows:
+            title = (r["title"] or r["url"] or r["external_id"] or "").replace("\n", " ")
+            if len(title) > 60:
+                title = title[:59] + "…"
+            line = (
+                f"{r['id']:>7}  {r['source']:<20.20} {r['item_kind']:<10.10} "
+                f"{(r['created_at'] or '')[:10]:<10}  {title}"
+            )
+            if r["media_count"]:
+                line += f"  [{r['media_count']} media]"
+            if r["deleted"]:
+                line += "  [deleted]"
+            typer.secho(line, fg=typer.colors.RED if r["deleted"] else None)
+        end = offset + len(rows)
+        footer = f"{offset + 1}-{end} of {total:,}"
+        if end < total:
+            footer += f"  (next page: --offset {end})"
+        typer.secho(footer, dim=True)
+    finally:
+        svc.close()
+
+
+@app.command()
+def stats(json_out: bool = typer.Option(False, "--json")) -> None:
+    """Aggregate database metrics: live/deleted item counts per source and
+    kind, revision count, archived media count + bytes — the CLI counterpart
+    of the web UI's metrics strip."""
+    svc = _service()
+    try:
+        m = svc.metrics()
+    finally:
+        svc.close()
+    if json_out:
+        typer.echo(json.dumps(m, indent=2))
+        return
+    rows = m["by_source_kind"]
+    live = sum(r["live"] for r in rows)
+    total = sum(r["total"] for r in rows)
+    typer.echo(f"Items:     {live:,} live, {total - live:,} deleted ({total:,} total)")
+    typer.echo(f"Revisions: {m['revision_count']:,}")
+    typer.echo(f"Media:     {m['media_count']:,} archived blob(s), {_human_bytes(m['media_bytes'])}")
+    if not rows:
+        typer.echo("\nNo items stored yet — run `dbs backup` first.")
+        return
+    typer.echo("")
+    typer.secho(f"{'source':<24} {'kind':<12} {'live':>8} {'deleted':>8} {'total':>8}", bold=True)
+    for r in rows:
+        typer.echo(
+            f"{r['source']:<24} {r['kind']:<12} {r['live']:>8,} {r['deleted']:>8,} {r['total']:>8,}"
+        )
 
 
 @app.command()
@@ -373,6 +543,17 @@ def export(
     include_deleted: bool = typer.Option(False, "--include-deleted"),
     include_revisions: bool = typer.Option(False, "--include-revisions", help="(archive) full history."),
     no_raw: bool = typer.Option(False, "--no-raw", help="Omit verbatim raw payloads."),
+    encrypt: bool = typer.Option(
+        False, "--encrypt",
+        help="Encrypt the output with a passphrase (scrypt + AES-256-GCM). "
+             "Safe to park on untrusted storage; decrypt with `dbs decrypt` "
+             "(dbs restore handles encrypted bundles directly).",
+    ),
+    passphrase_env: str = typer.Option(
+        "DBS_EXPORT_PASSPHRASE", "--passphrase-env",
+        help="Env var (or .env key) holding the passphrase — never pass the "
+             "passphrase itself on the command line.",
+    ),
 ) -> None:
     """Export backed-up data to a portable file or zip archive bundle."""
     svc = _service()
@@ -387,7 +568,7 @@ def export(
             include_raw=not no_raw,
         )
         try:
-            result = svc.export(query, fmt, out)
+            result = svc.export(query, fmt, out, encrypt=encrypt, passphrase_env=passphrase_env)
         except KeyError as exc:
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(4)
@@ -404,8 +585,40 @@ def export(
 
 
 @app.command()
-def verify(source: Optional[str] = typer.Argument(None)) -> None:
-    """Run integrity checks on the database and per-source state."""
+def verify(
+    source: Optional[str] = typer.Argument(None),
+    archive: Optional[Path] = typer.Option(
+        None, "--archive",
+        help="Verify an exported archive bundle's checksums instead of the DB.",
+    ),
+) -> None:
+    """Run integrity checks on the database and per-source state — or, with
+    --archive, on an exported bundle's per-entry sha256 checksums."""
+    if archive is not None:
+        from .restore import verify_archive
+
+        try:
+            report = verify_archive(archive)
+        except ConfigError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(4) from exc
+        if not report["has_checksums"]:
+            typer.secho(
+                "Bundle has no checksums (written by an older dbs) — nothing to verify.",
+                fg=typer.colors.YELLOW,
+            )
+            return
+        if not report["issues"]:
+            typer.secho(
+                f"OK — {report['verified']} entr{'y' if report['verified'] == 1 else 'ies'} verified.",
+                fg=typer.colors.GREEN,
+            )
+            return
+        typer.secho("Integrity issues found:", fg=typer.colors.RED, bold=True)
+        for issue in report["issues"]:
+            typer.secho(f"  {issue}", fg=typer.colors.RED)
+        raise typer.Exit(3)
+
     svc = _service()
     try:
         report = svc.verify(source)
@@ -416,6 +629,183 @@ def verify(source: Optional[str] = typer.Argument(None)) -> None:
         for issue in report.issues:
             typer.secho(f"  [{issue.kind}] {issue.source}: {issue.detail}", fg=typer.colors.RED)
         raise typer.Exit(3)
+    finally:
+        svc.close()
+
+
+@app.command()
+def restore(
+    path: Path = typer.Argument(
+        ..., help="An archive .zip (dbs export --format archive) or an .ndjson "
+                  "export written with raw payloads."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Parse and validate the bundle; write nothing."
+    ),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Restore an exported backup into the database. Idempotent: re-restoring
+    the same bundle classifies every row as unchanged."""
+    svc = _service()
+    try:
+        try:
+            report = svc.restore(path, dry_run=dry_run)
+        except ConfigError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(4) from exc
+        if json_out:
+            typer.echo(json.dumps(report.to_dict(), indent=2))
+            return
+        verb = "Would restore" if report.dry_run else "Restored"
+        typer.secho(
+            f"{verb} {report.fetched} item(s) across {len(report.sources)} "
+            f"source(s): {', '.join(report.sources) or '-'}",
+            fg=typer.colors.GREEN,
+        )
+        if not report.dry_run:
+            typer.echo(
+                f"  +{report.created} created  ~{report.updated} updated  "
+                f"={report.unchanged} unchanged  x{report.deleted} deleted"
+            )
+        for w in report.warnings:
+            typer.secho(f"  warning: {w}", fg=typer.colors.YELLOW)
+    finally:
+        svc.close()
+
+
+@app.command()
+def decrypt(
+    src: Path = typer.Argument(..., help="A file written by `dbs export --encrypt`."),
+    out: Optional[Path] = typer.Option(
+        None, "--out", "-o",
+        help="Destination (default: SRC minus its .enc suffix, else SRC + .plain).",
+    ),
+    passphrase_env: str = typer.Option(
+        "DBS_EXPORT_PASSPHRASE", "--passphrase-env",
+        help="Env var (or .env key) holding the passphrase.",
+    ),
+) -> None:
+    """Decrypt a `dbs export --encrypt` file back to its plain form.
+
+    (`dbs restore` reads encrypted bundles directly — this is for getting the
+    plain file back for other tools.)"""
+    from .crypto import decrypt_file, is_encrypted, resolve_passphrase
+
+    if not src.is_file():
+        typer.secho(f"no such file: {src}", fg=typer.colors.RED)
+        raise typer.Exit(4)
+    if not is_encrypted(src):
+        typer.secho(f"{src} is not a dbs-encrypted file", fg=typer.colors.RED)
+        raise typer.Exit(4)
+    dest = out
+    if dest is None:
+        dest = src.with_suffix("") if src.suffix == ".enc" else src.with_name(src.name + ".plain")
+    if dest.exists():
+        typer.secho(f"refusing to overwrite {dest}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+    svc = _service()  # for .env-resolved passphrases
+    try:
+        passphrase = resolve_passphrase(svc.secret_store, passphrase_env)
+    finally:
+        svc.close()
+    try:
+        n = decrypt_file(src, dest, passphrase)
+    except ConfigError as exc:
+        if dest.exists():
+            dest.unlink()
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
+    typer.secho(f"Wrote {dest} ({n:,} bytes)", fg=typer.colors.GREEN)
+
+
+@app.command()
+def doctor(
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Diagnose the environment: database health, per-source readiness,
+    secrets presence, dependency freshness. Read-only. Exits 1 on failures."""
+    svc = _service()
+    try:
+        checks = svc.doctor()
+    finally:
+        svc.close()
+    if json_out:
+        typer.echo(json.dumps([c.to_dict() for c in checks], indent=2))
+    else:
+        colors = {"ok": typer.colors.GREEN, "warn": typer.colors.YELLOW,
+                  "fail": typer.colors.RED}
+        for c in checks:
+            typer.secho(f"  [{c.status:^4}] {c.name}: {c.detail}", fg=colors[c.status])
+    if any(c.status == "fail" for c in checks):
+        raise typer.Exit(1)
+
+
+@app.command(name="update-ytdlp")
+def update_ytdlp(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the command; run nothing."),
+) -> None:
+    """Upgrade yt-dlp in this environment. YouTube changes frequently enough
+    that an aging yt-dlp eventually fails to extract some videos — run this
+    periodically (monthly) on unattended installs, mirroring the reference
+    skool-downloader's own `update-ytdlp` practice."""
+    import subprocess
+
+    argv = [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp[default]"]
+    typer.echo("$ " + " ".join(argv))
+    if dry_run:
+        return
+    code = subprocess.call(argv)
+    if code == 0:
+        typer.secho(
+            "yt-dlp upgraded. Restart any running `dbs serve` to pick it up.",
+            fg=typer.colors.GREEN,
+        )
+    raise typer.Exit(code)
+
+
+@app.command()
+def maintain(
+    vacuum: bool = typer.Option(
+        False, "--vacuum",
+        help="Rebuild the database file to reclaim free pages (media rewrites "
+             "and revision growth never shrink it otherwise; can take a while).",
+    ),
+    snapshot: Optional[Path] = typer.Option(
+        None, "--snapshot",
+        help="Also write a consistent single-file copy (VACUUM INTO) safe to "
+             "copy off-machine. Refuses an existing path.",
+    ),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Database housekeeping: flush the WAL, refresh query-planner stats,
+    optionally compact (--vacuum) and snapshot (--snapshot PATH)."""
+    svc = _service()
+    try:
+        try:
+            report = svc.maintain(vacuum=vacuum, snapshot=snapshot)
+        except FileExistsError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(1) from exc
+        if json_out:
+            typer.echo(json.dumps(report.to_dict(), indent=2))
+            return
+        typer.secho(f"Database: {report.database}", fg=typer.colors.CYAN)
+        typer.echo(f"  WAL checkpoint: {'ok' if report.wal_checkpointed else 'blocked/none'}")
+        typer.echo("  planner stats:  refreshed")
+        if report.revisions_pruned:
+            typer.echo(f"  revisions:      pruned {report.revisions_pruned:,} old row(s)")
+        if report.vacuumed:
+            typer.echo(
+                f"  vacuum:         done "
+                f"({report.size_before:,} -> {report.size_after:,} bytes)"
+            )
+        else:
+            typer.echo(f"  vacuum:         skipped ({report.size_after:,} bytes; --vacuum to compact)")
+        if report.snapshot_path:
+            typer.secho(
+                f"  snapshot:       {report.snapshot_path} ({report.snapshot_bytes:,} bytes)",
+                fg=typer.colors.GREEN,
+            )
     finally:
         svc.close()
 
@@ -453,8 +843,31 @@ def serve(
              "On by default for local use; pass --no-setup to disable. These shell "
              "out / open a browser on the host.",
     ),
+    token: Optional[str] = typer.Option(
+        None, "--token",
+        help="Require this bearer token on every API call (open the UI once at "
+             "/?token=... and it stores it locally). Mandatory when binding to "
+             "a non-localhost address.",
+    ),
+    schedule: bool = typer.Option(
+        False, "--schedule/--no-schedule",
+        help="Run backups automatically while the server is up: every minute, "
+             "any enabled source whose `schedule` cadence (hourly/daily/weekly) "
+             "has elapsed is backed up — no external cron needed.",
+    ),
 ) -> None:
     """Launch the web management UI (requires the [web] extra)."""
+    is_local = host in ("127.0.0.1", "localhost", "::1", "")
+    if not is_local and not token:
+        # The API can read every backup and write secrets; off-localhost it
+        # must not be reachable unauthenticated. This used to be a warning.
+        typer.secho(
+            f"Refusing to bind to {host} without --token: the API is otherwise "
+            f"unauthenticated (it can read your backups and write secrets).\n"
+            f"Bind to 127.0.0.1 (the default), or pass --token <secret>.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(4)
     try:
         import uvicorn
 
@@ -469,16 +882,28 @@ def serve(
 
     # The app factory reads this config path on every request, so it always
     # reflects the latest on-disk config (e.g. sources added via the UI).
-    app_instance = create_app(_state["config"], allow_setup=allow_setup)
+    app_instance = create_app(
+        _state["config"], allow_setup=allow_setup, auth_token=token,
+        schedule_seconds=60.0 if schedule else None,
+    )
     typer.secho(f"Serving Daily Backup System UI at http://{host}:{port}", fg=typer.colors.GREEN)
     typer.echo(f"  (config: {_state['config']})  —  press Ctrl+C to stop")
-    is_local = host in ("127.0.0.1", "localhost", "::1", "")
+    if schedule:
+        typer.echo(
+            "  scheduler ON — due sources back up automatically while this runs"
+        )
+    if token:
+        typer.echo(
+            f"  token auth ON — open http://{host}:{port}/?token=<your token> "
+            f"once; the UI stores it locally"
+        )
     if allow_setup and not is_local:
-        # Setup actions shell out / open a browser; exposing them off-localhost is
-        # a real risk. Loudly warn (but don't block — the user asked for this host).
+        # Reachable-network setup actions are still worth a shout even with
+        # the token gate: anyone who obtains the token can trigger installs
+        # and browser logins on this host.
         typer.secho(
             f"  WARNING: setup actions are ENABLED and bound to {host} (not localhost).\n"
-            "  Anyone who can reach this port could trigger installs/logins. "
+            "  Anyone with the token can trigger installs/logins on this host. "
             "Use --no-setup to disable.",
             fg=typer.colors.RED, bold=True,
         )

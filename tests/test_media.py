@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import io
 import zipfile
-from pathlib import Path
 
-from dbs.core.capabilities import Capabilities, ItemKind
+from dbs.core.capabilities import Capabilities
 from dbs.core.models import BackupItem, Checkpoint, Cursor, MediaRef
 from dbs.export.archive import ArchiveExporter
 from dbs.export.base import ExportQuery
@@ -63,8 +62,10 @@ def test_store_media_off_keeps_reference_only(storage, tmp_path):
 
 
 def test_size_cap_skips_large_files_but_records_size(storage, tmp_path):
-    small = tmp_path / "small.bin"; small.write_bytes(b"x" * 100)
-    big = tmp_path / "big.bin"; big.write_bytes(b"x" * 5000)
+    small = tmp_path / "small.bin"
+    small.write_bytes(b"x" * 100)
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * 5000)
     cls = _media_connector()
     cls.script = [_item("S", small, filename="small.bin"),
                   _item("B", big, filename="big.bin"),

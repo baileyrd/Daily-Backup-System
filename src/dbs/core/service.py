@@ -12,6 +12,8 @@ import json
 import logging
 import os
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterator, Mapping
@@ -27,6 +29,7 @@ from ..storage.sqlite import SqliteStorage
 from .engine import Engine
 from .errors import (
     BackupRunError,
+    ConfigError,
     ConnectorConfigError,
     SourceLockedError,
 )
@@ -34,7 +37,10 @@ from .http import ManagedHTTPClient
 from .models import (
     ConnectorInfo,
     Cursor,
+    DoctorCheck,
+    MaintenanceReport,
     ProgressCallback,
+    RestoreReport,
     RunContext,
     RunResult,
     RunStatus,
@@ -47,6 +53,14 @@ from .registry import ConnectorRegistry
 from .secrets import Secrets
 
 _DEFAULT_RECONCILE_EVERY = 7
+# Per-cadence "due again after" windows. Each is deliberately short of its
+# nominal period so a timer that fires at slightly-varying times (cron drift,
+# a laptop waking late) never skips a whole period.
+_SCHEDULE_SLACK = {
+    "hourly": timedelta(minutes=50),
+    "daily": timedelta(hours=20),
+    "weekly": timedelta(days=6),
+}
 logger = logging.getLogger("dbs")
 
 
@@ -89,7 +103,11 @@ class BackupService:
         self.secret_store = secret_store if secret_store is not None else dict(os.environ)
         self.http_factory = http_factory
         self.clock = clock
-        self.engine = Engine(storage)
+        self.engine = Engine(
+            storage,
+            batch_max=config.batch_max,
+            sweep_safety_fraction=config.sweep_safety_fraction,
+        )
 
     # -- construction -------------------------------------------------------
 
@@ -131,9 +149,15 @@ class BackupService:
         force_full: bool = False,
         force_reconcile: bool = False,
         dry_run: bool = False,
+        limit: int | None = None,
         on_progress: ProgressCallback | None = None,
+        _reap: bool = True,
     ) -> RunResult:
-        self.storage.reap_interrupted_runs()
+        # Crash recovery: flip stale 'running' runs to 'interrupted'. backup_all
+        # reaps ONCE up front and passes _reap=False, because with parallel
+        # workers a sibling's genuinely-running run must never be reaped.
+        if _reap:
+            self.storage.reap_interrupted_runs()
         sc = self.config.sources.get(name)
         if sc is None:
             raise BackupRunError(f"No such source: {name!r}")
@@ -181,13 +205,22 @@ class BackupService:
             if rc.cls.wants_managed_http:
                 http = self._make_http(rc)
             secrets = Secrets(self.secret_store, rc.cls.secret_keys)
+            # The advertised re-scan window: a connector keying off ctx.since
+            # re-fetches a small overlap so a boundary-timestamp item can't
+            # fall between two runs (the idempotent upsert dedups the overlap).
+            since = watermark
+            if watermark is not None and self.config.default_overlap_seconds > 0:
+                since = watermark - timedelta(
+                    seconds=self.config.default_overlap_seconds
+                )
             ctx = RunContext(
                 source_id=source.id,
                 source_name=name,
                 config=config_instance,
                 secrets=secrets,
                 cursor=cursor,
-                since=watermark,
+                since=since,
+                limit=limit,
                 http=http,
                 logger=logger.getChild(name),
                 run_id=run_id,
@@ -222,8 +255,13 @@ class BackupService:
         *,
         only_due: bool = False,
         continue_on_error: bool = True,
+        limit: int | None = None,
+        parallel: int | None = None,
         on_progress: ProgressCallback | None = None,
     ) -> list[RunResult]:
+        # Reap once, up front, while no run of ours is live yet — a per-source
+        # reap inside a parallel batch would flip siblings' running runs.
+        self.storage.reap_interrupted_runs()
         # Resolve the work-list up front so progress can report a determinate
         # cross-source position ("source 2 of 5").
         due = [
@@ -232,11 +270,29 @@ class BackupService:
             if sc.enabled and (not only_due or self._is_due(name, sc))
         ]
         total = len(due)
-        results: list[RunResult] = []
+        workers = max(1, parallel if parallel is not None else self.config.parallel)
+        if workers > 1 and total > 1:
+            results = self._backup_all_parallel(
+                due,
+                workers=min(workers, total),
+                continue_on_error=continue_on_error,
+                limit=limit,
+                on_progress=on_progress,
+            )
+            if results is not None:
+                return results
+            logger.warning(
+                "storage cannot serve parallel workers; backing up sequentially"
+            )
+        results = []
         for index, (name, sc) in enumerate(due, start=1):
             framed = self._frame_progress(on_progress, index, total)
             try:
-                results.append(self.backup_source(name, on_progress=framed))
+                results.append(
+                    self.backup_source(
+                        name, limit=limit, on_progress=framed, _reap=False
+                    )
+                )
             except Exception as exc:  # isolation: one source must not abort others
                 if not continue_on_error:
                     raise
@@ -248,6 +304,123 @@ class BackupService:
                     )
                 )
         return results
+
+    def _backup_all_parallel(
+        self,
+        due: list[tuple[str, SourceConfig]],
+        *,
+        workers: int,
+        continue_on_error: bool,
+        limit: int | None,
+        on_progress: ProgressCallback | None,
+    ) -> list[RunResult] | None:
+        """Run the work-list on a bounded thread pool (``--parallel N``).
+
+        Coordination model: each worker thread gets its own storage connection
+        (``Storage.spawn``) wrapped in its own service/engine, so no SQLite
+        connection ever crosses a thread; WAL + ``busy_timeout`` arbitrate the
+        single writer slot, and the existing per-source lock table prevents
+        double-running a source. Connectors declaring ``concurrency="serial"``
+        (browser/downloader-heavy) additionally share one gate, so at most one
+        of them runs at a time. Returns ``None`` when the storage backend
+        cannot provide worker connections (in-memory DB) — the caller falls
+        back to the sequential path.
+        """
+        probe = self.storage.spawn()
+        if probe is None:
+            return None
+        probe.close()
+
+        # Progress callbacks now arrive from several threads; renderers were
+        # written for one. Serialize delivery so they never interleave.
+        progress_lock = threading.Lock()
+        safe_progress: ProgressCallback | None = None
+        if on_progress is not None:
+            def _locked(ev) -> None:
+                with progress_lock:
+                    on_progress(ev)
+            safe_progress = _locked
+
+        serial_gate = threading.Lock()  # at most one "serial" connector at a time
+        local = threading.local()
+        spawned: list[BackupService] = []
+        spawned_lock = threading.Lock()
+
+        def service_for_thread() -> "BackupService":
+            svc = getattr(local, "svc", None)
+            if svc is None:
+                storage = self.storage.spawn()
+                if storage is None:  # probed above; defensive for odd backends
+                    raise BackupRunError("storage cannot serve a parallel worker")
+                svc = BackupService(
+                    storage, self.config, self.registry,
+                    secret_store=self.secret_store,
+                    http_factory=self.http_factory, clock=self.clock,
+                )
+                local.svc = svc
+                with spawned_lock:
+                    spawned.append(svc)
+            return svc
+
+        total = len(due)
+
+        def run_one(index: int, name: str, sc: SourceConfig) -> RunResult:
+            framed = self._frame_progress(safe_progress, index, total)
+            svc = service_for_thread()
+            serial = False
+            try:
+                rc = self.registry.get(sc.type)
+                serial = rc.cls.capabilities.concurrency == "serial"
+            except Exception:  # noqa: BLE001 - unknown type fails in backup_source
+                pass
+            if serial:
+                with serial_gate:
+                    return svc.backup_source(
+                        name, limit=limit, on_progress=framed, _reap=False
+                    )
+            return svc.backup_source(
+                name, limit=limit, on_progress=framed, _reap=False
+            )
+
+        results: list[RunResult | None] = [None] * total
+        first_exc: Exception | None = None
+        try:
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="dbs-backup"
+            ) as pool:
+                futures = {
+                    pool.submit(run_one, i, name, sc): (i, name)
+                    for i, (name, sc) in enumerate(due, start=1)
+                }
+                for fut in as_completed(futures):
+                    index, name = futures[fut]
+                    if fut.cancelled():  # continue_on_error=False cancels the tail
+                        continue
+                    try:
+                        results[index - 1] = fut.result()
+                    except Exception as exc:  # isolation, as in the sequential path
+                        if not continue_on_error:
+                            if first_exc is None:
+                                first_exc = exc
+                                for other in futures:
+                                    other.cancel()  # in-flight sources still finish
+                            continue
+                        now = self.clock()
+                        results[index - 1] = RunResult(
+                            source=name, status=RunStatus.FAILED, started_at=now,
+                            finished_at=now, error=f"{type(exc).__name__}: {exc}",
+                        )
+        finally:
+            for svc in spawned:
+                try:
+                    svc.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        if first_exc is not None:
+            raise first_exc
+        # Results keep the config order; cancelled slots exist only on the
+        # continue_on_error=False path, which raises above.
+        return [r for r in results if r is not None]
 
     @staticmethod
     def _frame_progress(
@@ -293,27 +466,55 @@ class BackupService:
             return "reconcile"
         return "incremental"
 
-    def _is_due(self, name: str, sc: SourceConfig) -> bool:
+    def _last_started(self, name: str) -> datetime | None:
         source = self.storage.get_source(name)
         if source is None:
-            return True
+            return None
         runs = self.storage.recent_runs(source.id, 1)
         if not runs or not runs[0].get("started_at"):
-            return True
+            return None
         from .timeutil import parse_iso
 
-        last = parse_iso(runs[0]["started_at"])
+        return parse_iso(runs[0]["started_at"])
+
+    def _next_due_at(self, name: str, sc: SourceConfig) -> datetime | None:
+        """When the source next becomes due; ``None`` = due right now
+        (never run, or its history is unreadable)."""
+        last = self._last_started(name)
         if last is None:
-            return True
-        # "daily": due if the last run started more than ~20h ago.
-        return (self.clock() - last) >= timedelta(hours=20)
+            return None
+        # Each cadence carries slack (daily -> ~20h etc.) so a scheduler that
+        # fires at slightly-varying times never skips a whole period.
+        slack = _SCHEDULE_SLACK.get((sc.schedule or "daily").lower())
+        if slack is None:
+            logger.warning(
+                "%s: unknown schedule %r (expected hourly/daily/weekly) — "
+                "treating as daily", name, sc.schedule,
+            )
+            slack = _SCHEDULE_SLACK["daily"]
+        return last + slack
+
+    def _is_due(self, name: str, sc: SourceConfig) -> bool:
+        next_due = self._next_due_at(name, sc)
+        return next_due is None or self.clock() >= next_due
+
+    def due_sources(self) -> list[str]:
+        """Enabled sources whose ``schedule`` cadence has elapsed — what
+        ``backup --all --only-due`` (and the ``dbs serve`` scheduler) run."""
+        return [
+            name for name, sc in self.config.sources.items()
+            if sc.enabled and self._is_due(name, sc)
+        ]
 
     def _make_http(self, rc) -> ManagedHTTPClient:
         if self.http_factory is not None:
             client = self.http_factory()
         else:
-            client = httpx.Client(timeout=30.0)
-        rate = 120 if rc.cls.capabilities.supports_rate_limit_backoff else None
+            client = httpx.Client(timeout=self.config.http_timeout)
+        rate = (
+            self.config.http_rate_limit_per_min
+            if rc.cls.capabilities.supports_rate_limit_backoff else None
+        )
         return ManagedHTTPClient(client, rate_limit_per_min=rate)
 
     # -- status / introspection --------------------------------------------
@@ -327,6 +528,9 @@ class BackupService:
             sc = self.config.sources.get(n)
             stype = sc.type if sc else "?"
             enabled = sc.enabled if sc else False
+            schedule = (sc.schedule or "daily") if sc else "daily"
+            next_due = self._next_due_at(n, sc) if sc else None
+            due_now = bool(sc and enabled and self._is_due(n, sc))
             source = self.storage.get_source(n)
             if source is None:
                 out.append(
@@ -335,6 +539,7 @@ class BackupService:
                         live_items=0, deleted_items=0, last_run_status=None,
                         last_run_at=None, last_mode=None, run_count=0,
                         watermark=None, has_interrupted_runs=False,
+                        schedule=schedule, next_due_at=next_due, due_now=due_now,
                     )
                 )
                 continue
@@ -356,6 +561,9 @@ class BackupService:
                     run_count=self.storage.get_run_count(source.id),
                     watermark=watermark,
                     has_interrupted_runs=any(r["status"] == "interrupted" for r in runs),
+                    schedule=schedule,
+                    next_due_at=next_due,
+                    due_now=due_now,
                 )
             )
         return out
@@ -467,17 +675,36 @@ class BackupService:
     # -- export -------------------------------------------------------------
 
     def export(
-        self, query: ExportQuery, fmt: str, out: str | Path | BinaryIO
+        self, query: ExportQuery, fmt: str, out: str | Path | BinaryIO,
+        *, encrypt: bool = False, passphrase_env: str | None = None,
     ) -> ExportResult:
         exporter = get_exporter(fmt)
         source = _StorageExportSource(self.storage, query, self._manifest(query))
+
+        def _write_to(fh) -> ExportResult:
+            if not encrypt:
+                return exporter.write(source, fh, query)
+            from ..crypto import (
+                DEFAULT_PASSPHRASE_ENV,
+                EncryptingWriter,
+                resolve_passphrase,
+            )
+            passphrase = resolve_passphrase(
+                self.secret_store, passphrase_env or DEFAULT_PASSPHRASE_ENV
+            )
+            writer = EncryptingWriter(fh, passphrase)
+            try:
+                return exporter.write(source, writer, query)
+            finally:
+                writer.close()  # the final frame is what makes truncation detectable
+
         if isinstance(out, (str, Path)):
             dest = Path(out).expanduser()
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = dest.with_name(dest.name + ".tmp")
             try:
                 with tmp.open("wb") as fh:
-                    result = exporter.write(source, fh, query)
+                    result = _write_to(fh)
                 os.replace(tmp, dest)  # atomic
             finally:
                 if tmp.exists():
@@ -514,6 +741,350 @@ class BackupService:
             "db_schema_version": SCHEMA_VERSION,
             "connector_schema_versions": connector_schema_versions,
         }
+
+    # -- notifications --------------------------------------------------------
+
+    def notify_results(self, results: list[RunResult]) -> bool:
+        """POST the batch outcome to ``[dbs] notify_url`` when ``notify_on``
+        matches. Best-effort by contract: a webhook failure is logged, never
+        raised — alerting must not break the backup. Returns True when a
+        notification was actually sent.
+
+        The JSON body carries the summary under both ``text`` (Slack) and
+        ``content`` (Discord) plus the full per-run results, so common
+        webhook receivers render it with zero configuration.
+        """
+        url = self.config.notify_url
+        if not url or not results:
+            return False
+        bad = [r for r in results if r.status in (RunStatus.FAILED, RunStatus.PARTIAL)]
+        warned = [r for r in results if r.warnings and r not in bad]
+        if self.config.notify_on == "failure" and not bad:
+            return False
+        if self.config.notify_on == "warning" and not (bad or warned):
+            return False
+
+        ok = len(results) - len(bad) - len(warned)
+        lines = [
+            f"dbs backup: {ok} ok, {len(bad)} failed/partial, "
+            f"{len(warned)} with warnings"
+        ]
+        for r in bad:
+            lines.append(f"• {r.source}: {r.status.value} — {r.error or 'no error detail'}")
+        for r in warned:
+            lines.append(f"• {r.source}: success with warnings — {'; '.join(r.warnings)}")
+        text = "\n".join(lines)
+        payload = {
+            "text": text,
+            "content": text,
+            "results": [r.to_dict() for r in results],
+        }
+        try:
+            client = self.http_factory() if self.http_factory else httpx.Client(timeout=10.0)
+            try:
+                client.post(url, json=payload).raise_for_status()
+            finally:
+                client.close()
+        except Exception as exc:  # noqa: BLE001 - alerting must never break a backup
+            logger.warning("notification webhook failed: %s", exc)
+            return False
+        return True
+
+    # -- restore --------------------------------------------------------------
+
+    def restore(self, path: str | Path, *, dry_run: bool = False) -> RestoreReport:
+        """Replay an export (archive zip or raw-bearing ndjson) into the DB.
+
+        Rows go through the same classified ``upsert_items`` path a live
+        backup uses, carrying their stored ``content_hash`` verbatim, so a
+        re-restore of the same bundle is a no-op ("unchanged"). Existing
+        sources are never reconfigured — a source row is created only when
+        missing (type from the bundle, empty config). Cursors are untouched:
+        a freshly restored source simply does a full run on its next backup.
+        Each restored source gets a ``mode="restore"`` entry in run history.
+        """
+        from ..restore import (
+            iter_export_rows,
+            prepared_item_from_row,
+            read_manifest,
+            skipped_extras,
+            verify_archive,
+        )
+        from ..storage.migrations import SCHEMA_VERSION
+
+        src_path = Path(path).expanduser()
+        if not src_path.is_file():
+            raise ConfigError(f"no such file: {src_path}")
+        from ..crypto import is_encrypted
+
+        if is_encrypted(src_path):
+            # Decrypt to a private temp file and restore that; the passphrase
+            # comes from the environment/.env, never argv.
+            import shutil
+            import tempfile
+
+            from ..crypto import (
+                DEFAULT_PASSPHRASE_ENV,
+                decrypt_file,
+                resolve_passphrase,
+            )
+
+            passphrase = resolve_passphrase(self.secret_store, DEFAULT_PASSPHRASE_ENV)
+            tmpdir = Path(tempfile.mkdtemp(prefix="dbs-restore-"))
+            try:
+                plain = tmpdir / "bundle"
+                decrypt_file(src_path, plain, passphrase)
+                report = self.restore(plain, dry_run=dry_run)
+                report.path = str(src_path)  # report the file the user named
+                return report
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+        manifest = read_manifest(src_path)
+        if manifest is not None:
+            # A checksummed bundle is verified before a single row is ingested;
+            # a corrupt or tampered bundle must never be partially restored.
+            integrity = verify_archive(src_path)
+            if integrity["issues"]:
+                raise ConfigError(
+                    "bundle failed integrity verification: "
+                    + "; ".join(integrity["issues"][:5])
+                )
+        if manifest is not None:
+            bundle_schema = manifest.get("db_schema_version")
+            if isinstance(bundle_schema, int) and bundle_schema > SCHEMA_VERSION:
+                raise ConfigError(
+                    f"bundle was written by a newer dbs (db_schema_version "
+                    f"{bundle_schema} > this build's {SCHEMA_VERSION}); "
+                    f"upgrade dbs before restoring."
+                )
+        warnings: list[str] = []
+        revisions_skipped, media_skipped = skipped_extras(manifest)
+        if revisions_skipped:
+            warnings.append(
+                f"{revisions_skipped} revision row(s) in the bundle were not "
+                f"restored (restore replays the latest item state only)"
+            )
+        if media_skipped:
+            warnings.append(
+                f"{media_skipped} media file(s) in the bundle were not restored"
+            )
+
+        fetched = 0
+        records: dict[str, Any] = {}
+        runs: dict[str, int] = {}
+        buffers: dict[str, list] = {}
+        seen: dict[str, int] = {}
+        stats: dict[str, BatchResult] = {}
+
+        def flush(name: str) -> None:
+            batch = buffers[name]
+            if not batch:
+                return
+            res = self.storage.upsert_items(records[name].id, runs[name], batch)
+            stats[name].merge(res)
+            buffers[name] = []
+
+        for row in iter_export_rows(src_path):
+            fetched += 1
+            name = str(row.get("source") or "").strip()
+            if not name:
+                raise ConfigError(f"{src_path}: row {fetched} has no source name")
+            item = prepared_item_from_row(row, f"{src_path}: row {fetched}")
+            seen[name] = seen.get(name, 0) + 1
+            if dry_run:
+                continue
+            if name not in records:
+                existing = self.storage.get_source(name)
+                if existing is None:
+                    stype = str(row.get("type") or "unknown")
+                    existing = self.storage.upsert_source(
+                        name, stype, f"restored:{stype}", "{}", 1
+                    )
+                records[name] = existing
+                runs[name] = self.storage.begin_run(
+                    existing.id, existing.plugin_id, "restore", None
+                )
+                buffers[name] = []
+                stats[name] = BatchResult()
+            buffers[name].append(item)
+            if len(buffers[name]) >= 500:
+                flush(name)
+
+        for name in buffers:
+            flush(name)
+        for name, run_id in runs.items():
+            self.storage.finish_run(
+                run_id, RunStatus.SUCCESS.value, stats[name],
+                items_seen=seen.get(name, 0), cursor_after=None, error=None,
+                warnings=[],
+            )
+
+        totals = BatchResult()
+        for st in stats.values():
+            totals.merge(st)
+        expected = ((manifest or {}).get("counts") or {}).get("items")
+        if isinstance(expected, int) and expected != fetched:
+            warnings.append(
+                f"manifest says {expected} item(s) but the bundle held {fetched}"
+            )
+        return RestoreReport(
+            path=str(src_path),
+            dry_run=dry_run,
+            sources=sorted(seen),
+            fetched=fetched,
+            created=totals.created,
+            updated=totals.updated,
+            unchanged=totals.unchanged,
+            deleted=totals.deleted,
+            revisions_skipped=revisions_skipped,
+            media_skipped=media_skipped,
+            warnings=warnings,
+        )
+
+    # -- maintenance ---------------------------------------------------------
+
+    def maintain(
+        self, *, vacuum: bool = False, snapshot: str | Path | None = None
+    ) -> MaintenanceReport:
+        """Database housekeeping: flush the WAL, refresh planner statistics,
+        optionally compact (``vacuum``) and write a consistent single-file
+        snapshot (``snapshot`` — safe to copy off-machine, unlike a raw copy
+        of a live WAL-mode database file, which misses the ``-wal`` sidecar).
+        """
+        # Retention first, so a --vacuum in the same pass reclaims the pages.
+        revisions_pruned = 0
+        for name, sc in self.config.sources.items():
+            if sc.keep_revisions > 0:
+                source = self.storage.get_source(name)
+                if source is not None:
+                    revisions_pruned += self.storage.prune_revisions(
+                        source.id, sc.keep_revisions
+                    )
+        stats = self.storage.maintain(vacuum=vacuum)
+        snapshot_path: str | None = None
+        snapshot_bytes: int | None = None
+        if snapshot is not None:
+            snapshot_bytes = self.storage.vacuum_into(snapshot)
+            snapshot_path = str(Path(snapshot).expanduser())
+        return MaintenanceReport(
+            database=str(stats.get("path", "")),
+            revisions_pruned=revisions_pruned,
+            wal_checkpointed=bool(stats.get("wal_checkpointed", False)),
+            optimized=bool(stats.get("optimized", False)),
+            vacuumed=bool(stats.get("vacuumed", False)),
+            size_before=int(stats.get("size_before", 0)),
+            size_after=int(stats.get("size_after", 0)),
+            snapshot_path=snapshot_path,
+            snapshot_bytes=snapshot_bytes,
+        )
+
+    # -- doctor ---------------------------------------------------------------
+
+    def doctor(self) -> list[DoctorCheck]:
+        """Environment/health diagnostics — the README's troubleshooting
+        checklist as a command. Read-only; never mutates anything."""
+        import importlib.metadata
+
+        checks: list[DoctorCheck] = []
+
+        integrity = self.storage.integrity_check()
+        checks.append(DoctorCheck(
+            "database.integrity", "ok" if integrity == "ok" else "fail", integrity,
+        ))
+
+        wal = Path(str(self.config.database_path) + "-wal")
+        wal_bytes = wal.stat().st_size if wal.exists() else 0
+        checks.append(DoctorCheck(
+            "database.wal",
+            "warn" if wal_bytes > 10_000_000 else "ok",
+            f"{wal_bytes:,} bytes"
+            + (" — run `dbs maintain` to fold it into the main file"
+               if wal_bytes > 10_000_000 else ""),
+        ))
+
+        interrupted = [
+            r for r in self.storage.recent_runs(None, 50)
+            if r.get("status") == "interrupted"
+        ]
+        checks.append(DoctorCheck(
+            "runs.interrupted",
+            "warn" if interrupted else "ok",
+            f"{len(interrupted)} interrupted run(s) in recent history"
+            + (" — a crash/kill; the next backup resumes from the last "
+               "committed cursor" if interrupted else ""),
+        ))
+
+        for name, sc in self.config.sources.items():
+            if not sc.enabled:
+                checks.append(DoctorCheck(f"source.{name}", "ok", "disabled"))
+                continue
+            try:
+                rc = self.registry.get(sc.type)
+            except Exception as exc:  # noqa: BLE001 - reported, not raised
+                checks.append(DoctorCheck(
+                    f"source.{name}", "fail",
+                    f"connector {sc.type!r} unavailable: {exc}",
+                ))
+                continue
+            try:
+                rc.cls.config_model(**sc.options)
+            except Exception as exc:  # noqa: BLE001 - reported, not raised
+                checks.append(DoctorCheck(
+                    f"source.{name}.config", "fail", f"invalid options: {exc}",
+                ))
+            ready, hint = rc.cls.check_ready()
+            checks.append(DoctorCheck(
+                f"source.{name}.deps",
+                "ok" if ready else "warn",
+                "runtime dependencies importable" if ready
+                else f"missing optional deps — {hint or 'see the connector docs'}",
+            ))
+            declared = tuple(rc.cls.secret_keys)
+            if rc.cls.capabilities.requires_auth and declared:
+                present = [k for k in declared if self.secret_store.get(k)]
+                checks.append(DoctorCheck(
+                    f"source.{name}.secrets",
+                    "ok" if present else "fail",
+                    (f"set: {', '.join(present)}" if present
+                     else f"none of {', '.join(declared)} is set — the run "
+                          f"will fail at auth"),
+                ))
+            # Staleness: no successful run within 2x the schedule cadence —
+            # the classic "backups have been silently failing for months".
+            source = self.storage.get_source(name)
+            if source is not None:
+                from .timeutil import parse_iso
+
+                last_ok = next(
+                    (parse_iso(r["started_at"])
+                     for r in self.storage.recent_runs(source.id, 50)
+                     if r.get("status") == "success" and r.get("started_at")),
+                    None,
+                )
+                slack = _SCHEDULE_SLACK.get(
+                    (sc.schedule or "daily").lower(), _SCHEDULE_SLACK["daily"]
+                )
+                if last_ok is not None and self.clock() - last_ok > 2 * slack:
+                    checks.append(DoctorCheck(
+                        f"source.{name}.staleness", "warn",
+                        f"last successful backup was {last_ok.isoformat()} — "
+                        f"more than twice the {sc.schedule or 'daily'} cadence ago",
+                    ))
+
+        try:
+            ytdlp_version = importlib.metadata.version("yt-dlp")
+            checks.append(DoctorCheck(
+                "deps.yt-dlp", "ok",
+                f"{ytdlp_version} installed — YouTube changes fast; refresh "
+                f"periodically with `dbs update-ytdlp` (monthly is a good cadence "
+                f"for unattended installs)",
+            ))
+        except importlib.metadata.PackageNotFoundError:
+            checks.append(DoctorCheck(
+                "deps.yt-dlp", "ok", "not installed (only the youtube/skool "
+                "connectors and research need it)",
+            ))
+        return checks
 
     # -- verify -------------------------------------------------------------
 

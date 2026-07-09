@@ -129,10 +129,31 @@ ALTER TABLE media ADD COLUMN data BLOB;
 ALTER TABLE media ADD COLUMN byte_size INTEGER;
 """
 
+# "Succeeded with caveats" — a JSON array of warning strings on each run
+# (e.g. a refused deletion sweep, a zero-item enumeration), kept separate
+# from `error` so a SUCCESS run's caveats stay visible in status/history.
+MIGRATION_0003 = """
+ALTER TABLE sync_runs ADD COLUMN warnings TEXT;
+"""
+
+# Scale indexes. Every original item index is (source_id, ...)-prefixed, so
+# the cross-source orderings (browse's item_created_at DESC, export's
+# source-grouped walk) forced full sorts; and media scans filtering on
+# `data IS NOT NULL` (blob export, metrics) had no index at all — a partial
+# index keeps it tiny (reference-only rows aren't indexed).
+MIGRATION_0004 = """
+CREATE INDEX IF NOT EXISTS idx_items_created_global
+    ON items(item_created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_media_with_data
+    ON media(item_id) WHERE data IS NOT NULL;
+"""
+
 # (version, sql) in ascending order.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, MIGRATION_0001),
     (2, MIGRATION_0002),
+    (3, MIGRATION_0003),
+    (4, MIGRATION_0004),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]

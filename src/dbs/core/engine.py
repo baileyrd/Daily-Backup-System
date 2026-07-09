@@ -89,6 +89,7 @@ class Engine:
         started = ctx.now()
         status = RunStatus.SUCCESS
         error: str | None = None
+        warnings: list[str] = []
 
         def emit(phase: ProgressPhase, *, note: str = "", result: RunResult | None = None) -> None:
             # Best-effort: a progress renderer must never break or slow a backup.
@@ -136,6 +137,19 @@ class Engine:
             connector.open(ctx)
             for event in connector.fetch(ctx):
                 if isinstance(event, BackupItem):
+                    if ctx.limit is not None and items_seen >= ctx.limit:
+                        # Engine-enforced item cap (backup --limit): a smoke
+                        # test / first-run bound that works for EVERY
+                        # connector, none of which need to know about it. A
+                        # truncated run must never sweep — see below.
+                        warning = (
+                            f"stopped after {items_seen} item(s) "
+                            f"(--limit {ctx.limit}); deletion detection skipped"
+                        )
+                        warnings.append(warning)
+                        ctx.logger.warning("%s: %s", ctx.source_name, warning)
+                        reconcile_live = None
+                        break
                     items_seen += 1
                     buffer.append(self._prepare(event, caps, volatile, valid_kinds))
                     if len(buffer) >= self.batch_max:
@@ -158,10 +172,12 @@ class Engine:
                 # Not an error (a source can be legitimately empty), but the
                 # historical failure mode here is a silent auth/scrape problem
                 # dressed up as success — make it visible.
-                ctx.logger.warning(
-                    "%s: run enumerated 0 items — if this source should not be "
-                    "empty, check its auth/config", ctx.source_name,
+                warning = (
+                    "run enumerated 0 items — if this source should not be "
+                    "empty, check its auth/config"
                 )
+                warnings.append(warning)
+                ctx.logger.warning("%s: %s", ctx.source_name, warning)
 
             if (
                 reconcile_live is not None
@@ -177,14 +193,17 @@ class Engine:
                 )
                 if unsafe:
                     # Almost certainly a truncated/partial enumeration — refuse to
-                    # mass-delete. Data is preserved; surface a warning on the run.
+                    # mass-delete. Data is preserved; surface a warning on the run
+                    # (a warning, not an `error`: the committed data is fine and
+                    # the status stays SUCCESS — but the caveat must be visible
+                    # in status/history rather than vanish with exit code 0).
                     warning = (
                         f"deletion sweep skipped for safety: enumeration would "
                         f"delete {len(would_delete)}/{n_live} live items "
                         f"({fraction:.0%} > {self.sweep_safety_fraction:.0%}); "
                         f"the upstream listing looks incomplete"
                     )
-                    error = (error + " | " if error else "") + warning
+                    warnings.append(warning)
                     ctx.logger.warning(warning)
                 else:
                     with self.storage.transaction():
@@ -224,6 +243,7 @@ class Engine:
             self.storage.finish_run(
                 ctx.run_id, status.value, stats,
                 items_seen=items_seen, cursor_after=cursor_after, error=error,
+                warnings=warnings,
             )
         except Exception as exc:  # noqa: BLE001
             try:
@@ -231,6 +251,7 @@ class Engine:
                     ctx.run_id, status.value, BatchResult(),
                     items_seen=items_seen, cursor_after=cursor_after,
                     error=(error or "") + f" [finish_run failed: {type(exc).__name__}: {exc}]",
+                    warnings=warnings,
                 )
             except Exception:
                 pass
@@ -249,6 +270,7 @@ class Engine:
             undeleted=stats.undeleted,
             revisions=stats.revisions,
             error=error,
+            warnings=warnings,
         )
         emit(ProgressPhase.SOURCE_DONE, result=result)
         return result

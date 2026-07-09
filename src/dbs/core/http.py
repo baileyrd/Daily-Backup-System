@@ -6,7 +6,9 @@ an :class:`httpx.Client` and adds:
 
 * retry with exponential backoff + jitter on transient failures
   (network errors, 5xx, and 429),
-* honoring of the ``Retry-After`` header on 429/503,
+* honoring of the ``Retry-After`` header on 429/503 — both the delta-seconds
+  and the HTTP-date form — capped at ``max_retry_after`` so a hostile or
+  misconfigured server can't stall a run for hours with one header,
 * immediate raise on non-429 4xx (a client error won't fix itself by retrying),
 * optional pre-emptive rate limiting (requests/minute).
 
@@ -22,6 +24,8 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable
 
 import httpx
@@ -31,13 +35,25 @@ from .errors import RateLimitedError, TransientFetchError
 _RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
-def _parse_retry_after(value: str | None) -> float | None:
+def _parse_retry_after(value: str | None, *, now: datetime | None = None) -> float | None:
+    """Seconds to wait, from either ``Retry-After`` form (delta or HTTP-date).
+
+    ``now`` is injectable for deterministic tests; a past HTTP-date clamps to 0.
+    """
     if not value:
         return None
     try:
         return max(0.0, float(value))
     except ValueError:
-        return None  # HTTP-date form is uncommon for these APIs; ignore.
+        pass
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None  # neither form; fall back to exponential backoff
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    ref = now or datetime.now(timezone.utc)
+    return max(0.0, (when - ref).total_seconds())
 
 
 class ManagedHTTPClient:
@@ -54,6 +70,12 @@ class ManagedHTTPClient:
     base_backoff:
         Base seconds for exponential backoff (attempt N waits
         ``base_backoff * 2**(N-1)`` plus jitter).
+    max_retry_after:
+        Ceiling on a server-supplied ``Retry-After`` wait. The exponential
+        path is already capped by ``max_backoff``; this separately bounds the
+        honored header so one hostile/broken response can't block a run for
+        a day. Generous by default — a legitimate rate-limit hint (60–120s)
+        is still honored exactly.
     sleep:
         Injectable sleep function (tests pass a no-op to avoid real waits).
     """
@@ -66,6 +88,7 @@ class ManagedHTTPClient:
         rate_limit_per_min: int | None = None,
         base_backoff: float = 0.5,
         max_backoff: float = 30.0,
+        max_retry_after: float = 300.0,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._client = client
@@ -73,6 +96,7 @@ class ManagedHTTPClient:
         self._rate_limit_per_min = rate_limit_per_min
         self._base_backoff = base_backoff
         self._max_backoff = max_backoff
+        self._max_retry_after = max_retry_after
         self._sleep = sleep
         self._request_times: deque[float] = deque()
         self._jitter_state = 0x9E3779B9  # deterministic LCG seed
@@ -140,7 +164,7 @@ class ManagedHTTPClient:
 
     def _backoff(self, attempt: int, retry_after: float | None) -> None:
         if retry_after is not None:
-            self._sleep(retry_after)
+            self._sleep(min(retry_after, self._max_retry_after))
             return
         delay = min(self._max_backoff, self._base_backoff * (2 ** (attempt - 1)))
         self._sleep(delay + self._next_jitter() * self._base_backoff)

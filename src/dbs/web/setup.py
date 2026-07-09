@@ -27,7 +27,10 @@ from datetime import datetime, timezone
 from queue import Empty, Queue
 from typing import Any, Callable, Iterator
 
-from .jobs import JobAlreadyRunning  # reuse the same "busy" signal
+from .jobs import JobAlreadyRunning, _evict_finished  # reuse the same "busy" signal
+
+# Setup logs can be long (pip output); bound what a long-lived server holds.
+_MAX_BUFFERED_LINES = 2000
 
 _SENTINEL = object()
 _CAPTURE_POLL_SECONDS = 1.0
@@ -307,12 +310,15 @@ class SetupManager:
             job = SetupJob(id=self._counter, kind=kind, connector=connector)
             self._current = job
             self._by_id[job.id] = job
+            _evict_finished(self._by_id, keep=20)
         threading.Thread(target=self._run, args=(job, runner), daemon=True).start()
         return job
 
     def _emit(self, job: SetupJob, line: str) -> None:
         with self._lock:
             job.log.append(line)
+            if len(job.log) > _MAX_BUFFERED_LINES:
+                del job.log[: len(job.log) - _MAX_BUFFERED_LINES]
             for q in job._queues:
                 q.put(line)
 

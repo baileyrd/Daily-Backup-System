@@ -80,13 +80,10 @@ def _validate_contract(cls: type) -> None:
         raise ValueError("connector must declare at least one ItemKind")
     if caps.requires_auth and not getattr(cls, "secret_keys", ()):
         raise ValueError("requires_auth=True but no secret_keys declared")
-    if caps.supports_full_enumeration:
-        # Must be able to enumerate live ids one way or another. We can't detect
-        # ReconcileMarker usage statically, so accept either an overridden
-        # enumerate_ids or trust the connector to yield markers; only reject the
-        # clearly-broken case where neither the method is overridden *and* the
-        # connector is the abstract base. This is a light coherence check.
-        pass
+    # supports_full_enumeration honesty can't be checked statically (whether
+    # fetch() yields a ReconcileMarker is a runtime property). It IS visible
+    # at run time: a full/reconcile run that never yields one simply performs
+    # no sweep, and a refused sweep lands on the run's warnings.
 
 
 class ConnectorRegistry:

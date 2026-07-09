@@ -195,6 +195,10 @@ class RunResult:
     undeleted: int = 0
     revisions: int = 0
     error: str | None = None
+    # "Succeeded with caveats" — e.g. a refused deletion sweep or a zero-item
+    # run. Kept separate from `error` so a SUCCESS run's caveats are visible
+    # without masquerading as a failure (and vice versa).
+    warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -212,6 +216,7 @@ class RunResult:
             "undeleted": self.undeleted,
             "revisions": self.revisions,
             "error": self.error,
+            "warnings": list(self.warnings),
         }
 
 
@@ -274,6 +279,9 @@ class SourceStatus:
     run_count: int
     watermark: datetime | None
     has_interrupted_runs: bool
+    schedule: str = "daily"
+    next_due_at: datetime | None = None  # None = due right now
+    due_now: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -289,6 +297,9 @@ class SourceStatus:
             "run_count": self.run_count,
             "watermark": self.watermark.isoformat() if self.watermark else None,
             "has_interrupted_runs": self.has_interrupted_runs,
+            "schedule": self.schedule,
+            "next_due_at": self.next_due_at.isoformat() if self.next_due_at else None,
+            "due_now": self.due_now,
         }
 
 
@@ -321,6 +332,78 @@ class VerifyReport:
     issues: list[VerifyIssue] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class DoctorCheck:
+    """One ``dbs doctor`` finding. ``status`` is ``ok`` / ``warn`` / ``fail``."""
+
+    name: str
+    status: str
+    detail: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "status": self.status, "detail": self.detail}
+
+
+@dataclass(slots=True)
+class MaintenanceReport:
+    """Result of a database maintenance pass. Plain data; no rendering."""
+
+    database: str
+    wal_checkpointed: bool
+    optimized: bool
+    vacuumed: bool
+    size_before: int
+    size_after: int
+    snapshot_path: str | None = None
+    snapshot_bytes: int | None = None
+    revisions_pruned: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "database": self.database,
+            "wal_checkpointed": self.wal_checkpointed,
+            "optimized": self.optimized,
+            "vacuumed": self.vacuumed,
+            "size_before": self.size_before,
+            "size_after": self.size_after,
+            "snapshot_path": self.snapshot_path,
+            "snapshot_bytes": self.snapshot_bytes,
+            "revisions_pruned": self.revisions_pruned,
+        }
+
+
+@dataclass(slots=True)
+class RestoreReport:
+    """Result of replaying an export back into the database. Plain data."""
+
+    path: str
+    dry_run: bool
+    sources: list[str]
+    fetched: int = 0
+    created: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    deleted: int = 0
+    revisions_skipped: int = 0
+    media_skipped: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "dry_run": self.dry_run,
+            "sources": list(self.sources),
+            "fetched": self.fetched,
+            "created": self.created,
+            "updated": self.updated,
+            "unchanged": self.unchanged,
+            "deleted": self.deleted,
+            "revisions_skipped": self.revisions_skipped,
+            "media_skipped": self.media_skipped,
+            "warnings": list(self.warnings),
+        }
+
+
 __all__ = [
     "utcnow",
     "MediaRef",
@@ -339,6 +422,9 @@ __all__ = [
     "ConnectorInfo",
     "VerifyIssue",
     "VerifyReport",
+    "DoctorCheck",
+    "MaintenanceReport",
+    "RestoreReport",
     "Capabilities",
     "ItemKind",
 ]

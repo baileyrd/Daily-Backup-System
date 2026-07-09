@@ -451,7 +451,8 @@ def test_install_commands_are_server_derived(setup_client):
     from dbs.web.setup import install_commands
     import sys
 
-    reg = ConnectorRegistry(); reg.discover()
+    reg = ConnectorRegistry()
+    reg.discover()
     cmds = install_commands(reg.get("reddit"))
     labels = [label for label, _ in cmds]
     argvs = [argv for _, argv in cmds]
@@ -554,7 +555,6 @@ def test_to_netscape_cookies_format():
          "secure": False, "httpOnly": False, "expires": -1},  # session cookie
     ])
     assert out.startswith("# Netscape HTTP Cookie File")
-    lines = [ln for ln in out.splitlines() if ln and not ln.startswith("#") or ln.startswith("#HttpOnly_")]
     # httpOnly cookie carries the #HttpOnly_ prefix and subdomain TRUE.
     assert "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\tabc" in out
     # session cookie -> expiry 0, host-only FALSE, secure FALSE.
@@ -783,6 +783,15 @@ def test_research_job_runs_with_fake_pipeline(client, monkeypatch):
     assert snap["result"]["indexed"] == 1
     assert "# Research: my topic" in snap["result"]["report"]
     assert "fake progress line" in snap["log"]
+
+    # The report is persisted to disk — job history is in-memory, so before
+    # this a server restart discarded minutes of NotebookLM work.
+    from pathlib import Path as _Path
+
+    saved = _Path(snap["result"]["report_path"])
+    assert saved.exists() and saved.name.startswith("report-")
+    assert "my-topic" in saved.name
+    assert "# Research: my topic" in saved.read_text(encoding="utf-8")
 
     # The rendered markdown downloads once done.
     dl = client.get(f"/api/research/{job['id']}/report")
@@ -1022,3 +1031,116 @@ def test_cached_thumbnail_resolves_loom_via_oembed(tmp_path, monkeypatch):
     n = len(calls)
     assert webapp._cached_thumbnail(share, cache) == p1
     assert len(calls) == n
+
+
+# --- security gate: Host / Origin / bearer token -----------------------------
+
+
+@pytest.fixture
+def token_client(tmp_path):
+    """A client whose app requires a bearer token on every /api call."""
+    cfg = _write_setup(tmp_path)
+    app = create_app(str(cfg), auth_token="s3cret")
+    with TestClient(app) as c:
+        yield c
+
+
+def test_unrecognized_host_header_is_rejected(client):
+    # DNS-rebinding defense: a rebound hostname arrives with the attacker's
+    # domain in Host. Only loopback names are recognized without a token.
+    r = client.get("/api/status", headers={"host": "evil.example.com"})
+    assert r.status_code == 400
+    assert "Host" in r.json()["detail"]
+
+
+def test_local_hosts_are_recognized(client):
+    for host in ("127.0.0.1:8000", "localhost", "[::1]:8000"):
+        assert client.get("/api/status", headers={"host": host}).status_code == 200
+
+
+def test_cross_origin_mutation_is_rejected(secret_client):
+    r = secret_client.post(
+        "/api/secrets",
+        json={"name": "RAINDROP_TOKEN", "value": "x"},
+        headers={"origin": "https://evil.example.com"},
+    )
+    assert r.status_code == 403
+    # ...and nothing was written.
+    assert not secret_client._env_path.exists()
+
+
+def test_local_origin_mutation_is_allowed(secret_client):
+    r = secret_client.post(
+        "/api/secrets",
+        json={"name": "RAINDROP_TOKEN", "value": "x"},
+        headers={"origin": "http://localhost:8000"},
+    )
+    assert r.status_code == 200
+
+
+def test_token_required_on_api_when_configured(token_client):
+    assert token_client.get("/api/status").status_code == 401
+    assert token_client.get(
+        "/api/status", headers={"authorization": "Bearer wrong"}
+    ).status_code == 401
+    assert token_client.get(
+        "/api/status", headers={"authorization": "Bearer s3cret"}
+    ).status_code == 200
+    # Query-param form: what EventSource streams and download links use.
+    assert token_client.get("/api/status?token=s3cret").status_code == 200
+    # The SPA itself stays reachable so it can pick the token up from the URL.
+    assert token_client.get("/").status_code == 200
+
+
+def test_token_gate_replaces_host_check(token_client):
+    # With a token configured, the token is the gate — a non-local hostname
+    # (e.g. a reverse-proxied deployment) works, but only WITH the token.
+    r = token_client.get(
+        "/api/status",
+        headers={"host": "backup.example.com", "authorization": "Bearer s3cret"},
+    )
+    assert r.status_code == 200
+    r = token_client.get("/api/status", headers={"host": "backup.example.com"})
+    assert r.status_code == 401
+
+
+def test_delete_secret_requires_declared_name(secret_client):
+    r = secret_client.delete("/api/secrets/TOTALLY_UNKNOWN_NAME")
+    assert r.status_code == 400
+    assert "not a declared secret" in r.json()["detail"]
+
+
+# --- built-in scheduler (dbs serve --schedule) --------------------------------
+
+
+def test_scheduler_backs_up_due_sources(tmp_path):
+    # The offline skool source has never run -> due immediately. With a tiny
+    # tick interval the scheduler should start (and finish) a real only_due
+    # backup job shortly after startup, visible like any button-started job.
+    cfg = _write_setup(tmp_path)
+    app = create_app(str(cfg), schedule_seconds=0.05)
+    with TestClient(app) as c:
+        deadline = time.time() + 10.0
+        snap = None
+        while time.time() < deadline:
+            snap = c.get("/api/backup/current").json()
+            if snap.get("status") == "done":
+                break
+            time.sleep(0.05)
+        assert snap and snap.get("status") == "done", snap
+        assert snap["spec"] == {"all": True, "only_due": True}
+        assert snap["results"], "the due source should have been backed up"
+
+        # Once backed up, the source is no longer due: give the loop a few
+        # more ticks and confirm no second job replaced the finished one.
+        job_id = snap["id"]
+        time.sleep(0.3)
+        assert c.get("/api/backup/current").json()["id"] == job_id
+
+
+def test_meta_reports_scheduler_state(tmp_path, client):
+    assert client.get("/api/meta").json()["scheduler_enabled"] is False
+    cfg = _write_setup(tmp_path)
+    app = create_app(str(cfg), schedule_seconds=60)
+    with TestClient(app) as c:
+        assert c.get("/api/meta").json()["scheduler_enabled"] is True

@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from collections import Counter, deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +54,7 @@ from typing import Any, Iterator
 from pydantic import BaseModel, ConfigDict, Field
 
 from ._tiptap import _md_link_text, tiptap_markdown
+from ._util import run_with_watchdog
 
 from ..core import (
     AuthCapture,
@@ -270,6 +272,17 @@ class SkoolConfig(BaseModel):
         description="Forward yt-dlp's full diagnostic chain into the run log. "
                      "Noisy — enable only while debugging a stubborn video.",
     )
+    # Stall watchdog for the yt-dlp call itself (yt-dlp's Python API has no
+    # call-level timeout, so a hung download would otherwise block the whole
+    # scheduled run forever). Measures time WITHOUT progress — a download
+    # hook resets the clock — so a big-but-healthy video is never cut off.
+    # Mirrors skool-downloader's 180s VIDEO_STALL_TIMEOUT_MS.
+    video_stall_timeout: int = Field(
+        default=180, ge=0,
+        description="Abandon a video download after this many seconds without "
+                     "progress; the video is retried on a later run. 0 = no "
+                     "watchdog.",
+    )
     # Write a markdown note of each lesson page (url2obs-convention frontmatter,
     # body converted from Skool's editor JSON, links to the downloaded media)
     # into the lesson's folder, next to its video and resources.
@@ -346,6 +359,7 @@ class SkoolConnector(Connector):
         requires_auth=True,
         supports_rate_limit_backoff=False,
         paginated=False,
+        concurrency="serial",  # drives a real Playwright browser + HLS downloads
     )
     # Skool rewrites `updatedAt` constantly; strip it before hashing to avoid
     # revision spam on otherwise-unchanged lessons.
@@ -464,26 +478,11 @@ class SkoolConnector(Connector):
 
     @staticmethod
     def _launch_context(pw: Any, cfg: SkoolConfig, session_dir: Path) -> Any:
-        """Launch the captured persistent profile, dressed as a regular Chrome.
+        """Launch the captured session as a regular-looking Chrome
+        (see ``_playwright.launch_scrubbed_context`` for the why)."""
+        from ._playwright import launch_scrubbed_context
 
-        Mirrors the Reddit connector: headless Chromium advertises
-        ``HeadlessChrome/<ver>`` in its user agent (a bot signal), so probe the
-        launched browser's own UA and relaunch once with the token scrubbed
-        (version-exact by construction).
-        """
-        kwargs: dict[str, Any] = dict(
-            user_data_dir=str(session_dir),
-            headless=cfg.headless,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context = pw.chromium.launch_persistent_context(**kwargs)
-        probe = context.pages[0] if context.pages else context.new_page()
-        ua = probe.evaluate("() => navigator.userAgent")
-        if "HeadlessChrome" in ua:
-            context.close()
-            kwargs["user_agent"] = ua.replace("HeadlessChrome", "Chrome")
-            context = pw.chromium.launch_persistent_context(**kwargs)
-        return context
+        return launch_scrubbed_context(pw, session_dir, headless=cfg.headless)
 
     def _walk(
         self, page: Any, cfg: SkoolConfig, downloads: Path, ctx: RunContext
@@ -502,6 +501,11 @@ class SkoolConnector(Connector):
             stats: Counter[str] = Counter()
             data = self._classroom_next_data(page, slug, ctx)
             if data is None:
+                # Same shape of gap as the course-level fetch failure below:
+                # every course and lesson of this community is absent from
+                # this run's live_ids, so fetch() must skip deletion detection
+                # rather than reconcile against incomplete data.
+                yield {"_kind": "_partial_enumeration"}
                 continue
             props = (data.get("props") or {}).get("pageProps") or {}
             render = props.get("renderData") or {}
@@ -1151,9 +1155,30 @@ class SkoolConnector(Connector):
             extractor_args, js_runtimes or "none (nodejs-wheel not installed/found)",
         )
         opts["logger"] = _YtdlpLogger(ctx.logger, cfg.video_debug)
-        try:
+        # Stall watchdog: yt-dlp's Python API has no call-level timeout, so a
+        # wedged download (fragment loop, hung JS-challenge subprocess) would
+        # otherwise block the run forever. Download + postprocessor hooks feed
+        # the heartbeat, so only genuine no-progress time counts; on timeout
+        # the call is abandoned and classified "failed" (retried next run).
+        last_activity = [time.monotonic()]
+
+        def _beat(_info: dict[str, Any]) -> None:
+            last_activity[0] = time.monotonic()
+
+        opts["progress_hooks"] = [_beat]
+        opts["postprocessor_hooks"] = [_beat]
+
+        def _do_download() -> None:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
+
+        try:
+            run_with_watchdog(
+                _do_download,
+                timeout=float(cfg.video_stall_timeout),
+                heartbeat=lambda: last_activity[0],
+                description=f"skool video download {dest.name}",
+            )
         except Exception as exc:  # noqa: BLE001 - includes DownloadError; best-effort
             kind = _classify_video_error(exc)
             if kind == "unavailable":

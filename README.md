@@ -16,8 +16,14 @@ exports** (JSON / NDJSON / CSV / Markdown / Obsidian vault / zip archive).
   CLI is a thin renderer, and a web UI can reuse the same core later.
 - **Exportable** — produce a portable, self-describing backup bundle on demand.
 
-> Status: v0.1 ships the full foundation plus four built-in connectors:
-> **Raindrop.io** (the REST/token reference), **Reddit** (saved posts &
+> Status: v0.1 ships the full foundation plus ten built-in connectors:
+> **Raindrop.io** (the REST/token reference), **GitHub** (starred repositories
+> & gists — token API, `GITHUB_TOKEN`), **Pinboard** (bookmarks —
+> `PINBOARD_TOKEN`, one-request runs when nothing changed), **Readwise**
+> (books & highlights — `READWISE_TOKEN`, true server-side deltas),
+> **Mastodon** (bookmarks & favourites — per-instance `MASTODON_TOKEN`),
+> **Bluesky** (likes — app password), **Spotify** (liked songs & playlist
+> catalog — OAuth refresh token), **Reddit** (saved posts &
 > comments), **YouTube** (Watch Later, Liked, history, playlists), and **Skool**
 > (a native catalog of your communities' classrooms). Reddit, YouTube, and Skool
 > are *browser-session* connectors — they reuse your logged-in session rather than
@@ -71,15 +77,22 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | Command | Description |
 |---|---|
 | `dbs init [--force]` | Create config + `.env.example` and initialize the DB (idempotent; `--force` overwrites an existing config). |
-| `dbs backup [SOURCE] [--all] [--only-due] [--force-full] [--reconcile] [--dry-run] [--progress/--no-progress]` | Run an incremental backup. `auto` mode picks incremental vs. reconcile. `--only-due` skips sources backed up within the last 20h (for `--all` runs more than once a day). A live status line (running item counter + per-source `[i/N]` position) shows automatically on a TTY; force it with `--progress` or silence it with `--no-progress`. |
+| `dbs backup [SOURCE] [--all] [--only-due] [--force-full] [--reconcile] [--dry-run] [--limit N] [--parallel N] [--progress/--no-progress]` | Run an incremental backup. `auto` mode picks incremental vs. reconcile. `--only-due` skips sources whose `schedule` cadence (`hourly`/`daily`/`weekly`, default daily ≈ 20h of slack) hasn't elapsed (for `--all` runs more than once a day). `--parallel N` backs up to N sources at once (default 1, or `[dbs] parallel` in config); browser/downloader-heavy connectors (reddit, skool, youtube) never overlap each other. A live status line (running item counter + per-source `[i/N]` position) shows automatically on a TTY; force it with `--progress` or silence it with `--no-progress`. |
 | `dbs status [SOURCE] [--json]` | Per-source item counts, last run, cursor watermark, warnings. |
 | `dbs history [SOURCE] [-n N] [--json]` | Recent backup runs and their stats. |
-| `dbs export --format FMT --out PATH [filters]` | Export to `json`/`ndjson`/`csv`/`markdown`/`obsidian`/`archive`. |
+| `dbs items [ID] [--source S] [--type T] [--since D] [--until D] [--include-deleted] [-q TEXT] [-n N] [--offset N] [--json]` | Browse what's actually stored — the CLI counterpart of the web *Browse* tab. Lists items newest-first with the same filters and full-text search as the web UI (FTS5 with a substring fallback); `-n`/`--offset` page through. `dbs items ID` shows one item's full detail: fields, archived-media list, and the verbatim raw payload. |
+| `dbs stats [--json]` | Aggregate database metrics — the web UI's metrics strip, in the terminal: live/deleted item counts per source and kind, revision count, archived media count + bytes. |
+| `dbs export --format FMT --out PATH [filters] [--encrypt]` | Export to `json`/`ndjson`/`csv`/`markdown`/`obsidian`/`archive`. `--encrypt` seals the output with a passphrase (scrypt + AES-256-GCM, from `DBS_EXPORT_PASSPHRASE` in `.env`/the environment — never argv) so it's safe to park on untrusted storage; needs the `[crypto]` extra. |
+| `dbs decrypt SRC [--out PATH]` | Decrypt a `dbs export --encrypt` file back to its plain form (`dbs restore` reads encrypted bundles directly). |
+| `dbs restore PATH [--dry-run] [--json]` | Restore an exported backup (archive `.zip` or raw-bearing `.ndjson`) into the database. Idempotent — re-restoring the same bundle changes nothing. |
 | `dbs sources list [--json] \| add NAME --type TYPE [--set k=v] \| check` | Manage and validate configured sources. |
 | `dbs connectors list [--verbose] [--json] \| describe TYPE` | Inspect installed connectors (incl. load failures). |
-| `dbs verify [SOURCE]` | Database + per-source integrity self-check. |
+| `dbs verify [SOURCE] [--archive PATH]` | Database + per-source integrity self-check; `--archive` verifies an exported bundle's per-entry sha256 checksums instead. |
+| `dbs doctor [--json]` | Diagnose the environment: database health, per-source connector readiness, secrets presence, dependency freshness. Exits 1 on failures. |
+| `dbs update-ytdlp [--dry-run]` | Upgrade yt-dlp in this environment (recommended monthly for unattended installs). |
+| `dbs maintain [--vacuum] [--snapshot PATH] [--json]` | Database housekeeping: flush the WAL and refresh query-planner stats; `--vacuum` compacts the file, per-source `keep_revisions` retention is applied, `--snapshot` writes a consistent single-file copy that's safe to move off-machine (a raw copy of a live WAL-mode DB misses the `-wal` sidecar). |
 | `dbs schedule [--interval daily\|hourly]` | Print ready-to-use cron / systemd snippets. |
-| `dbs serve [--host H] [--port P] [--no-setup]` | Launch the web management UI (needs the `[web]` extra). In-UI setup (dependency install + browser-login capture) is on by default; `--no-setup` disables it. |
+| `dbs serve [--host H] [--port P] [--no-setup] [--token T] [--schedule]` | Launch the web management UI (needs the `[web]` extra). In-UI setup (dependency install + browser-login capture) is on by default; `--no-setup` disables it. `--schedule` backs up due sources automatically while the server runs (no external cron needed); `--token` adds bearer-token auth (required off-localhost). |
 | `dbs research youtube TOPIC [...]` \| `dbs research youtube-backup TOPIC [...]` | Ad-hoc YouTube research: search (or reuse a backed-up list), synthesize via NotebookLM, write a markdown report. See [docs/research.md](docs/research.md). |
 | `dbs version` | Tool + core API version. |
 
@@ -101,9 +114,12 @@ it you can:
 - **run a backup** (one source or all) and watch a **live progress bar** —
   it streams the engine's progress events over Server-Sent Events;
 - **browse what's actually stored** (the *Browse* tab) — filter items by
-  source/type/date/text search, page through the results, and open a detail
-  drawer with the raw payload and any archived media; a metrics strip shows
-  item/revision/media counts per source and kind;
+  source/type/date and **full-text search** over titles and bodies (SQLite
+  FTS5: all words must match, across fields, with prefix matching on the
+  last word; falls back to plain substring search on SQLite builds without
+  FTS5), page through the results, and open a detail drawer with the raw
+  payload and any archived media; a metrics strip shows item/revision/media
+  counts per source and kind;
 - browse installed **connectors** (capabilities, config schema, readiness);
 - **install** a connector's optional dependencies and run reddit's one-time
   **browser login** — see *Getting connectors working* below;
@@ -174,10 +190,13 @@ The *API keys* tab lets you set the secrets your configured sources need (e.g.
 The web dependencies (`fastapi`, `uvicorn`) are optional — the core never imports
 them, and `dbs serve` prints an install hint if the `[web]` extra is missing.
 
-> **Security:** `dbs serve` binds to `127.0.0.1` and has **no authentication** —
-> it's meant for local, single-user use (the same trust level as editing `.env`
-> by hand). Don't expose it to an untrusted network; put it behind your own auth
-> first if you must.
+> **Security:** `dbs serve` binds to `127.0.0.1` and is meant for local,
+> single-user use (the same trust level as editing `.env` by hand). Requests
+> with a non-local `Host` header are rejected (DNS-rebinding defense) and
+> cross-origin state-changing requests are blocked (CSRF defense). Binding to
+> any other address **requires** `--token <secret>`: every API call must then
+> carry it (`Authorization: Bearer …` or `?token=…`); open the UI once at
+> `/?token=…` and it stores the token locally.
 
 ## How incremental backup works
 
@@ -203,7 +222,12 @@ See [docs/architecture.md](docs/architecture.md) for the full design, including
 the Raindrop-specific strategy (the API has no `lastUpdate` sort, so it uses a
 `-created` early-stop fast path + periodic reconcile + trash poll).
 
-Planned/deferred work is tracked in [docs/BACKLOG.md](docs/BACKLOG.md).
+Planned/deferred work is tracked in [docs/BACKLOG.md](docs/BACKLOG.md). A
+detailed as-built review lives in
+[docs/architecture-analysis.md](docs/architecture-analysis.md), the
+engineering principles behind the code in
+[docs/coding-philosophy.md](docs/coding-philosophy.md), and the improvement
+roadmap distilled from that review in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Configuration
 
@@ -380,10 +404,9 @@ alongside your own maintenance cadence) — YouTube changes frequently enough
 that an aging yt-dlp eventually fails to extract some videos regardless of
 any other setting here. `pyproject.toml` only pins a *floor* version, which
 new installs pick up automatically but an already-installed environment
-won't refresh on its own. This mirrors skool-downloader's own documented
-practice (its `update-ytdlp` command, recommended weekly for unattended
-nightly archives) — `dbs` has no equivalent built-in command yet, so this is
-a manual step for now.
+won't refresh on its own. `dbs update-ytdlp` does exactly this upgrade for
+you, mirroring skool-downloader's own documented practice (its
+`update-ytdlp` command, recommended weekly for unattended nightly archives).
 
 ## Scheduling daily backups
 

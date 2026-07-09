@@ -49,11 +49,14 @@ class SqliteStorage(Storage):
         self.path = str(path)
         self._clock = clock
         self._depth = 0
+        self._fts_enabled = False  # set by migrate() -> _ensure_fts()
         # Per-run media-archiving toggles, set by upsert_items().
         self._store_media = False
         self._max_media_bytes = 0
-        is_memory = self.path in (":memory:", "") or self.path.startswith("file::memory:")
-        if not is_memory:
+        self._is_memory = (
+            self.path in (":memory:", "") or self.path.startswith("file::memory:")
+        )
+        if not self._is_memory:
             Path(self.path).expanduser().parent.mkdir(parents=True, exist_ok=True)
             self.path = str(Path(self.path).expanduser())
         self.conn = sqlite3.connect(self.path, isolation_level=None)
@@ -65,7 +68,10 @@ class SqliteStorage(Storage):
         cur.execute("PRAGMA journal_mode=WAL")
         cur.execute("PRAGMA synchronous=NORMAL")
         cur.execute("PRAGMA foreign_keys=ON")
-        cur.execute("PRAGMA busy_timeout=5000")
+        # Generous: under `backup --all --parallel N` several worker connections
+        # share the single WAL writer slot, and one worker's flush (which can
+        # include media blobs) must not time out another's commit.
+        cur.execute("PRAGMA busy_timeout=30000")
 
     def _now(self) -> str:
         return iso_z(self._clock())
@@ -74,18 +80,90 @@ class SqliteStorage(Storage):
 
     def migrate(self) -> None:
         migrations.migrate(self.conn)
+        self._fts_enabled = self._ensure_fts()
+
+    def _ensure_fts(self) -> bool:
+        """Create/refresh the FTS5 index over ``items(title, body)``.
+
+        Deliberately NOT a numbered migration: a Python built without the
+        FTS5 module would fail a migration permanently, whereas this
+        ensure-step just returns False and ``browse_items`` falls back to
+        LIKE. External-content table + triggers keep the index in sync with
+        every write path; the backfill runs once (index empty, items not).
+        """
+        existed = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='items_fts'"
+        ).fetchone() is not None
+        try:
+            self.conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5("
+                "title, body, content='items', content_rowid='id')"
+            )
+        except sqlite3.OperationalError:
+            return False  # SQLite built without FTS5
+        self.conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS items_fts_ai AFTER INSERT ON items BEGIN "
+            "INSERT INTO items_fts(rowid, title, body) VALUES (new.id, new.title, new.body); "
+            "END"
+        )
+        self.conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS items_fts_ad AFTER DELETE ON items BEGIN "
+            "INSERT INTO items_fts(items_fts, rowid, title, body) "
+            "VALUES ('delete', old.id, old.title, old.body); "
+            "END"
+        )
+        # UPDATE OF title, body: the unchanged-item path (last_seen bump) and
+        # the soft-delete sweep never touch those columns, so no index churn.
+        self.conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS items_fts_au AFTER UPDATE OF title, body "
+            "ON items BEGIN "
+            "INSERT INTO items_fts(items_fts, rowid, title, body) "
+            "VALUES ('delete', old.id, old.title, old.body); "
+            "INSERT INTO items_fts(rowid, title, body) VALUES (new.id, new.title, new.body); "
+            "END"
+        )
+        if not existed:
+            # First enable on a pre-FTS database: build the index from the
+            # existing rows. ('rebuild' is FTS5's own backfill for
+            # external-content tables — a bare COUNT can't detect emptiness
+            # here, since reads pass through to the content table.)
+            with self.transaction():
+                self.conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')")
+        return True
 
     def close(self) -> None:
         try:
+            # SQLite's own advice: cheap here (it only re-analyzes what
+            # changed), and the only routine chance the planner gets stats.
+            self.conn.execute("PRAGMA optimize")
             self.conn.close()
         except sqlite3.Error:
             pass
+
+    def spawn(self) -> "SqliteStorage | None":
+        """A fresh connection to the same database file for a worker thread.
+
+        WAL mode makes multi-connection use safe (single writer, arbitrated by
+        ``busy_timeout``); an in-memory database is connection-private, so
+        there is nothing to spawn and callers must run sequentially.
+        """
+        if self._is_memory:
+            return None
+        worker = SqliteStorage(self.path, clock=self._clock)
+        # The schema already exists (the primary connection migrated); FTS
+        # sync happens via in-database triggers, so no ensure-step is needed.
+        worker._fts_enabled = self._fts_enabled
+        return worker
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
         outermost = self._depth == 0
         if outermost:
-            self.conn.execute("BEGIN")
+            # IMMEDIATE: take the write lock up front. Every transaction()
+            # here writes, and a deferred read->write upgrade under concurrent
+            # writers fails instantly with SQLITE_BUSY instead of honoring
+            # busy_timeout — IMMEDIATE makes contending workers queue politely.
+            self.conn.execute("BEGIN IMMEDIATE")
         self._depth += 1
         try:
             yield
@@ -178,6 +256,7 @@ class SqliteStorage(Storage):
         items_seen: int,
         cursor_after: str | None,
         error: str | None,
+        warnings: list[str] | None = None,
     ) -> None:
         now = self._now()
         with self.transaction():
@@ -186,13 +265,16 @@ class SqliteStorage(Storage):
                 UPDATE sync_runs SET
                     status=?, finished_at=?, items_seen=?, items_created=?,
                     items_updated=?, items_unchanged=?, items_deleted=?,
-                    items_undeleted=?, revisions=?, cursor_after=?, error=?
+                    items_undeleted=?, revisions=?, cursor_after=?, error=?,
+                    warnings=?
                 WHERE id=?
                 """,
                 (
                     status, now, items_seen, stats.created, stats.updated,
                     stats.unchanged, stats.deleted, stats.undeleted, stats.revisions,
-                    cursor_after, error, run_id,
+                    cursor_after, error,
+                    json.dumps(warnings) if warnings else None,
+                    run_id,
                 ),
             )
 
@@ -230,7 +312,13 @@ class SqliteStorage(Storage):
                 "WHERE r.source_id=? ORDER BY r.started_at DESC, r.id DESC LIMIT ?",
                 (source_id, limit),
             ).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            # Stored as a JSON array; hand callers a plain list ([] when unset).
+            d["warnings"] = json.loads(d["warnings"]) if d.get("warnings") else []
+            out.append(d)
+        return out
 
     # -- items / batch commit ----------------------------------------------
 
@@ -346,13 +434,17 @@ class SqliteStorage(Storage):
             res.revisions += 1
             deleted, content_hash = False, it.content_hash
         elif hash_changed:
+            # A still-deleted item whose payload changed stays deleted — a
+            # native-deletes source (e.g. Raindrop's trash) may re-emit trash
+            # items with mutated payloads, and an update must never resurrect
+            # them. `deleted=it.deleted` is False on the normal live path.
             new_rev += 1
-            self._write_full_update(item_id, new_rev, it, now, run_id, deleted=False)
+            self._write_full_update(item_id, new_rev, it, now, run_id, deleted=it.deleted)
             self._insert_revision(item_id, new_rev, it, now, run_id, "updated")
             self._replace_media(item_id, it)
             res.updated += 1
             res.revisions += 1
-            deleted, content_hash = False, it.content_hash
+            deleted, content_hash = it.deleted, it.content_hash
         else:
             self.conn.execute(
                 "UPDATE items SET last_seen_at=?, observed_run_id=? WHERE id=?",
@@ -380,14 +472,19 @@ class SqliteStorage(Storage):
                 item_kind=?, title=?, url=?, body=?, tags_json=?,
                 item_created_at=?, item_updated_at=?, content_hash=?, raw_json=?,
                 revision=?, last_seen_at=?, last_changed_at=?, observed_run_id=?,
-                deleted=?, deleted_at=?
+                deleted=?,
+                deleted_at=CASE WHEN ? THEN COALESCE(deleted_at, ?) ELSE NULL END
             WHERE id=?
             """,
             (
                 it.item_kind, it.title, it.url, it.body, json.dumps(it.tags),
                 it.item_created_at, it.item_updated_at, it.content_hash, it.raw_json,
                 new_rev, now, now, run_id,
-                1 if deleted else 0, now if deleted else None, item_id,
+                1 if deleted else 0,
+                # Preserve the original deletion time when an already-deleted
+                # item is updated in place; stamp `now` only on a live->deleted
+                # transition (deleted_at is NULL there).
+                1 if deleted else 0, now, item_id,
             ),
         )
 
@@ -456,17 +553,34 @@ class SqliteStorage(Storage):
     def soft_delete_missing(
         self, source_id: int, live_ids: set[str], run_id: int
     ) -> int:
+        """Soft-delete live items absent from ``live_ids`` (reconcile sweep).
+
+        The live set goes into a temp table and the victims come from a SQL
+        anti-join, so memory is O(victims) — a handful in steady state, and
+        never more than the engine's sweep-safety fraction — instead of the
+        previous O(every live row loaded into Python) per sweep.
+        """
         now = self._now()
         count = 0
         with self.transaction():
-            rows = self.conn.execute(
-                "SELECT id, external_id, revision, content_hash, raw_json, title "
-                "FROM items WHERE source_id=? AND deleted=0",
+            self.conn.execute(
+                "CREATE TEMP TABLE IF NOT EXISTS _sweep_live("
+                "external_id TEXT PRIMARY KEY) WITHOUT ROWID"
+            )
+            self.conn.execute("DELETE FROM _sweep_live")
+            for chunk in _chunks(list(live_ids), 400):
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO _sweep_live(external_id) VALUES "
+                    + ",".join(["(?)"] * len(chunk)),
+                    chunk,
+                )
+            victims = self.conn.execute(
+                "SELECT id, revision, content_hash, raw_json, title "
+                "FROM items WHERE source_id=? AND deleted=0 "
+                "AND external_id NOT IN (SELECT external_id FROM _sweep_live)",
                 (source_id,),
             ).fetchall()
-            for r in rows:
-                if r["external_id"] in live_ids:
-                    continue
+            for r in victims:
                 new_rev = int(r["revision"]) + 1
                 self.conn.execute(
                     "UPDATE items SET deleted=1, deleted_at=?, revision=?, "
@@ -483,6 +597,7 @@ class SqliteStorage(Storage):
                     (r["id"], new_rev, r["content_hash"], r["raw_json"], r["title"], now, run_id),
                 )
                 count += 1
+            self.conn.execute("DELETE FROM _sweep_live")
         return count
 
     # -- cursor / state -----------------------------------------------------
@@ -631,35 +746,62 @@ class SqliteStorage(Storage):
     def browse_items(
         self, query: ExportQuery, *, text: str | None = None, limit: int = 50, offset: int = 0
     ) -> tuple[list[ItemRow], int]:
-        where, params = _build_filter(query, table="i")
+        base_where, base_params = _build_filter(query, table="i")
+        # Text search: FTS5 when available (all-words, case-insensitive,
+        # final-token prefix so search-as-you-type works), falling back to
+        # the original LIKE substring scan — both when SQLite lacks the FTS5
+        # module and when a pathological query string trips MATCH's parser.
+        attempts: list[tuple[str, list[Any]]] = []
+        if text and self._fts_enabled:
+            attempts.append((
+                base_where + " AND i.id IN "
+                "(SELECT rowid FROM items_fts WHERE items_fts MATCH ?)",
+                [*base_params, _fts_match_query(text)],
+            ))
         if text:
-            where += " AND (i.title LIKE ? ESCAPE '\\' OR i.body LIKE ? ESCAPE '\\')"
             like = _like_pattern(text)
-            params = [*params, like, like]
-        total = int(
-            self.conn.execute(
-                f"SELECT COUNT(*) FROM items i JOIN sources s ON s.id = i.source_id WHERE {where}",
-                params,
-            ).fetchone()[0]
-        )
-        sql = (
-            "SELECT i.*, s.name AS source_name, s.type AS source_type, "
-            "(SELECT COUNT(*) FROM media m WHERE m.item_id = i.id) AS media_count, "
-            "COALESCE("
-            " (SELECT m.url FROM media m WHERE m.item_id = i.id AND m.kind = 'image' "
-            "  ORDER BY m.id LIMIT 1), "
-            # No image media, but a video link (skool lessons) whose thumbnail
-            # the web tier can derive (YouTube) or oEmbed-resolve (Loom/Vimeo).
-            " CASE WHEN json_extract(i.raw_json, '$.videoLink') LIKE '%youtu%' "
-            "        OR json_extract(i.raw_json, '$.videoLink') LIKE '%loom.com%' "
-            "        OR json_extract(i.raw_json, '$.videoLink') LIKE '%vimeo.com%' "
-            "      THEN json_extract(i.raw_json, '$.videoLink') END"
-            ") AS thumb_url "
-            "FROM items i JOIN sources s ON s.id = i.source_id "
-            f"WHERE {where} ORDER BY i.item_created_at DESC, i.id DESC LIMIT ? OFFSET ?"
-        )
-        rows = self.conn.execute(sql, [*params, max(1, limit), max(0, offset)]).fetchall()
-        return [_row_to_browse_item(r) for r in rows], total
+            attempts.append((
+                base_where + " AND (i.title LIKE ? ESCAPE '\\' OR i.body LIKE ? ESCAPE '\\')",
+                [*base_params, like, like],
+            ))
+        else:
+            attempts.append((base_where, list(base_params)))
+
+        last_exc: sqlite3.OperationalError | None = None
+        for where, params in attempts:
+            try:
+                total = int(
+                    self.conn.execute(
+                        f"SELECT COUNT(*) FROM items i "
+                        f"JOIN sources s ON s.id = i.source_id WHERE {where}",
+                        params,
+                    ).fetchone()[0]
+                )
+                sql = (
+                    "SELECT i.*, s.name AS source_name, s.type AS source_type, "
+                    "(SELECT COUNT(*) FROM media m WHERE m.item_id = i.id) AS media_count, "
+                    "COALESCE("
+                    " (SELECT m.url FROM media m WHERE m.item_id = i.id AND m.kind = 'image' "
+                    "  ORDER BY m.id LIMIT 1), "
+                    # No image media, but a video link (skool lessons) whose thumbnail
+                    # the web tier can derive (YouTube) or oEmbed-resolve (Loom/Vimeo).
+                    " CASE WHEN json_extract(i.raw_json, '$.videoLink') LIKE '%youtu%' "
+                    "        OR json_extract(i.raw_json, '$.videoLink') LIKE '%loom.com%' "
+                    "        OR json_extract(i.raw_json, '$.videoLink') LIKE '%vimeo.com%' "
+                    "      THEN json_extract(i.raw_json, '$.videoLink') END"
+                    ") AS thumb_url "
+                    "FROM items i JOIN sources s ON s.id = i.source_id "
+                    f"WHERE {where} ORDER BY i.item_created_at DESC, i.id DESC LIMIT ? OFFSET ?"
+                )
+                rows = self.conn.execute(
+                    sql, [*params, max(1, limit), max(0, offset)]
+                ).fetchall()
+                return [_row_to_browse_item(r) for r in rows], total
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                continue
+        assert last_exc is not None
+        raise last_exc
 
     def get_item(self, item_id: int) -> ItemRow | None:
         row = self.conn.execute(
@@ -730,6 +872,83 @@ class SqliteStorage(Storage):
     def integrity_check(self) -> str:
         row = self.conn.execute("PRAGMA integrity_check").fetchone()
         return row[0] if row else "unknown"
+
+    # -- maintenance ---------------------------------------------------------
+
+    def _file_size(self) -> int:
+        try:
+            return Path(self.path).stat().st_size
+        except OSError:  # :memory:, or the file is gone
+            return 0
+
+    def maintain(self, *, vacuum: bool = False) -> dict[str, Any]:
+        """WAL checkpoint + planner stats (+ optional VACUUM).
+
+        Nothing else ever runs these: without a checkpoint a long-lived
+        process accumulates an unbounded ``-wal`` sidecar (and a copy of the
+        bare ``.sqlite3`` file silently misses everything still in it);
+        without ``PRAGMA optimize`` the query planner has no statistics; and
+        media rewrites + revision growth leave free pages only VACUUM
+        reclaims. Runs in autocommit — VACUUM cannot run inside a
+        transaction, so this must never be called mid-``transaction()``.
+        """
+        size_before = self._file_size()
+        # TRUNCATE both flushes the WAL into the main file and truncates the
+        # sidecar, so the .sqlite3 file alone is complete afterwards.
+        row = self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        wal_ok = row is not None and int(row[0]) == 0  # 0 = ran unblocked
+        self.conn.execute("PRAGMA optimize")
+        if vacuum:
+            self.conn.execute("VACUUM")
+        return {
+            "path": self.path,
+            "wal_checkpointed": wal_ok,
+            "optimized": True,
+            "vacuumed": bool(vacuum),
+            "size_before": size_before,
+            "size_after": self._file_size(),
+        }
+
+    def prune_revisions(self, source_id: int, keep: int) -> int:
+        """Trim each item's revision history to the newest ``keep`` rows.
+
+        High-churn sources otherwise grow ``item_revisions`` without bound
+        (a full raw snapshot per change). The newest ``keep`` per item
+        survive; the ``items`` row (always the latest state) is untouched.
+        """
+        if keep <= 0:
+            return 0
+        with self.transaction():
+            cur = self.conn.execute(
+                """
+                DELETE FROM item_revisions WHERE id IN (
+                    SELECT rv.id FROM item_revisions rv
+                    JOIN items i ON i.id = rv.item_id
+                    WHERE i.source_id = ?
+                      AND rv.id NOT IN (
+                        SELECT rv2.id FROM item_revisions rv2
+                        WHERE rv2.item_id = rv.item_id
+                        ORDER BY rv2.revision DESC LIMIT ?
+                      )
+                )
+                """,
+                (source_id, keep),
+            )
+        return cur.rowcount
+
+    def vacuum_into(self, dest: str | Path) -> int:
+        """Consistent single-file snapshot via ``VACUUM INTO`` (see the ABC).
+
+        Refuses an existing destination rather than overwriting — a snapshot
+        target that already exists is more likely a mistyped path than an
+        intentional replace, and ``VACUUM INTO`` itself errors on it anyway.
+        """
+        target = Path(dest).expanduser()
+        if target.exists():
+            raise FileExistsError(f"snapshot target already exists: {target}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self.conn.execute("VACUUM INTO ?", (str(target),))
+        return target.stat().st_size
 
 
 # --------------------------------------------------------------------------- #
@@ -874,6 +1093,23 @@ def _row_to_browse_item(row: sqlite3.Row) -> ItemRow:
         "tags": json.loads(row["tags_json"] or "[]"),
         "thumbnail": row["thumb_url"],
     }
+
+
+def _fts_match_query(text: str) -> str:
+    """A safe FTS5 MATCH expression from free user text.
+
+    Each whitespace token becomes a quoted phrase (so MATCH operators like
+    ``AND``/``NOT``/``*``/``:`` in user input can't change the query's
+    meaning), implicitly ANDed; the final token gets a ``*`` prefix-match so
+    typing "hell" still finds "Hello". Embedded quotes are doubled per FTS5
+    escaping rules.
+    """
+    tokens = [t.replace('"', '""') for t in text.split()]
+    if not tokens:
+        return '""'
+    quoted = [f'"{t}"' for t in tokens]
+    quoted[-1] += "*"
+    return " ".join(quoted)
 
 
 def _like_pattern(text: str) -> str:
