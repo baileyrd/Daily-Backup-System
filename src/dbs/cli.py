@@ -129,6 +129,15 @@ def _parse_date(value: Optional[str]) -> Optional[datetime]:
     return dt
 
 
+def _human_bytes(n: int) -> str:
+    value = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024:
+            return f"{int(value)} B" if unit == "B" else f"{value:,.1f} {unit}"
+        value /= 1024
+    return f"{value:,.1f} TiB"
+
+
 def _status_color(status: str) -> str:
     return {
         "success": typer.colors.GREEN,
@@ -374,6 +383,144 @@ def history(
                 typer.secho(f"    warning: {w}", fg=typer.colors.YELLOW)
     finally:
         svc.close()
+
+
+def _print_item_detail(item: dict) -> None:
+    typer.secho(item["title"] or item["url"] or item["external_id"], bold=True)
+    typer.echo(f"  source:    {item['source']} ({item['type']})")
+    typer.echo(f"  kind:      {item['item_kind']}   external id: {item['external_id']}")
+    if item["url"]:
+        typer.echo(f"  url:       {item['url']}")
+    if item["tags"]:
+        typer.echo(f"  tags:      {', '.join(item['tags'])}")
+    typer.echo(
+        f"  created:   {item['created_at'] or '-'}   updated: "
+        f"{item['updated_at'] or '-'}   revision: {item['revision']}"
+    )
+    if item["deleted"]:
+        typer.secho(f"  deleted:   yes ({item['deleted_at'] or 'unknown when'})", fg=typer.colors.RED)
+    if item["body"]:
+        body = item["body"]
+        if len(body) > 500:
+            body = body[:500] + f"… [{len(item['body']):,} chars total; --json for all]"
+        typer.echo("  body:      " + body.replace("\n", "\n             "))
+    media = item.get("media") or []
+    if media:
+        typer.echo(f"  media ({len(media)}):")
+        for m in media:
+            state = "archived" if m["has_data"] else (m["local_path"] or "not archived")
+            size = f", {_human_bytes(m['byte_size'])}" if m["byte_size"] else ""
+            typer.echo(f"    [{m['id']}] {m['filename'] or m['url']} ({m['mime'] or '?'}{size}) — {state}")
+    typer.echo("  raw:")
+    typer.echo("    " + json.dumps(item.get("raw"), indent=2, ensure_ascii=False).replace("\n", "\n    "))
+
+
+@app.command()
+def items(
+    item_id: Optional[int] = typer.Argument(
+        None, metavar="[ID]",
+        help="Show one item's full detail (raw payload + media list) instead of listing.",
+    ),
+    source: Optional[list[str]] = typer.Option(None, "--source", help="Filter by source name (repeatable)."),
+    item_type: Optional[list[str]] = typer.Option(None, "--type", help="Filter by item kind (repeatable)."),
+    search: Optional[str] = typer.Option(
+        None, "--search", "-q",
+        help="Full-text search over titles and bodies (FTS5: all words, prefix "
+             "match on the last; plain substring fallback without FTS5).",
+    ),
+    since: Optional[str] = typer.Option(None, "--since", help="Only items created on/after (YYYY-MM-DD)."),
+    until: Optional[str] = typer.Option(None, "--until", help="Only items created on/before."),
+    include_deleted: bool = typer.Option(False, "--include-deleted"),
+    limit: int = typer.Option(50, "--limit", "-n", min=1, max=500, help="Page size."),
+    offset: int = typer.Option(0, "--offset", min=0, help="Skip the first N matches (pagination)."),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Browse what's actually stored — the CLI counterpart of the web UI's
+    Browse tab. Lists items newest-first (filterable, searchable, paginated);
+    with ID, shows that one item's full detail instead."""
+    svc = _service()
+    try:
+        if item_id is not None:
+            item = svc.get_item(item_id)
+            if item is None:
+                typer.secho(f"no such item {item_id}", fg=typer.colors.RED, err=True)
+                raise typer.Exit(1)
+            if json_out:
+                typer.echo(json.dumps(item, indent=2, ensure_ascii=False))
+            else:
+                _print_item_detail(item)
+            return
+        query = ExportQuery(
+            sources=list(source) if source else None,
+            item_types=list(item_type) if item_type else None,
+            since=_parse_date(since),
+            until=_parse_date(until),
+            include_deleted=include_deleted,
+        )
+        rows, total = svc.browse_items(query, text=search, limit=limit, offset=offset)
+        if json_out:
+            # Same envelope as the web UI's GET /api/items.
+            typer.echo(json.dumps(
+                {"items": rows, "total": total, "limit": limit, "offset": offset},
+                indent=2, ensure_ascii=False,
+            ))
+            return
+        if not rows:
+            if total:
+                typer.echo(f"No items at offset {offset} ({total:,} total matches).")
+            else:
+                typer.echo("No items matched.")
+            return
+        for r in rows:
+            title = (r["title"] or r["url"] or r["external_id"] or "").replace("\n", " ")
+            if len(title) > 60:
+                title = title[:59] + "…"
+            line = (
+                f"{r['id']:>7}  {r['source']:<20.20} {r['item_kind']:<10.10} "
+                f"{(r['created_at'] or '')[:10]:<10}  {title}"
+            )
+            if r["media_count"]:
+                line += f"  [{r['media_count']} media]"
+            if r["deleted"]:
+                line += "  [deleted]"
+            typer.secho(line, fg=typer.colors.RED if r["deleted"] else None)
+        end = offset + len(rows)
+        footer = f"{offset + 1}-{end} of {total:,}"
+        if end < total:
+            footer += f"  (next page: --offset {end})"
+        typer.secho(footer, dim=True)
+    finally:
+        svc.close()
+
+
+@app.command()
+def stats(json_out: bool = typer.Option(False, "--json")) -> None:
+    """Aggregate database metrics: live/deleted item counts per source and
+    kind, revision count, archived media count + bytes — the CLI counterpart
+    of the web UI's metrics strip."""
+    svc = _service()
+    try:
+        m = svc.metrics()
+    finally:
+        svc.close()
+    if json_out:
+        typer.echo(json.dumps(m, indent=2))
+        return
+    rows = m["by_source_kind"]
+    live = sum(r["live"] for r in rows)
+    total = sum(r["total"] for r in rows)
+    typer.echo(f"Items:     {live:,} live, {total - live:,} deleted ({total:,} total)")
+    typer.echo(f"Revisions: {m['revision_count']:,}")
+    typer.echo(f"Media:     {m['media_count']:,} archived blob(s), {_human_bytes(m['media_bytes'])}")
+    if not rows:
+        typer.echo("\nNo items stored yet — run `dbs backup` first.")
+        return
+    typer.echo("")
+    typer.secho(f"{'source':<24} {'kind':<12} {'live':>8} {'deleted':>8} {'total':>8}", bold=True)
+    for r in rows:
+        typer.echo(
+            f"{r['source']:<24} {r['kind']:<12} {r['live']:>8,} {r['deleted']:>8,} {r['total']:>8,}"
+        )
 
 
 @app.command()

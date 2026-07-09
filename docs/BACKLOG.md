@@ -26,10 +26,15 @@ a metrics strip + per-source/kind breakdown table, and a slide-in item detail
 drawer (raw JSON, media thumbnails for images, download links for
 non-image/un-archived media).
 
-Not done (deferred, low-cost to add later if wanted): a CLI counterpart
-(`dbs items` / `dbs stats`) — the sketch's own open question — was left out
-to keep this web-only, matching the "Database preview" scope as browsing what
-the *web UI* backup has stored.
+The deferred CLI counterpart has since SHIPPED too: `dbs items` lists items
+newest-first with the same source/type/date/deleted filters and FTS text
+search as the web UI, paginated via `--limit`/`--offset`, with the web
+response envelope under `--json`; `dbs items ID` prints one item's full
+detail (fields, archived-media list, verbatim raw payload). `dbs stats`
+renders `metrics()` (live/deleted per source+kind, revisions, media
+count/bytes). Both are thin renderers over the existing
+`BackupService.browse_items`/`get_item`/`metrics` wrappers — no new service
+or storage surface was needed.
 
 ## 2. Skool phase 2 — native video download (SHIPPED)
 
