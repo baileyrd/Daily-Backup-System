@@ -76,6 +76,43 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # store_media = true                       # pull downloaded resource files INTO the DB
 # max_media_mb = 200                       # per-file cap (0 = no limit); larger files stay referenced
 
+# Podcasts via RSS/Atom feeds (no account or token). Feeds come from `feeds`
+# and/or an OPML export from your podcast app; episode metadata is always
+# stored, audio only when download_audio = true (written under
+# <download_root>/<source-name>, referenced — never inlined into the DB).
+# Episodes leaving a feed's rolling window are NOT treated as deletions.
+# [sources.podcasts]
+# type = "podcast"
+# enabled = true
+# feeds = ["https://example.com/feed.xml"]
+# opml_path = "~/podcasts.opml"          # merged with `feeds`, deduplicated
+# download_audio = false
+# max_episodes_per_feed = 0              # 0 = no cap
+
+# Pocket Casts account: subscriptions, starred episodes, listening history.
+# Uses the unofficial web-player API (may change without notice). History
+# entries that scroll off the server-side window get soft-deleted on later
+# runs (rows/revisions kept; see the connector docstring).
+# Secrets: POCKETCASTS_EMAIL, POCKETCASTS_PASSWORD in .env.
+# [sources.pocketcasts]
+# type = "pocketcasts"
+# enabled = true
+# include_subscriptions = true
+# include_starred = true
+# include_history = true
+
+# Udemy: enrolled courses + full curriculum (article lectures included).
+# Auth: UDEMY_ACCESS_TOKEN = the `access_token` cookie from a logged-in
+# browser. download_videos additionally needs UDEMY_COOKIES_FILE (a Netscape
+# cookies.txt export) and the [youtube] extra (yt-dlp); DRM-protected
+# lectures are skipped with a warning.
+# [sources.udemy]
+# type = "udemy"
+# enabled = true
+# course_filter = []                     # ids or slugs; empty = everything
+# download_videos = false
+# video_format = "best"
+
 # --- Optional: connector collision overrides ------------------------------
 # [connectors.raindrop]
 # plugin = "daily-backup-system:raindrop"
