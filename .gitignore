@@ -28,3 +28,10 @@ dbs.toml
 
 # Workflow design artifacts (kept out of the package)
 /.dev/
+
+# Local tool state (Serena MCP, connector browser profile)
+/.serena/
+/.skool-session/
+
+# Personal scratch check, unrelated to this project
+/tests/test_vpn.py
