@@ -54,7 +54,7 @@ from typing import Any, Iterator
 from pydantic import BaseModel, ConfigDict, Field
 
 from ._tiptap import _md_link_text, tiptap_markdown
-from ._util import run_with_watchdog
+from ._util import impersonate_target, run_with_watchdog
 
 from ..core import (
     AuthCapture,
@@ -267,6 +267,22 @@ class SkoolConfig(BaseModel):
     # temporarily when "Sign in to confirm you're not a bot" persists despite
     # valid cookies AND a resolved js_runtimes path (see the `skool:
     # downloading ...` log line), to see WHY instead of guessing again.
+    # External hosts whose download must use yt-dlp's browser TLS-fingerprint
+    # impersonation (curl_cffi backend). Vimeo rejects yt-dlp's default
+    # fingerprint on data-center/VPN IPs with "blocked due to its TLS
+    # fingerprint" (the exact failure this connector's Vimeo lessons hit under
+    # the VPN); impersonating Chrome defeats it. Deliberately scoped to a host
+    # allowlist rather than applied to every external download: the dominant,
+    # working external path is YouTube, whose bot-check handling this connector
+    # tuned carefully — perturbing its request stack risks regressing it for no
+    # benefit (YouTube doesn't TLS-block). Loom needs no impersonation either.
+    # A host matches when the video URL's host equals it or is a subdomain.
+    video_impersonate_hosts: list[str] = Field(
+        default=["vimeo.com"],
+        description="External video hosts that require browser TLS-fingerprint "
+                     "impersonation (curl_cffi) to download — Vimeo by default. "
+                     "Others (notably YouTube) are downloaded normally.",
+    )
     video_debug: bool = Field(
         default=False,
         description="Forward yt-dlp's full diagnostic chain into the run log. "
@@ -338,9 +354,13 @@ class SkoolConnector(Connector):
     secret_keys = ("SKOOL_SESSION_DIR", "YOUTUBE_COOKIES_FILE", "GITHUB_TOKEN")
     wants_managed_http = False
     schema_version = 1
+    # yt-dlp[curl-cffi] adds the curl_cffi backend for browser TLS-fingerprint
+    # impersonation — required to download Vimeo videoLinks, which otherwise
+    # fail with "blocked due to its TLS fingerprint" (see
+    # video_impersonate_hosts). yt-dlp owns the compatible curl_cffi version.
     pip_requirements = (
-        "playwright>=1.40", "yt-dlp[default]>=2026.1.29", "nodejs-wheel>=22",
-        "ffmpeg-downloader>=0.5",
+        "playwright>=1.40", "yt-dlp[default,curl-cffi]>=2026.1.29",
+        "nodejs-wheel>=22", "ffmpeg-downloader>=0.5",
     )
     runtime_imports = ("playwright", "yt_dlp")
     needs_playwright_browser = True
@@ -1132,11 +1152,27 @@ class SkoolConnector(Connector):
         )
         js_runtimes = _js_runtime_opts()
         extractor_args = cfg.video_extractor_args if external else None
+        # Vimeo (and any host in video_impersonate_hosts) rejects yt-dlp's
+        # default TLS fingerprint on data-center/VPN IPs; impersonating a real
+        # Chrome defeats that. Only for the configured external hosts, and only
+        # when the curl_cffi backend is present (else the option would raise).
+        impersonate = None
+        if external and _url_host_matches(url, cfg.video_impersonate_hosts):
+            impersonate = impersonate_target()
+            if impersonate is None:
+                ctx.logger.warning(
+                    "skool: %s needs browser TLS-fingerprint impersonation to "
+                    "download, but curl_cffi isn't installed — reinstall the "
+                    "[skool] extra (`pip install 'daily-backup-system[skool]'`). "
+                    "Attempting without it (likely to fail).",
+                    dest.name,
+                )
         opts = _ydl_opts(
             dest, cfg.video_quality, _ffmpeg_location(),
             cookiefile=cookiefile, cookies_from_browser=cookies_from_browser,
             extractor_args=extractor_args,
             js_runtimes=js_runtimes,
+            impersonate=impersonate,
         )
         # Diagnostic for "Sign in to confirm you're not a bot": that error can
         # mean no cookies, no JS runtime to solve YouTube's challenge (see
@@ -1150,9 +1186,10 @@ class SkoolConnector(Connector):
         # of another guess.
         ctx.logger.info(
             "skool: downloading %s (external=%s) — cookiefile=%s "
-            "cookies_from_browser=%s extractor_args=%s js_runtimes=%s",
+            "cookies_from_browser=%s extractor_args=%s js_runtimes=%s impersonate=%s",
             dest.name, external, bool(cookiefile), cookies_from_browser,
             extractor_args, js_runtimes or "none (nodejs-wheel not installed/found)",
+            impersonate or "none",
         )
         opts["logger"] = _YtdlpLogger(ctx.logger, cfg.video_debug)
         # Stall watchdog: yt-dlp's Python API has no call-level timeout, so a
@@ -1913,6 +1950,7 @@ def _ydl_opts(
     cookiefile: str | None = None, cookies_from_browser: str | None = None,
     extractor_args: dict[str, dict[str, list[str]]] | None = None,
     js_runtimes: dict[str, dict[str, Any]] | None = None,
+    impersonate: Any | None = None,
 ) -> dict[str, Any]:
     """yt-dlp options for downloading one video to an exact path.
 
@@ -1980,6 +2018,12 @@ def _ydl_opts(
         opts["extractor_args"] = extractor_args
     if js_runtimes:
         opts["js_runtimes"] = js_runtimes
+    # A yt-dlp ImpersonateTarget (browser TLS-fingerprint impersonation) for
+    # hosts that reject the default fingerprint — resolved by the caller only
+    # for external downloads whose host is in video_impersonate_hosts, and only
+    # when the curl_cffi backend is installed (else it stays None here).
+    if impersonate is not None:
+        opts["impersonate"] = impersonate
     return opts
 
 
@@ -2104,6 +2148,29 @@ _PERMANENT_VIDEO_ERROR = re.compile(
     r"violat(?:ing|ion)|removed for violating",
     re.IGNORECASE,
 )
+
+
+def _url_host_matches(url: str, hosts: list[str]) -> bool:
+    """Whether ``url``'s host equals — or is a subdomain of — any entry in
+    ``hosts`` (case-insensitive, ``www.`` ignored).
+
+    Used to scope TLS-fingerprint impersonation to the configured external
+    video hosts (Vimeo by default), so e.g. ``vimeo.com`` matches both
+    ``vimeo.com`` and ``player.vimeo.com`` while ``notvimeo.com`` does not.
+    """
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if host.startswith("www."):
+        host = host[4:]
+    for h in hosts:
+        h = (h or "").lower().strip().lstrip(".")
+        if h and (host == h or host.endswith("." + h)):
+            return True
+    return False
 
 
 def _classify_video_error(exc: Exception) -> str:
