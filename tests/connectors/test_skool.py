@@ -674,6 +674,107 @@ def test_ydl_opts_matches_skool_downloader_invocation(tmp_path):
     assert "js_runtimes" not in _ydl_opts(dest, 0, None)
     opts = _ydl_opts(dest, 0, None, js_runtimes={"node": {"path": "/opt/node"}})
     assert opts["js_runtimes"] == {"node": {"path": "/opt/node"}}
+    # impersonate (a yt-dlp ImpersonateTarget, for Vimeo's TLS-fingerprint
+    # block) passes straight through; omitted when None (curl_cffi absent).
+    assert "impersonate" not in _ydl_opts(dest, 0, None)
+    opts = _ydl_opts(dest, 0, None, impersonate="CHROME_SENTINEL")
+    assert opts["impersonate"] == "CHROME_SENTINEL"
+
+
+def test_url_host_matches_scopes_to_host_and_subdomains():
+    from dbs.connectors.skool import _url_host_matches
+
+    hosts = ["vimeo.com"]
+    assert _url_host_matches("https://vimeo.com/12345", hosts)
+    assert _url_host_matches("https://player.vimeo.com/video/12345", hosts)
+    assert _url_host_matches("https://www.vimeo.com/12345", hosts)  # www ignored
+    # Not a false-positive on a lookalike or the dominant working host.
+    assert not _url_host_matches("https://notvimeo.com/12345", hosts)
+    assert not _url_host_matches("https://youtu.be/x", hosts)
+    assert not _url_host_matches("https://www.youtube.com/watch?v=x", hosts)
+
+
+def test_impersonate_target_returns_none_without_curl_cffi(monkeypatch):
+    # Graceful degradation: no curl_cffi -> no target (caller omits the option
+    # instead of letting yt-dlp raise). Mirrors _js_runtime_opts/_ffmpeg_location.
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "curl_cffi":
+            raise ImportError("no curl_cffi")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    from dbs.connectors._util import impersonate_target
+
+    assert impersonate_target() is None
+
+
+def test_download_hls_impersonates_for_vimeo_hosts_only(tmp_path, monkeypatch):
+    yt_dlp = _ytdlp(monkeypatch)
+    captured: list[dict] = []
+
+    class _FakeYDL:
+        def __init__(self, opts):
+            captured.append(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def download(self, urls):
+            pass
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _FakeYDL)
+    # Force a target regardless of whether curl_cffi is installed in CI.
+    monkeypatch.setattr(
+        "dbs.connectors.skool.impersonate_target", lambda *a, **k: "CHROME_SENTINEL"
+    )
+    conn = SkoolConnector()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path), video_cookies_file_env=None)
+    ctx = _ctx(cfg)
+    dest = tmp_path / "video.mp4"
+    # A Vimeo external link gets impersonation.
+    conn._download_hls("https://vimeo.com/12345", dest, cfg, ctx, external=True)
+    assert captured[-1]["impersonate"] == "CHROME_SENTINEL"
+    # YouTube (the dominant working path) must NOT be perturbed.
+    conn._download_hls("https://youtu.be/x", dest, cfg, ctx, external=True)
+    assert "impersonate" not in captured[-1]
+    # Native (Mux) downloads are never external -> never impersonated.
+    conn._download_hls("https://stream.video.skool.com/x.m3u8", dest, cfg, ctx, external=False)
+    assert "impersonate" not in captured[-1]
+
+
+def test_download_hls_warns_when_impersonation_backend_missing(tmp_path, monkeypatch, caplog):
+    yt_dlp = _ytdlp(monkeypatch)
+
+    class _FakeYDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def download(self, urls):
+            pass
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", _FakeYDL)
+    # curl_cffi absent -> target is None; a Vimeo download should warn (not crash).
+    monkeypatch.setattr("dbs.connectors.skool.impersonate_target", lambda *a, **k: None)
+    conn = SkoolConnector()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path), video_cookies_file_env=None)
+    ctx = _ctx(cfg)
+    dest = tmp_path / "video.mp4"
+    with caplog.at_level("WARNING"):
+        conn._download_hls("https://vimeo.com/12345", dest, cfg, ctx, external=True)
+    assert any("impersonation" in r.message.lower() for r in caplog.records)
 
 
 def test_js_runtime_opts_degrades_gracefully_without_nodejs_wheel(monkeypatch):

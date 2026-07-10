@@ -45,9 +45,17 @@ reddit = ["playwright>=1.40"]
 # extra) so that solver has a runtime to execute without a separate system install.
 youtube = ["yt-dlp[default]>=2026.1.29", "nodejs-wheel>=22"]
 skool = [
-    "playwright>=1.40", "yt-dlp[default]>=2026.1.29", "nodejs-wheel>=22",
+    # yt-dlp[curl-cffi] adds the curl_cffi backend for browser TLS-fingerprint
+    # impersonation, needed to download a lesson's Vimeo videoLink (Vimeo
+    # otherwise rejects yt-dlp's fingerprint with "blocked due to its TLS
+    # fingerprint" on data-center/VPN IPs).
+    "playwright>=1.40", "yt-dlp[default,curl-cffi]>=2026.1.29", "nodejs-wheel>=22",
     "ffmpeg-downloader>=0.5",
 ]
+# Standalone Vimeo connector. The default metadata backup runs on the core
+# httpx client (no extra); this is only needed for the opt-in download_videos
+# path, where yt-dlp[curl-cffi] impersonates a browser to beat Vimeo's TLS block.
+vimeo = ["yt-dlp[default,curl-cffi]>=2026.1.29"]
 # Ad-hoc YouTube research pipeline (`dbs research youtube`). Not a connector;
 # imported lazily inside src/dbs/research/ so the CLI stays usable without
 # this extra installed.
@@ -72,6 +80,7 @@ raindrop = "dbs.connectors.raindrop:RaindropConnector"
 reddit = "dbs.connectors.reddit:RedditConnector"
 youtube = "dbs.connectors.youtube:YouTubeConnector"
 skool = "dbs.connectors.skool:SkoolConnector"
+vimeo = "dbs.connectors.vimeo:VimeoConnector"
 
 [project.urls]
 Homepage = "https://github.com/baileyrd/daily-backup-system"

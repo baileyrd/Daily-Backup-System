@@ -74,6 +74,34 @@ def run_with_watchdog(
     return box.get("result")
 
 
+def impersonate_target(client: str = "chrome") -> Any | None:
+    """A yt-dlp ``ImpersonateTarget`` for ``client``, or ``None`` when the
+    impersonation backend (``curl_cffi``) isn't installed.
+
+    yt-dlp's ``impersonate`` option routes requests through a ``curl_cffi``
+    handler that mimics a real browser's TLS/JA3 fingerprint and header
+    ordering — the documented fix for hosts that reject yt-dlp's default
+    fingerprint outright (Vimeo raises "blocked due to its TLS fingerprint" on
+    a data-center IP). Without ``curl_cffi`` *every* impersonate target is
+    unavailable and passing the option makes yt-dlp raise, so callers must
+    treat ``None`` as "impersonation not possible" and simply omit the option.
+    Mirrors the graceful-degradation pattern of skool's ``_js_runtime_opts`` /
+    ``_ffmpeg_location`` (best-effort, never fails when the optional backend is
+    absent). ``ImpersonateTarget(client)`` is client-only, so it matches any
+    available version of that browser (``"chrome"`` is always present with
+    ``curl_cffi``).
+    """
+    try:
+        import curl_cffi  # noqa: F401
+    except ImportError:
+        return None
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+    except ImportError:  # pragma: no cover - yt-dlp missing entirely
+        return None
+    return ImpersonateTarget(client)
+
+
 def ext_for_mime(mime: str | None) -> str:
     """A best-effort file extension for a prefetched-bytes blob's filename.
 
@@ -87,4 +115,9 @@ def ext_for_mime(mime: str | None) -> str:
     return mimetypes.guess_extension(base) or ""
 
 
-__all__ = ["WatchdogTimeout", "ext_for_mime", "run_with_watchdog"]
+__all__ = [
+    "WatchdogTimeout",
+    "ext_for_mime",
+    "impersonate_target",
+    "run_with_watchdog",
+]

@@ -337,7 +337,7 @@ def test_connectors_report_readiness(client):
     # level, the same browser_session capture reddit uses) and downloads
     # native video via yt-dlp with auto-managed ffmpeg + a JS runtime.
     assert conns["skool"]["pip_requirements"] == [
-        "playwright>=1.40", "yt-dlp[default]>=2026.1.29", "nodejs-wheel>=22",
+        "playwright>=1.40", "yt-dlp[default,curl-cffi]>=2026.1.29", "nodejs-wheel>=22",
         "ffmpeg-downloader>=0.5",
     ]
     assert conns["skool"]["needs_playwright_browser"] is True
