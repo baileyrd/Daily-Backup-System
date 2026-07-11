@@ -118,6 +118,24 @@ def test_serial_gate_still_allows_parallel_class_alongside(tmp_path):
     assert all(r.status is RunStatus.SUCCESS for r in results)
 
 
+def test_parallel_threads_force_reconcile(tmp_path):
+    # Regression: `backup --all` dropped --force-full/--reconcile. Reconcile
+    # mode is never the default, so seeing it proves the flag reached the
+    # parallel worker path.
+    cls = _connector("pfake")
+    cls.capabilities = Capabilities(
+        requires_auth=False, concurrency="parallel",
+        supports_incremental=True, supports_full_enumeration=True,
+    )
+    svc = _service(tmp_path, {"pfake": cls}, [("a", "pfake"), ("b", "pfake")])
+    try:
+        results = svc.backup_all(parallel=2, force_reconcile=True)
+    finally:
+        svc.close()
+    assert all(r.status is RunStatus.SUCCESS for r in results)
+    assert all(r.mode == "reconcile" for r in results)
+
+
 def test_parallel_falls_back_to_sequential_on_memory_db(tmp_path):
     cls = _connector("pfake")
     cfg = Config(base_dir=tmp_path)

@@ -302,6 +302,7 @@ def backup(
         if all_sources:
             results = svc.backup_all(
                 only_due=only_due, limit=limit, parallel=parallel,
+                force_full=force_full, force_reconcile=reconcile,
                 dry_run=dry_run, on_progress=renderer,
             )
         elif source:
