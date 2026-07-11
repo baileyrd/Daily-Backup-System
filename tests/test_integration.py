@@ -72,6 +72,18 @@ def test_backup_all_and_export_roundtrip(service, tmp_path):
     assert all("raw" in r and "_id" in r["raw"] for r in records)
 
 
+def test_backup_all_dry_run_persists_nothing(service):
+    # Regression: `backup --all --dry-run` used to ignore dry_run and run a
+    # real backup. A dry-run must resolve the mode but touch no data.
+    results = service.backup_all(dry_run=True)
+    assert results
+    assert all(r.status is RunStatus.SKIPPED for r in results)
+    assert all(r.error == "dry-run" for r in results)
+    assert all(r.created == 0 and r.fetched == 0 for r in results)
+    statuses = service.status("rd")
+    assert statuses[0].live_items == 0
+
+
 def test_force_full_refetches(service):
     service.backup_source("rd")
     result = service.backup_source("rd", force_full=True)

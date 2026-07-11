@@ -203,9 +203,14 @@ class RedditConnector(Connector):
         paginated=True,
         concurrency="serial",  # drives a real Playwright browser
     )
-    # The capture timestamp churns every run; strip it before hashing so an
-    # otherwise-unchanged saved item never spawns a spurious revision.
-    volatile_fields = ("extracted_at",)
+    # Strip fields that drift every run before hashing, so an otherwise-
+    # unchanged saved item never spawns a spurious revision. Besides the
+    # capture timestamp, Reddit's score and comment count tick constantly on
+    # live threads — hashing them turned nearly every saved item into a fresh
+    # revision each run (thousands of noise revisions). We archive content, not
+    # live vote metrics, so these are excluded; the latest values still ride
+    # along in raw when a substantive edit does trigger a revision.
+    volatile_fields = ("extracted_at", "score", "num_comments")
 
     # -- main entrypoint ----------------------------------------------------
 

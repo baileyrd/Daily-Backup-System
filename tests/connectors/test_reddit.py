@@ -172,6 +172,28 @@ def test_volatile_extracted_at_does_not_spawn_revisions(storage):
     assert revs == 1
 
 
+def test_volatile_score_and_comments_do_not_spawn_revisions(storage):
+    # Score and comment count tick every run on live threads; drift in them
+    # alone must not create a revision (this was the source of thousands of
+    # noise revisions across daily runs).
+    _run(storage, _connector([_post(1, score=10, num_comments=2)]))
+    _src, r2 = _run(storage, _connector([_post(1, score=873, num_comments=145)]))
+    assert r2.unchanged == 1
+    assert r2.updated == 0
+    revs = storage.conn.execute("SELECT COUNT(*) FROM item_revisions").fetchone()[0]
+    assert revs == 1
+
+
+def test_substantive_edit_still_spawns_revision(storage):
+    # Control: a real content edit (body text) must still be versioned even
+    # while score/comments are excluded from the hash.
+    _run(storage, _connector([_post(1, selftext="original", score=10)]))
+    _src, r2 = _run(storage, _connector([_post(1, selftext="edited", score=999)]))
+    assert r2.updated == 1
+    revs = storage.conn.execute("SELECT COUNT(*) FROM item_revisions").fetchone()[0]
+    assert revs == 2
+
+
 # -- outbound-link archiving (archive_outbound_link) -------------------------
 
 

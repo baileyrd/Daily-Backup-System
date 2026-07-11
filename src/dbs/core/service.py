@@ -257,6 +257,7 @@ class BackupService:
         continue_on_error: bool = True,
         limit: int | None = None,
         parallel: int | None = None,
+        dry_run: bool = False,
         on_progress: ProgressCallback | None = None,
     ) -> list[RunResult]:
         # Reap once, up front, while no run of ours is live yet — a per-source
@@ -271,7 +272,10 @@ class BackupService:
         ]
         total = len(due)
         workers = max(1, parallel if parallel is not None else self.config.parallel)
-        if workers > 1 and total > 1:
+        # A dry-run only resolves each source's chosen mode — no connector runs,
+        # so there is nothing to parallelize; keep it on the simple sequential
+        # path (which threads dry_run through to backup_source).
+        if workers > 1 and total > 1 and not dry_run:
             results = self._backup_all_parallel(
                 due,
                 workers=min(workers, total),
@@ -290,7 +294,8 @@ class BackupService:
             try:
                 results.append(
                     self.backup_source(
-                        name, limit=limit, on_progress=framed, _reap=False
+                        name, limit=limit, dry_run=dry_run,
+                        on_progress=framed, _reap=False,
                     )
                 )
             except Exception as exc:  # isolation: one source must not abort others
