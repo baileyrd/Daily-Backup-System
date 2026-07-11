@@ -243,7 +243,7 @@ class Engine:
             self.storage.finish_run(
                 ctx.run_id, status.value, stats,
                 items_seen=items_seen, cursor_after=cursor_after, error=error,
-                warnings=warnings,
+                warnings=warnings, items_failed=ctx.items_failed,
             )
         except Exception as exc:  # noqa: BLE001
             try:
@@ -251,7 +251,7 @@ class Engine:
                     ctx.run_id, status.value, BatchResult(),
                     items_seen=items_seen, cursor_after=cursor_after,
                     error=(error or "") + f" [finish_run failed: {type(exc).__name__}: {exc}]",
-                    warnings=warnings,
+                    warnings=warnings, items_failed=ctx.items_failed,
                 )
             except Exception:
                 pass
@@ -269,6 +269,7 @@ class Engine:
             deleted=stats.deleted,
             undeleted=stats.undeleted,
             revisions=stats.revisions,
+            items_failed=ctx.items_failed,
             error=error,
             warnings=warnings,
         )

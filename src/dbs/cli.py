@@ -138,6 +138,17 @@ def _human_bytes(n: int) -> str:
     return f"{value:,.1f} TiB"
 
 
+def _human_duration(ms: int | None) -> str:
+    """Compact wall-clock duration, e.g. '0.8s', '55.0s', '2m45s'. '-' if unknown."""
+    if ms is None:
+        return "-"
+    secs = ms / 1000
+    if secs < 60:
+        return f"{secs:.1f}s"
+    minutes, secs = divmod(int(secs), 60)
+    return f"{minutes}m{secs:02d}s"
+
+
 def _status_color(status: str) -> str:
     return {
         "success": typer.colors.GREEN,
@@ -149,10 +160,12 @@ def _status_color(status: str) -> str:
 
 
 def _print_run(r: RunResult) -> None:
+    failed = f" !{r.items_failed}" if r.items_failed else ""
     typer.secho(
         f"  {r.source:<24} {r.status.value:<11} "
         f"[{r.mode}] +{r.created} ~{r.updated} ={r.unchanged} "
-        f"x{r.deleted} ^{r.undeleted} (fetched {r.fetched})",
+        f"x{r.deleted} ^{r.undeleted}{failed} (fetched {r.fetched}) "
+        f"{_human_duration(r.duration_ms)}",
         fg=_status_color(r.status.value),
     )
     if r.error:
@@ -381,10 +394,12 @@ def history(
             typer.echo(json.dumps(runs, indent=2, default=str))
             return
         for run in runs:
+            failed = f" !{run['items_failed']}" if run.get("items_failed") else ""
             typer.secho(
                 f"{run['started_at']}  {run.get('source_name','?'):<20} "
                 f"{run['status']:<11} [{run['mode']}] "
-                f"+{run['items_created']} ~{run['items_updated']} x{run['items_deleted']}",
+                f"+{run['items_created']} ~{run['items_updated']} x{run['items_deleted']}{failed}"
+                f"  {_human_duration(run.get('duration_ms'))}",
                 fg=_status_color(run["status"]),
             )
             if run.get("error"):

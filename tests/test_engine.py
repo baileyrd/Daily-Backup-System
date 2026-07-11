@@ -169,6 +169,38 @@ def test_normal_run_has_no_warnings(storage):
     assert result.to_dict()["warnings"] == []
 
 
+def test_connector_failures_and_duration_recorded_on_run(storage):
+    # A connector reporting soft failures (e.g. skool media that failed and will
+    # retry) must surface on the run record and in history, not just the logs.
+    cls = make_connector()
+    cls.script = [_bi("1"), _bi("2")]
+    orig_fetch = cls.fetch
+
+    def fetch(self, ctx):
+        ctx.report_failed(2)
+        ctx.report_failed()  # +1 -> 3 total
+        yield from orig_fetch(self, ctx)
+
+    cls.fetch = fetch
+    src, result = run_fake(storage, cls, mode="full")
+    assert result.items_failed == 3
+    assert result.to_dict()["items_failed"] == 3
+    assert result.duration_ms >= 0
+
+    row = storage.recent_runs(src.id, 1)[0]
+    assert row["items_failed"] == 3
+    # Duration is derived from the run's own timestamps and always present.
+    assert row["duration_ms"] is not None and row["duration_ms"] >= 0
+
+
+def test_run_without_reported_failures_records_zero(storage):
+    cls = make_connector()
+    cls.script = [_bi("1")]
+    src, result = run_fake(storage, cls, mode="full")
+    assert result.items_failed == 0
+    assert storage.recent_runs(src.id, 1)[0]["items_failed"] == 0
+
+
 def test_limit_caps_items_and_skips_the_sweep(storage):
     # 10 items + a marker claiming only 2 live: with --limit 3 the engine
     # stops at 3 and a truncated run must never sweep.

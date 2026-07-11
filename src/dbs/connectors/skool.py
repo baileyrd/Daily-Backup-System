@@ -591,9 +591,13 @@ class SkoolConnector(Connector):
                     lesson_dir = course_dir / _fit_dir_name(
                         course_dir, _lesson_dir_name(idx, lesson)
                     )
-                    stats[self._process_lesson(
+                    outcome = self._process_lesson(
                         page, lesson, lesson_dir, slug, course_slug, cfg, ctx
-                    )] += 1
+                    )
+                    stats[outcome] += 1
+                    if outcome == "failed":
+                        # Surface on the run record (retried next run), not just logs.
+                        ctx.report_failed()
                     yield lesson
 
             if courses and skipped_courses == len(courses):
