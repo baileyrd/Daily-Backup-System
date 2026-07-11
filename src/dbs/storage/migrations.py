@@ -148,12 +148,22 @@ CREATE INDEX IF NOT EXISTS idx_media_with_data
     ON media(item_id) WHERE data IS NOT NULL;
 """
 
+# Per-run observability: how long a run took (derivable from the timestamps,
+# but stored so history/analytics need no date math) and a connector-reported
+# failure count — e.g. skool media downloads that failed and will retry — which
+# previously lived only in logs, so an operator could not see it in history.
+MIGRATION_0005 = """
+ALTER TABLE sync_runs ADD COLUMN duration_ms INTEGER;
+ALTER TABLE sync_runs ADD COLUMN items_failed INTEGER NOT NULL DEFAULT 0;
+"""
+
 # (version, sql) in ascending order.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, MIGRATION_0001),
     (2, MIGRATION_0002),
     (3, MIGRATION_0003),
     (4, MIGRATION_0004),
+    (5, MIGRATION_0005),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]

@@ -17,6 +17,16 @@ def test_version():
     assert "daily-backup-system" in result.stdout
 
 
+def test_human_duration_formatting():
+    from dbs.cli import _human_duration
+
+    assert _human_duration(None) == "-"
+    assert _human_duration(0) == "0.0s"
+    assert _human_duration(800) == "0.8s"
+    assert _human_duration(55_000) == "55.0s"
+    assert _human_duration(165_200) == "2m45s"
+
+
 def test_configure_logging_makes_dbs_info_logs_visible_and_is_idempotent():
     # Nothing in this codebase ever called logging.basicConfig or attached a
     # handler, so every connector's ctx.logger.info(...) status/diagnostic

@@ -257,8 +257,10 @@ class SqliteStorage(Storage):
         cursor_after: str | None,
         error: str | None,
         warnings: list[str] | None = None,
+        items_failed: int = 0,
     ) -> None:
         now = self._now()
+        duration_ms = self._run_duration_ms(run_id, now)
         with self.transaction():
             self.conn.execute(
                 """
@@ -266,7 +268,7 @@ class SqliteStorage(Storage):
                     status=?, finished_at=?, items_seen=?, items_created=?,
                     items_updated=?, items_unchanged=?, items_deleted=?,
                     items_undeleted=?, revisions=?, cursor_after=?, error=?,
-                    warnings=?
+                    warnings=?, duration_ms=?, items_failed=?
                 WHERE id=?
                 """,
                 (
@@ -274,9 +276,25 @@ class SqliteStorage(Storage):
                     stats.unchanged, stats.deleted, stats.undeleted, stats.revisions,
                     cursor_after, error,
                     json.dumps(warnings) if warnings else None,
+                    duration_ms, items_failed,
                     run_id,
                 ),
             )
+
+    def _run_duration_ms(self, run_id: int, finished_at: str) -> int | None:
+        """Milliseconds from the run's started_at to finished_at.
+
+        Derived from the stored timestamps so it always agrees with them;
+        returns None if the start is missing or unparseable rather than guessing.
+        """
+        row = self.conn.execute(
+            "SELECT started_at FROM sync_runs WHERE id=?", (run_id,)
+        ).fetchone()
+        started = parse_iso(row["started_at"]) if row else None
+        finished = parse_iso(finished_at)
+        if started is None or finished is None:
+            return None
+        return max(0, int((finished - started).total_seconds() * 1000))
 
     def reap_interrupted_runs(self) -> list[int]:
         now = self._now()
