@@ -34,6 +34,7 @@ from .errors import (
     SourceLockedError,
 )
 from .http import ManagedHTTPClient
+from .netns import in_named_netns, named_netns_exists
 from .models import (
     ConnectorInfo,
     Cursor,
@@ -167,6 +168,10 @@ class BackupService:
                 source=name, status=RunStatus.SKIPPED, started_at=now,
                 finished_at=now, error="source disabled",
             )
+
+        vpn_skip = self._vpn_guard_skip(name, sc)
+        if vpn_skip is not None:
+            return vpn_skip
 
         rc = self.registry.get(sc.type)
         try:
@@ -452,6 +457,57 @@ class BackupService:
             on_progress(ev)
 
         return framed
+
+    def _vpn_doctor_check(self, name: str) -> "DoctorCheck":
+        """Readiness of a requires_vpn source's VPN routing (see _vpn_guard_skip)."""
+        cfg = self.config
+        ns = cfg.vpn_netns
+        key = f"source.{name}.vpn"
+        if cfg.vpn_guard == "off":
+            return DoctorCheck(key, "ok", "requires_vpn set but vpn_guard=off (not enforced)")
+        if in_named_netns(ns):
+            return DoctorCheck(key, "ok", f"running inside the {ns!r} netns")
+        if named_netns_exists(ns):
+            return DoctorCheck(
+                key, "ok",
+                f"requires VPN; the {ns!r} netns is up — run via "
+                f"`{cfg.vpn_exec} dbs backup {name}` (a direct run here is skipped)",
+            )
+        return DoctorCheck(
+            key, "warn",
+            f"requires VPN but the {ns!r} netns is not up — start it (e.g. "
+            f"`sudo systemctl start vpn-netns`), then run via `{cfg.vpn_exec}`",
+        )
+
+    def _vpn_guard_skip(self, name: str, sc: SourceConfig) -> RunResult | None:
+        """Guard a ``requires_vpn`` source against running off-VPN.
+
+        Returns a SKIPPED result to abort the run when the source must go
+        through the VPN but this process is not inside ``vpn_netns`` — so an
+        off-VPN ``dbs backup`` can't silently expose the host IP (the recorded
+        failure mode for the IP-blocked youtube/skool connectors). ``vpn_guard``
+        downgrades this to a warning (``warn``) or disables it (``off``); when
+        already inside the namespace the run proceeds normally.
+        """
+        cfg = self.config
+        if not sc.requires_vpn or cfg.vpn_guard == "off":
+            return None
+        if in_named_netns(cfg.vpn_netns):
+            return None
+        msg = (
+            f"{name} is marked requires_vpn but this process is not in the "
+            f"{cfg.vpn_netns!r} network namespace — run it through the VPN "
+            f"wrapper, e.g. `{cfg.vpn_exec} dbs backup {name}`"
+        )
+        if cfg.vpn_guard == "warn":
+            logger.warning("%s (proceeding anyway: vpn_guard=warn)", msg)
+            return None
+        logger.warning("skipping %s", msg)
+        now = self.clock()
+        return RunResult(
+            source=name, status=RunStatus.SKIPPED, started_at=now,
+            finished_at=now, error=msg,
+        )
 
     def _choose_mode(
         self,
@@ -1055,6 +1111,8 @@ class BackupService:
                 "runtime dependencies importable" if ready
                 else f"missing optional deps — {hint or 'see the connector docs'}",
             ))
+            if sc.requires_vpn:
+                checks.append(self._vpn_doctor_check(name))
             declared = tuple(rc.cls.secret_keys)
             if rc.cls.capabilities.requires_auth and declared:
                 present = [k for k in declared if self.secret_store.get(k)]

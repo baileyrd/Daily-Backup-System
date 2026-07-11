@@ -833,7 +833,10 @@ def _write_vpn_setup(tmp_path, *, vpn_exec: str, vpn_status: str = "/bin/true"):
         "[dbs]\n"
         'database = "dbs.sqlite3"\n'
         f'vpn_exec = "{vpn_exec}"\n'
-        f'vpn_status = "{vpn_status}"\n\n'
+        f'vpn_status = "{vpn_status}"\n'
+        # These tests fake the wrapper (no real netns), so disable the off-VPN
+        # guard — it has its own coverage in test_vpn_guard.py.
+        'vpn_guard = "off"\n\n'
         "[sources.rd]\n"
         'type = "raindrop"\n'
         "enabled = true\n"
