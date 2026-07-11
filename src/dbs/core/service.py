@@ -257,6 +257,8 @@ class BackupService:
         continue_on_error: bool = True,
         limit: int | None = None,
         parallel: int | None = None,
+        force_full: bool = False,
+        force_reconcile: bool = False,
         dry_run: bool = False,
         on_progress: ProgressCallback | None = None,
     ) -> list[RunResult]:
@@ -281,6 +283,8 @@ class BackupService:
                 workers=min(workers, total),
                 continue_on_error=continue_on_error,
                 limit=limit,
+                force_full=force_full,
+                force_reconcile=force_reconcile,
                 on_progress=on_progress,
             )
             if results is not None:
@@ -294,8 +298,9 @@ class BackupService:
             try:
                 results.append(
                     self.backup_source(
-                        name, limit=limit, dry_run=dry_run,
-                        on_progress=framed, _reap=False,
+                        name, limit=limit,
+                        force_full=force_full, force_reconcile=force_reconcile,
+                        dry_run=dry_run, on_progress=framed, _reap=False,
                     )
                 )
             except Exception as exc:  # isolation: one source must not abort others
@@ -317,6 +322,8 @@ class BackupService:
         workers: int,
         continue_on_error: bool,
         limit: int | None,
+        force_full: bool = False,
+        force_reconcile: bool = False,
         on_progress: ProgressCallback | None,
     ) -> list[RunResult] | None:
         """Run the work-list on a bounded thread pool (``--parallel N``).
@@ -381,10 +388,14 @@ class BackupService:
             if serial:
                 with serial_gate:
                     return svc.backup_source(
-                        name, limit=limit, on_progress=framed, _reap=False
+                        name, limit=limit,
+                        force_full=force_full, force_reconcile=force_reconcile,
+                        on_progress=framed, _reap=False,
                     )
             return svc.backup_source(
-                name, limit=limit, on_progress=framed, _reap=False
+                name, limit=limit,
+                force_full=force_full, force_reconcile=force_reconcile,
+                on_progress=framed, _reap=False,
             )
 
         results: list[RunResult | None] = [None] * total

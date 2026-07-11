@@ -89,3 +89,17 @@ def test_force_full_refetches(service):
     result = service.backup_source("rd", force_full=True)
     assert result.mode == "full"
     assert result.fetched == 3
+
+
+def test_backup_all_threads_force_full(service):
+    # Regression: `backup --all --force-full` used to silently drop the flag.
+    service.backup_all()  # a plain second run would be incremental
+    results = service.backup_all(force_full=True, dry_run=True)
+    assert results and all(r.mode == "full" for r in results)
+
+
+def test_backup_all_threads_reconcile(service):
+    # Regression: `backup --all --reconcile` used to silently drop the flag.
+    service.backup_all()
+    results = service.backup_all(force_reconcile=True, dry_run=True)
+    assert results and all(r.mode == "reconcile" for r in results)
