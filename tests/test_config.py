@@ -45,6 +45,26 @@ def test_download_root_default_and_per_source_dir(tmp_path):
     )
 
 
+def test_vpn_guard_defaults_and_override(tmp_path):
+    p = tmp_path / "dbs.toml"
+    p.write_text('[dbs]\ndatabase = "x.sqlite3"\n')
+    cfg = load_config(p)
+    assert cfg.vpn_netns == "vpn"
+    assert cfg.vpn_guard == "skip"
+
+    p.write_text('[dbs]\ndatabase = "x.sqlite3"\nvpn_netns = "proton"\nvpn_guard = "warn"\n')
+    cfg = load_config(p)
+    assert cfg.vpn_netns == "proton"
+    assert cfg.vpn_guard == "warn"
+
+
+def test_source_requires_vpn_parsed(tmp_path):
+    p = tmp_path / "dbs.toml"
+    p.write_text('[sources.yt]\ntype = "youtube"\nrequires_vpn = true\n')
+    cfg = load_config(p)
+    assert cfg.sources["yt"].requires_vpn is True
+
+
 def test_download_root_absolute_override(tmp_path):
     p = tmp_path / "dbs.toml"
     p.write_text('[dbs]\ndownload_root = "/mnt/media/dbs"\n')
