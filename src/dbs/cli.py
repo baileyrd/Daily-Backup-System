@@ -16,16 +16,18 @@ from __future__ import annotations
 import json
 import logging
 import re
+import signal
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, TextIO
+from typing import Callable, Optional, TextIO
 
 import typer
 
 from . import CORE_API_VERSION, __version__
 from .config import load_config
+from .core.cancel import CancelToken
 from .core.errors import (
     BackupRunError,
     ConfigError,
@@ -248,6 +250,52 @@ class _ProgressRenderer:
         self._clear()
 
 
+def _install_stop_handler(
+    renderer: "_ProgressRenderer", *, all_sources: bool
+) -> tuple[CancelToken, Callable[[], None]]:
+    """Route Ctrl+C into a graceful early stop for a running backup.
+
+    Returns the :class:`CancelToken` to hand to the service plus a callable
+    that restores the previous SIGINT handler (call it in a ``finally``). The
+    first Ctrl+C sets the token — the service stops before the next source and
+    the engine halts the in-flight one at its next item boundary. A second
+    Ctrl+C restores the default handler and raises ``KeyboardInterrupt`` for an
+    immediate abort. Signal handlers can only be installed from the main
+    thread; off the main thread this is a no-op (the backup still runs, just
+    without Ctrl+C cancellation).
+    """
+    cancel = CancelToken()
+    state = {"count": 0}
+
+    def _handle(signum, frame) -> None:  # noqa: ANN001 - signal handler contract
+        state["count"] += 1
+        if state["count"] == 1:
+            cancel.cancel()
+            renderer.close()  # wipe the live line so the message reads cleanly
+            msg = (
+                "\nStopping — the current source will finish, then no more "
+                "start (Ctrl+C again to abort now)."
+                if all_sources
+                else "\nStopping the current backup (Ctrl+C again to abort now)."
+            )
+            typer.secho(msg, fg=typer.colors.YELLOW, err=True)
+        else:
+            signal.signal(signal.SIGINT, original)
+            raise KeyboardInterrupt
+
+    try:
+        original = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, _handle)
+    except ValueError:
+        # Not the main thread — cancellation via Ctrl+C isn't available here.
+        return cancel, lambda: None
+
+    def restore() -> None:
+        signal.signal(signal.SIGINT, original)
+
+    return cancel, restore
+
+
 # --------------------------------------------------------------------------- #
 # commands                                                                     #
 # --------------------------------------------------------------------------- #
@@ -307,16 +355,22 @@ def backup(
         help="Show a live progress status line (default: auto — on for a TTY).",
     ),
 ) -> None:
-    """Back up one source or, with --all, every enabled source."""
+    """Back up one source or, with --all, every enabled source.
+
+    Press Ctrl+C once to stop early: the in-flight source finishes committing
+    and no further source starts (a graceful stop; committed data is kept).
+    Press Ctrl+C a second time to abort immediately.
+    """
     svc = _service()
     show_progress = progress if progress is not None else sys.stderr.isatty()
     renderer = _ProgressRenderer(enabled=show_progress)
+    cancel, restore_sigint = _install_stop_handler(renderer, all_sources=all_sources)
     try:
         if all_sources:
             results = svc.backup_all(
                 only_due=only_due, limit=limit, parallel=parallel,
                 force_full=force_full, force_reconcile=reconcile,
-                dry_run=dry_run, on_progress=renderer,
+                dry_run=dry_run, on_progress=renderer, cancel=cancel,
             )
         elif source:
             try:
@@ -324,7 +378,7 @@ def backup(
                     svc.backup_source(
                         source, force_full=force_full,
                         force_reconcile=reconcile, dry_run=dry_run,
-                        limit=limit, on_progress=renderer,
+                        limit=limit, on_progress=renderer, cancel=cancel,
                     )
                 ]
             except SourceLockedError as exc:  # subclass of BackupRunError — must come first
@@ -346,7 +400,12 @@ def backup(
         for r in results:
             _print_run(r)
         raise typer.Exit(_exit_code(results))
+    except KeyboardInterrupt:  # second Ctrl+C: abort now, before results print
+        renderer.close()
+        typer.secho("Aborted.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(130)
     finally:
+        restore_sigint()
         renderer.close()
         svc.close()
 

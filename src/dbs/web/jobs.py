@@ -22,6 +22,7 @@ concurrency, and serializing whole-run jobs keeps the live view unambiguous.
 from __future__ import annotations
 
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -32,6 +33,7 @@ from queue import Empty, Queue
 from typing import Any, Callable, Iterator
 
 from ..config import Config
+from ..core.cancel import CancelToken
 from ..core.models import ProgressEvent, RunResult
 
 # Pushed onto every subscriber queue when a job ends, so streams terminate.
@@ -94,6 +96,8 @@ class BackupJob:
     finished_at: str | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
     results: list[dict[str, Any]] = field(default_factory=list)
+    # Cooperative early-stop signal for the "Stop" button (see JobManager.cancel).
+    cancel: CancelToken = field(default_factory=CancelToken, repr=False)
     # Live subscribers (SSE). Guarded by the manager lock.
     _queues: list[Queue] = field(default_factory=list, repr=False)
 
@@ -105,6 +109,7 @@ class BackupJob:
             "error": self.error,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "stopping": self.status == "running" and self.cancel.cancelled,
             "events": list(self.events),
             "results": list(self.results),
         }
@@ -147,6 +152,21 @@ class JobManager:
         thread = threading.Thread(target=self._run, args=(job,), daemon=True)
         thread.start()
         return job
+
+    def cancel(self, job_id: int) -> bool:
+        """Request a graceful early stop of a running job ("Stop" button).
+
+        Returns True if the job exists and was running (its token is now set);
+        False otherwise. The stop is cooperative — the in-flight source
+        finishes committing and no further source starts — so the job keeps
+        running briefly before it reports ``done``.
+        """
+        with self._lock:
+            job = self._by_id.get(job_id)
+            if job is None or job.status != "running":
+                return False
+            job.cancel.cancel()
+            return True
 
     def _broadcast(
         self,
@@ -221,7 +241,8 @@ class JobManager:
             spec = job.spec
             if spec.get("all"):
                 results = svc.backup_all(
-                    only_due=bool(spec.get("only_due")), on_progress=on_progress
+                    only_due=bool(spec.get("only_due")), on_progress=on_progress,
+                    cancel=job.cancel,
                 )
             else:
                 results = [
@@ -231,6 +252,7 @@ class JobManager:
                         force_reconcile=bool(spec.get("reconcile")),
                         dry_run=bool(spec.get("dry_run")),
                         on_progress=on_progress,
+                        cancel=job.cancel,
                     )
                 ]
             try:
@@ -259,6 +281,11 @@ class JobManager:
         svc = None
         try:
             for i, name in enumerate(names, 1):
+                # A manual stop halts before the next source begins; the
+                # in-flight source (in-process or the VPN subprocess) has
+                # already returned by the time we loop back here.
+                if job.cancel.cancelled:
+                    break
                 if name in vpn_sources:
                     results.append(self._run_vpn_source(job, cfg, name, i, total))
                     continue
@@ -267,7 +294,7 @@ class JobManager:
                 on_progress = lambda ev, _i=i: self._broadcast(  # noqa: E731
                     job, ev, index=_i, total=total
                 )
-                result = svc.backup_source(name, on_progress=on_progress)
+                result = svc.backup_source(name, on_progress=on_progress, cancel=job.cancel)
                 results.append(
                     result.to_dict() if isinstance(result, RunResult) else result
                 )
@@ -320,7 +347,15 @@ class JobManager:
             return self._finish_vpn_source(job, name, index, total, started,
                                            error=f"failed to launch VPN wrapper: {exc}")
         assert proc.stdout is not None
+        stopped = False
         for raw in proc.stdout:
+            # A manual stop propagates to the subprocess as SIGINT — the child
+            # `dbs backup` installs the same graceful-stop handler, so it
+            # finishes committing and exits cleanly. Checked per output line.
+            if not stopped and job.cancel.cancelled:
+                stopped = True
+                log("stop requested — signalling the VPN backup subprocess")
+                proc.send_signal(signal.SIGINT)
             line = raw.rstrip()
             if line:
                 tail.append(line)

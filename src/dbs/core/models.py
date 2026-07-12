@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from .capabilities import Capabilities, ItemKind
 
 if TYPE_CHECKING:  # avoid importing httpx/secrets at model import time
+    from .cancel import CancelToken
     from .http import ManagedHTTPClient
     from .secrets import Secrets
 
@@ -167,6 +168,11 @@ class RunContext:
     # failed and will retry next run). The engine reads this at finish and
     # records it on the run so it is visible in history, not just the logs.
     items_failed: int = 0
+    # Cooperative cancellation signal (CLI Ctrl+C / web "Stop"). The engine
+    # polls it between fetched items and halts gracefully when set — committing
+    # buffered items + the last checkpoint cursor and recording the run
+    # 'interrupted'. None means the run cannot be cancelled.
+    cancel: "CancelToken | None" = None
 
     def report_failed(self, n: int = 1) -> None:
         """Record ``n`` connector-side soft failures for this run."""

@@ -90,6 +90,7 @@ class Engine:
         status = RunStatus.SUCCESS
         error: str | None = None
         warnings: list[str] = []
+        cancelled = False
 
         def emit(phase: ProgressPhase, *, note: str = "", result: RunResult | None = None) -> None:
             # Best-effort: a progress renderer must never break or slow a backup.
@@ -136,6 +137,18 @@ class Engine:
         try:
             connector.open(ctx)
             for event in connector.fetch(ctx):
+                if ctx.cancel is not None and ctx.cancel.cancelled:
+                    # Manual early stop (CLI Ctrl+C / web "Stop"): halt at this
+                    # item boundary, commit what's buffered below, and — like
+                    # the --limit path — never sweep-delete from a partial
+                    # enumeration.
+                    cancelled = True
+                    reconcile_live = None
+                    ctx.logger.warning(
+                        "%s: manual stop requested — halting after commit",
+                        ctx.source_name,
+                    )
+                    break
                 if isinstance(event, BackupItem):
                     if ctx.limit is not None and items_seen >= ctx.limit:
                         # Engine-enforced item cap (backup --limit): a smoke
@@ -168,10 +181,11 @@ class Engine:
             if buffer or not committed_any:
                 flush(last_cursor)
 
-            if items_seen == 0:
+            if items_seen == 0 and not cancelled:
                 # Not an error (a source can be legitimately empty), but the
                 # historical failure mode here is a silent auth/scrape problem
-                # dressed up as success — make it visible.
+                # dressed up as success — make it visible. A manual stop before
+                # the first item is not this case, so skip it.
                 warning = (
                     "run enumerated 0 items — if this source should not be "
                     "empty, check its auth/config"
@@ -215,7 +229,20 @@ class Engine:
                     if swept:
                         emit(ProgressPhase.SWEEP, note=f"swept {swept} deleted")
 
-            status = RunStatus.SUCCESS
+            if cancelled:
+                # A deliberate, graceful stop — not a failure. Committed data
+                # and the cursor are intact; recording it 'interrupted' (not
+                # 'success') keeps the incomplete run honest in status/history
+                # and the next run simply resumes from the saved cursor.
+                warning = (
+                    "manually stopped before completion — committed data and "
+                    "the cursor are preserved; the next run resumes from the "
+                    "last checkpoint"
+                )
+                warnings.append(warning)
+                status = RunStatus.INTERRUPTED
+            else:
+                status = RunStatus.SUCCESS
         except (ConnectorConfigError, ConnectorAuthError) as exc:
             status = RunStatus.PARTIAL if committed_any else RunStatus.FAILED
             error = str(exc)

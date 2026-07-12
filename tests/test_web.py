@@ -79,6 +79,19 @@ def _wait_done(client, job_id, timeout=10.0):
     raise AssertionError("backup job did not finish in time")
 
 
+def test_cancel_unknown_job_404(client):
+    assert client.post("/api/backup/999/cancel").status_code == 404
+
+
+def test_cancel_finished_job_reports_not_stopping(client):
+    job = client.post("/api/backup", json={"all": True}).json()
+    _wait_done(client, job["id"])
+    # Already finished: the endpoint still resolves but reports no live stop.
+    r = client.post(f"/api/backup/{job['id']}/cancel")
+    assert r.status_code == 200
+    assert r.json() == {"job_id": job["id"], "stopping": False}
+
+
 @pytest.fixture
 def setup_client(tmp_path):
     """A client with the privileged setup actions enabled."""

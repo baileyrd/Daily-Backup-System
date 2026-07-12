@@ -16,7 +16,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, Iterator, Mapping
+from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Iterator, Mapping
 
 import httpx
 
@@ -52,6 +52,9 @@ from .models import (
 )
 from .registry import ConnectorRegistry
 from .secrets import Secrets
+
+if TYPE_CHECKING:
+    from .cancel import CancelToken
 
 _DEFAULT_RECONCILE_EVERY = 7
 # Per-cadence "due again after" windows. Each is deliberately short of its
@@ -152,6 +155,7 @@ class BackupService:
         dry_run: bool = False,
         limit: int | None = None,
         on_progress: ProgressCallback | None = None,
+        cancel: "CancelToken | None" = None,
         _reap: bool = True,
     ) -> RunResult:
         # Crash recovery: flip stale 'running' runs to 'interrupted'. backup_all
@@ -235,6 +239,7 @@ class BackupService:
                 store_media=sc.store_media,
                 max_media_bytes=max(0, sc.max_media_mb) * 1024 * 1024,
                 download_dir=self.config.download_dir_for(name),
+                cancel=cancel,
             )
             result = self.engine.run_source(rc, ctx, on_progress=on_progress)
         finally:
@@ -266,6 +271,7 @@ class BackupService:
         force_reconcile: bool = False,
         dry_run: bool = False,
         on_progress: ProgressCallback | None = None,
+        cancel: "CancelToken | None" = None,
     ) -> list[RunResult]:
         # Reap once, up front, while no run of ours is live yet — a per-source
         # reap inside a parallel batch would flip siblings' running runs.
@@ -291,6 +297,7 @@ class BackupService:
                 force_full=force_full,
                 force_reconcile=force_reconcile,
                 on_progress=on_progress,
+                cancel=cancel,
             )
             if results is not None:
                 return results
@@ -299,13 +306,19 @@ class BackupService:
             )
         results = []
         for index, (name, sc) in enumerate(due, start=1):
+            # A manual stop halts before the next source starts; whatever has
+            # already run is returned. The in-flight source (if any) has
+            # already committed and returned by the time we get here.
+            if cancel is not None and cancel.cancelled:
+                break
             framed = self._frame_progress(on_progress, index, total)
             try:
                 results.append(
                     self.backup_source(
                         name, limit=limit,
                         force_full=force_full, force_reconcile=force_reconcile,
-                        dry_run=dry_run, on_progress=framed, _reap=False,
+                        dry_run=dry_run, on_progress=framed, cancel=cancel,
+                        _reap=False,
                     )
                 )
             except Exception as exc:  # isolation: one source must not abort others
@@ -330,6 +343,7 @@ class BackupService:
         force_full: bool = False,
         force_reconcile: bool = False,
         on_progress: ProgressCallback | None,
+        cancel: "CancelToken | None" = None,
     ) -> list[RunResult] | None:
         """Run the work-list on a bounded thread pool (``--parallel N``).
 
@@ -381,7 +395,12 @@ class BackupService:
 
         total = len(due)
 
-        def run_one(index: int, name: str, sc: SourceConfig) -> RunResult:
+        def run_one(index: int, name: str, sc: SourceConfig) -> RunResult | None:
+            # A source not yet started when the stop lands is simply skipped
+            # (returns None, dropped from results below); a source already
+            # in-flight gets the token via its RunContext and stops itself.
+            if cancel is not None and cancel.cancelled:
+                return None
             framed = self._frame_progress(safe_progress, index, total)
             svc = service_for_thread()
             serial = False
@@ -395,12 +414,12 @@ class BackupService:
                     return svc.backup_source(
                         name, limit=limit,
                         force_full=force_full, force_reconcile=force_reconcile,
-                        on_progress=framed, _reap=False,
+                        on_progress=framed, cancel=cancel, _reap=False,
                     )
             return svc.backup_source(
                 name, limit=limit,
                 force_full=force_full, force_reconcile=force_reconcile,
-                on_progress=framed, _reap=False,
+                on_progress=framed, cancel=cancel, _reap=False,
             )
 
         results: list[RunResult | None] = [None] * total
