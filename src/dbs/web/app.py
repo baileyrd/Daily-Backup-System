@@ -962,6 +962,19 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc))
         return job.snapshot()
 
+    @app.post("/api/backup/{job_id}/cancel")
+    def cancel_backup(job_id: int) -> dict[str, Any]:
+        """Request a graceful early stop of a running backup ("Stop" button).
+
+        Cooperative: the in-flight source finishes committing and no further
+        source starts, so the job keeps running briefly, then reports ``done``
+        with whatever completed. 404 if the job is unknown; ``stopping`` is
+        False if it had already finished.
+        """
+        if jobs.get(job_id) is None:
+            raise HTTPException(status_code=404, detail=f"no such job {job_id}")
+        return {"job_id": job_id, "stopping": jobs.cancel(job_id)}
+
     @app.get("/api/backup/current")
     def backup_current() -> dict[str, Any]:
         return jobs.current() or {"status": "idle"}

@@ -79,7 +79,7 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | Command | Description |
 |---|---|
 | `dbs init [--force]` | Create config + `.env.example` and initialize the DB (idempotent; `--force` overwrites an existing config). |
-| `dbs backup [SOURCE] [--all] [--only-due] [--force-full] [--reconcile] [--dry-run] [--limit N] [--parallel N] [--progress/--no-progress]` | Run an incremental backup. `auto` mode picks incremental vs. reconcile. `--only-due` skips sources whose `schedule` cadence (`hourly`/`daily`/`weekly`, default daily ≈ 20h of slack) hasn't elapsed (for `--all` runs more than once a day). `--parallel N` backs up to N sources at once (default 1, or `[dbs] parallel` in config); browser/downloader-heavy connectors (reddit, skool, youtube) never overlap each other. A live status line (running item counter + per-source `[i/N]` position) shows automatically on a TTY; force it with `--progress` or silence it with `--no-progress`. |
+| `dbs backup [SOURCE] [--all] [--only-due] [--force-full] [--reconcile] [--dry-run] [--limit N] [--parallel N] [--progress/--no-progress]` | Run an incremental backup. `auto` mode picks incremental vs. reconcile. `--only-due` skips sources whose `schedule` cadence (`hourly`/`daily`/`weekly`, default daily ≈ 20h of slack) hasn't elapsed (for `--all` runs more than once a day). `--parallel N` backs up to N sources at once (default 1, or `[dbs] parallel` in config); browser/downloader-heavy connectors (reddit, skool, youtube) never overlap each other. A live status line (running item counter + per-source `[i/N]` position) shows automatically on a TTY; force it with `--progress` or silence it with `--no-progress`. Press **Ctrl+C** once to stop early: the in-flight source finishes committing (recorded `interrupted`, so the next run resumes from its last checkpoint) and no further source starts; press Ctrl+C again to abort immediately. |
 | `dbs status [SOURCE] [--json]` | Per-source item counts, last run, cursor watermark, warnings. |
 | `dbs history [SOURCE] [-n N] [--json]` | Recent backup runs and their stats. |
 | `dbs items [ID] [--source S] [--type T] [--since D] [--until D] [--include-deleted] [-q TEXT] [-n N] [--offset N] [--json]` | Browse what's actually stored — the CLI counterpart of the web *Browse* tab. Lists items newest-first with the same filters and full-text search as the web UI (FTS5 with a substring fallback); `-n`/`--offset` page through. `dbs items ID` shows one item's full detail: fields, archived-media list, and the verbatim raw payload. |
@@ -114,7 +114,9 @@ it you can:
 
 - see per-source **status** and recent **run history**;
 - **run a backup** (one source or all) and watch a **live progress bar** —
-  it streams the engine's progress events over Server-Sent Events;
+  it streams the engine's progress events over Server-Sent Events; a **Stop**
+  button on the running job halts it gracefully (the in-flight source finishes
+  committing, no further source starts) — the same early stop as Ctrl+C on the CLI;
 - **browse what's actually stored** (the *Browse* tab) — filter items by
   source/type/date and **full-text search** over titles and bodies (SQLite
   FTS5: all words must match, across fields, with prefix matching on the

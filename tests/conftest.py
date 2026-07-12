@@ -107,6 +107,7 @@ def make_ctx(
     max_media_bytes: int = 0,
     download_dir=None,
     limit=None,
+    cancel=None,
 ) -> RunContext:
     return RunContext(
         source_id=source_id,
@@ -124,6 +125,7 @@ def make_ctx(
         max_media_bytes=max_media_bytes,
         download_dir=download_dir,
         limit=limit,
+        cancel=cancel,
     )
 
 
@@ -137,6 +139,7 @@ def run_fake(
     on_progress=None,
     store_media=False,
     max_media_bytes=0,
+    cancel=None,
 ):
     """Create a source + run row and execute the fake connector through the engine."""
     source = storage.upsert_source("fake", "fake", "test:fake", "{}", 1)
@@ -145,7 +148,7 @@ def run_fake(
     engine = Engine(storage)
     ctx = make_ctx(
         source_id=source.id, run_id=run_id, mode=mode, cursor=cursor, since=since,
-        store_media=store_media, max_media_bytes=max_media_bytes,
+        store_media=store_media, max_media_bytes=max_media_bytes, cancel=cancel,
     )
     result = engine.run_source(registered(cls), ctx, on_progress=on_progress)
     storage.increment_run_count(source.id)

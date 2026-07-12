@@ -1521,7 +1521,9 @@ $("#run-verify").addEventListener("click", runVerify);
 // --- backup progress (SSE) -------------------------------------------------
 
 let activeES = null;
+let activeJobId = null;
 let progressHadFailure = false;
+let progressWasStopped = false;
 
 function setBackupButtons(disabled) {
   // While a backup runs, lock the triggers. On finish, the source lists are
@@ -1547,9 +1549,18 @@ function openProgress(job) {
   $("#progress-results").innerHTML = "";
   $("#progress-line").textContent = "";
   progressHadFailure = false;
+  progressWasStopped = false;
   const bar = $("#progress-bar");
   bar.style.width = "0%";
   setBackupButtons(true);
+
+  // Arm the Stop button for this job (graceful early stop).
+  activeJobId = job.id;
+  const stop = $("#progress-stop");
+  stop.classList.remove("hidden");
+  stop.disabled = false;
+  stop.textContent = "Stop";
+  if (job.stopping) { stop.disabled = true; stop.textContent = "Stopping…"; }
 
   let doneCount = 0;
   let total = job.spec.all ? null : 1;
@@ -1588,6 +1599,7 @@ function openProgress(job) {
 
 function addResult(r) {
   if (r.status === "failed") progressHadFailure = true;
+  if (r.status === "interrupted") progressWasStopped = true;
   const line = `${r.source}: ${r.status} [${r.mode}] +${r.created} ~${r.updated} =${r.unchanged} ✕${r.deleted} (fetched ${r.fetched})`;
   const notes = [r.error, ...(r.warnings || [])].filter(Boolean);
   $("#progress-results").append(el("div", { className: "mono " + statusClass(r.status), textContent: line + (notes.length ? `  — ${notes.join(" — ")}` : "") }));
@@ -1595,8 +1607,30 @@ function addResult(r) {
 
 let progressHideTimer = null;
 
+async function stopBackup() {
+  if (activeJobId == null) return;
+  const stop = $("#progress-stop");
+  stop.disabled = true;
+  stop.textContent = "Stopping…";
+  try {
+    await api(`/api/backup/${activeJobId}/cancel`, { method: "POST" });
+    toast("Stopping — the current source will finish, then it halts.", "ok");
+  } catch (e) {
+    // Re-arm so the user can retry if the request itself failed.
+    stop.disabled = false;
+    stop.textContent = "Stop";
+    toast(e.message, "err");
+  }
+}
+$("#progress-stop").addEventListener("click", stopBackup);
+
 function finishProgress(snap) {
   if (activeES) { activeES.close(); activeES = null; }
+  activeJobId = null;
+  const stop = $("#progress-stop");
+  stop.classList.add("hidden");
+  stop.disabled = false;
+  stop.textContent = "Stop";
   const bar = $("#progress-bar");
   bar.classList.remove("indeterminate");
   bar.style.width = "100%";
@@ -1610,11 +1644,14 @@ function finishProgress(snap) {
   // failures in the headline rather than calling a failed run "complete".
   const failed = snap.status === "error" || progressHadFailure;
   $("#progress-title").textContent = snap.status === "error" ? "Backup failed"
-    : progressHadFailure ? "Backup finished with errors" : "Backup complete";
+    : progressHadFailure ? "Backup finished with errors"
+    : progressWasStopped ? "Backup stopped" : "Backup complete";
   setBackupButtons(false);
   loadSources();
   loadDashboard();
-  toast(failed ? "Backup finished with errors." : "Backup complete.", failed ? "err" : "ok");
+  toast(failed ? "Backup finished with errors."
+    : progressWasStopped ? "Backup stopped." : "Backup complete.",
+    failed ? "err" : "ok");
   // Clean runs dismiss themselves; anything with a failure stays until dismissed.
   clearTimeout(progressHideTimer);
   if (!failed) {
