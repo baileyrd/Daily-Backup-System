@@ -179,13 +179,28 @@ class SkoolConfig(BaseModel):
     )
     # Only back up these courses (titles or Skool URL slugs, case-insensitive).
     # Prefix with a community slug to scope: "chase-ai/Claude Code Masterclass".
-    # Empty = all courses. While set, enumeration is partial, so the deletion
-    # sweep is skipped — nothing already backed up gets marked deleted.
+    # Empty = all courses. A community with any course filtered out is only
+    # partially enumerated, so deletion detection is skipped for THAT
+    # community (other communities still get their per-community sweep).
     courses: list[str] = Field(
         default=[],
         description='Only back up these courses (title or slug; "community/course" '
-                     "scopes it). Empty = all courses. While set, deletion detection "
-                     "is skipped (enumeration is necessarily partial).",
+                     "scopes it). Empty = all courses. Deletion detection is "
+                     "skipped for any community the filter leaves partially "
+                     "enumerated.",
+    )
+    # Communities whose media is gated (e.g. a membership tier you no longer
+    # pay for): every lesson-page visit and video/resource download would fail,
+    # so skip them — index the catalog from the course tree only. Lessons
+    # already downloaded while access lasted keep their files and sidecar data.
+    no_download_communities: list[str] = Field(
+        default=[],
+        description="Community slugs (or URLs) to index from the course tree "
+                     "only — no lesson-page visits or video/resource downloads. "
+                     "For memberships you no longer pay for: their media is "
+                     "access-gated and every attempt fails. Already-downloaded "
+                     "lessons keep their local files; deletion detection still "
+                     "runs for these communities.",
     )
     include_kinds: list[str] = Field(
         default=list(_KINDS),
@@ -395,22 +410,31 @@ class SkoolConnector(Connector):
                 f"the declared secret_keys {self.secret_keys}; set it in your .env, or "
                 f"set video_cookies_from_browser in the source config instead."
             )
-        live_ids: set[str] = set()
+        # Deletion detection is per community (scope = the community's group
+        # name, which every course/lesson item carries as a tag): each fully
+        # walked community yields its own tag-scoped ReconcileMarker, so a
+        # community that is filtered out, fails to load, or vanished from
+        # discovery (a membership the user dropped) simply has no marker and
+        # its already-backed-up items are never swept.
+        live_by_group: dict[str, set[str]] = {}
+        complete_groups: list[str] = []
         cursor: dict[str, Any] = {}
         seen = 0
-        partial = bool(cfg.communities or cfg.courses)
 
         for raw in self._acquire(ctx):
-            if raw.get("_kind") == "_partial_enumeration":
-                partial = True
+            if raw.get("_kind") == "_community_complete":
+                complete_groups.append(raw["groupName"])
                 continue
             item = self._to_item(raw)
             if item is None:
                 continue
+            group = raw.get("_group_name") or raw.get("groupName")
+            if group:
+                # Record EVERY id (even kinds excluded by include_kinds) so the
+                # community's sweep never deletes items merely out of scope.
+                live_by_group.setdefault(group, set()).add(item.external_id)
             if cfg.include_kinds and item.item_kind not in cfg.include_kinds:
-                live_ids.add(item.external_id)  # keep live so it isn't swept
                 continue
-            live_ids.add(item.external_id)
             yield item
             seen += 1
             if seen % cfg.checkpoint_every == 0:
@@ -419,18 +443,17 @@ class SkoolConnector(Connector):
 
         cursor["items_seen"] = seen
         yield Checkpoint(Cursor(dict(cursor)), note="final")
-        if partial:
-            # A communities/courses filter — or a transient per-course fetch
-            # failure this run (see "_partial_enumeration" above) — makes the
-            # walk a partial enumeration: anything outside it never shows up
-            # in live_ids, so a reconcile sweep would soft-delete every
-            # unselected/unreached course or lesson. Skip it instead.
+        incomplete = sorted(set(live_by_group) - set(complete_groups))
+        if incomplete:
             ctx.logger.info(
-                "skool: partial enumeration this run (communities/courses "
-                "filter, or a course failed to load) — deletion detection skipped"
+                "skool: partial enumeration for %s (communities/courses filter, "
+                "or a course failed to load) — deletion detection skipped there",
+                ", ".join(incomplete),
             )
-        else:
-            yield ReconcileMarker(live_ids=live_ids)
+        for group in complete_groups:
+            yield ReconcileMarker(
+                live_ids=live_by_group.get(group, set()), scope=f"tag:{group}"
+            )
 
     # -- acquisition (the only Playwright-touching part; overridden in tests) --
 
@@ -517,16 +540,21 @@ class SkoolConnector(Connector):
             )
             return
 
+        no_download = {self._slug(c) for c in cfg.no_download_communities}
         for slug in slugs:
             stats: Counter[str] = Counter()
             data = self._classroom_next_data(page, slug, ctx)
             if data is None:
-                # Same shape of gap as the course-level fetch failure below:
-                # every course and lesson of this community is absent from
-                # this run's live_ids, so fetch() must skip deletion detection
-                # rather than reconcile against incomplete data.
-                yield {"_kind": "_partial_enumeration"}
+                # The whole community failed to load: nothing of it is in this
+                # run's live ids. No "_community_complete" is emitted, so
+                # fetch() skips its deletion sweep rather than reconciling
+                # against incomplete data.
+                ctx.logger.warning(
+                    "skool: classroom page for %s failed to load — community "
+                    "skipped this run", slug,
+                )
                 continue
+            community_complete = True
             props = (data.get("props") or {}).get("pageProps") or {}
             render = props.get("renderData") or {}
             group = props.get("currentGroup") or render.get("currentGroup") or {}
@@ -578,11 +606,10 @@ class SkoolConnector(Connector):
                 cdata = self._classroom_next_data(page, slug, ctx, course_slug=course_slug)
                 if cdata is None:
                     # A transient fetch failure, not "this course has no
-                    # lessons" — its lessons are simply absent from this
-                    # run's live_ids, same shape of gap as a communities/
-                    # courses filter. Told to fetch() so it skips deletion
-                    # detection instead of reconciling against incomplete data.
-                    yield {"_kind": "_partial_enumeration"}
+                    # lessons" — its lessons are simply absent from this run's
+                    # live ids, so the community must not sweep-reconcile
+                    # against incomplete data.
+                    community_complete = False
                     continue
                 for idx, lesson in enumerate(_parse_lessons(cdata), 1):
                     lesson["_kind"] = "lesson"
@@ -592,7 +619,8 @@ class SkoolConnector(Connector):
                         course_dir, _lesson_dir_name(idx, lesson)
                     )
                     outcome = self._process_lesson(
-                        page, lesson, lesson_dir, slug, course_slug, cfg, ctx
+                        page, lesson, lesson_dir, slug, course_slug, cfg, ctx,
+                        downloads_enabled=slug not in no_download,
                     )
                     stats[outcome] += 1
                     if outcome == "failed":
@@ -610,11 +638,15 @@ class SkoolConnector(Connector):
             # A silent zero must never hide again: say what happened per community.
             ctx.logger.info(
                 "skool: %s lessons — %d video(s) downloaded, %d cached, "
-                "%d without native video, %d permanently unavailable, %d failed "
+                "%d without native video, %d permanently unavailable, %d failed, "
+                "%d catalog-only [no_download_communities] "
                 "(%d course(s) filtered out)",
                 slug, stats["downloaded"], stats["cached"], stats["none"],
-                stats["unavailable"], stats["failed"], skipped_courses,
+                stats["unavailable"], stats["failed"], stats["skipped"],
+                skipped_courses,
             )
+            if community_complete and skipped_courses == 0:
+                yield {"_kind": "_community_complete", "groupName": group_name}
 
     def _fetch_cross_referenced_lessons(
         self, page: Any, cfg: SkoolConfig, downloads: Path, ctx: RunContext,
@@ -886,6 +918,7 @@ class SkoolConnector(Connector):
     def _process_lesson(
         self, page: Any, lesson: dict[str, Any], lesson_dir: Path,
         slug: str, course_slug: str, cfg: SkoolConfig, ctx: RunContext,
+        *, downloads_enabled: bool = True,
     ) -> str:
         """Fill a lesson's video/resource data and download its media.
 
@@ -894,14 +927,22 @@ class SkoolConnector(Connector):
         it (once). A ``.meta.json`` sidecar in the lesson's folder records the
         outcome; when the sidecar says everything listed is already on disk,
         re-runs merge it and skip the page visit entirely. Returns a status
-        key ("downloaded"/"cached"/"none"/"failed") for the community summary.
-        Best-effort: any failure — including unexpected shape surprises from
-        Skool — leaves the lesson indexed with tree-level data and no sidecar,
-        so it retries next run; it never fails the whole backup.
+        key ("downloaded"/"cached"/"none"/"skipped"/"failed") for the community
+        summary. Best-effort: any failure — including unexpected shape
+        surprises from Skool — leaves the lesson indexed with tree-level data
+        and no sidecar, so it retries next run; it never fails the whole
+        backup.
+
+        With ``downloads_enabled=False`` (the community is in
+        ``no_download_communities``), a lesson not already complete on disk is
+        indexed from tree-level data alone — no page visit, no downloads, and
+        no failure recorded ("skipped"): its media is known to be access-gated,
+        so attempting it would only fail.
         """
         try:
             return self._process_lesson_inner(
-                page, lesson, lesson_dir, slug, course_slug, cfg, ctx
+                page, lesson, lesson_dir, slug, course_slug, cfg, ctx,
+                downloads_enabled=downloads_enabled,
             )
         except (ConnectorAuthError, ConnectorConfigError):
             raise  # operator problems abort the run, as everywhere else
@@ -915,6 +956,7 @@ class SkoolConnector(Connector):
     def _process_lesson_inner(
         self, page: Any, lesson: dict[str, Any], lesson_dir: Path,
         slug: str, course_slug: str, cfg: SkoolConfig, ctx: RunContext,
+        *, downloads_enabled: bool = True,
     ) -> str:
         if not lesson.get("lessonId"):
             ctx.logger.warning(
@@ -942,6 +984,12 @@ class SkoolConnector(Connector):
             if sidecar.get("video_downloaded") and video_dest.exists():
                 lesson["_video_path"] = str(video_dest)
             return "cached"
+
+        if not downloads_enabled:
+            # Access-gated community: index the tree-level data and move on.
+            # No sidecar is written, so re-granting access (removing the
+            # community from no_download_communities) picks the lesson up.
+            return "skipped"
 
         enriched = self._enrich_lesson(page, lesson, slug, course_slug, ctx)
         if enriched is None:

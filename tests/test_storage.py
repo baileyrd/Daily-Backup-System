@@ -12,14 +12,17 @@ from dbs.storage.base import PreparedItem
 from dbs.storage.sqlite import SqliteStorage
 
 
-def _item(ext_id: str, content_hash: str, *, updated="2024-01-01T00:00:00Z", deleted=False, kind="note"):
+def _item(
+    ext_id: str, content_hash: str, *,
+    updated="2024-01-01T00:00:00Z", deleted=False, kind="note", tags=("a", "b"),
+):
     return PreparedItem(
         external_id=ext_id,
         item_kind=kind,
         title=f"title-{ext_id}",
         url=f"https://example/{ext_id}",
         body="body",
-        tags=["a", "b"],
+        tags=list(tags),
         item_created_at="2024-01-01T00:00:00Z",
         item_updated_at=updated,
         content_hash=content_hash,
@@ -92,6 +95,22 @@ def test_soft_delete_missing_and_undelete(storage):
         )
     ]
     assert kinds == ["created", "deleted", "undeleted"]
+
+
+def test_tag_scoped_live_ids_and_sweep(storage):
+    src, run = _setup(storage)
+    storage.upsert_items(src.id, run, [
+        _item("a1", "h1", tags=["A"]), _item("a2", "h2", tags=["A"]),
+        _item("b1", "h3", tags=["B"]), _item("n1", "h4", tags=[]),
+    ])
+    assert storage.live_external_ids(src.id, tag="A") == {"a1", "a2"}
+    assert storage.live_external_ids(src.id) == {"a1", "a2", "b1", "n1"}
+
+    # A tag-scoped sweep only considers items carrying that tag: a2 goes,
+    # while b1 (other tag) and n1 (untagged) are not candidates at all.
+    run2 = storage.begin_run(src.id, "test:fake", "reconcile", None)
+    assert storage.soft_delete_missing(src.id, {"a1"}, run2, tag="A") == 1
+    assert storage.live_external_ids(src.id) == {"a1", "b1", "n1"}
 
 
 def test_native_delete_inserts_as_deleted(storage):
