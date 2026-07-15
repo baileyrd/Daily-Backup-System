@@ -85,7 +85,9 @@ class Engine:
         committed_any = False
         last_cursor: Cursor | None = ctx.cursor
         watermark_dt = ctx.since
-        reconcile_live: set[str] | None = None
+        # scope -> union of live_ids from that scope's ReconcileMarkers.
+        # None = no marker seen (or sweep disabled by a cancel/limit break).
+        reconcile_scopes: dict[str, set[str]] | None = None
         started = ctx.now()
         status = RunStatus.SUCCESS
         error: str | None = None
@@ -143,7 +145,7 @@ class Engine:
                     # the --limit path — never sweep-delete from a partial
                     # enumeration.
                     cancelled = True
-                    reconcile_live = None
+                    reconcile_scopes = None
                     ctx.logger.warning(
                         "%s: manual stop requested — halting after commit",
                         ctx.source_name,
@@ -161,7 +163,7 @@ class Engine:
                         )
                         warnings.append(warning)
                         ctx.logger.warning("%s: %s", ctx.source_name, warning)
-                        reconcile_live = None
+                        reconcile_scopes = None
                         break
                     items_seen += 1
                     buffer.append(self._prepare(event, caps, volatile, valid_kinds))
@@ -172,7 +174,9 @@ class Engine:
                     flush(event.cursor)
                     emit(ProgressPhase.CHECKPOINT, note=event.note)
                 elif isinstance(event, ReconcileMarker):
-                    reconcile_live = (reconcile_live or set()) | set(event.live_ids)
+                    if reconcile_scopes is None:
+                        reconcile_scopes = {}
+                    reconcile_scopes.setdefault(event.scope, set()).update(event.live_ids)
                 else:
                     raise ConnectorContractError(
                         f"fetch() yielded unsupported event type {type(event).__name__}"
@@ -194,40 +198,62 @@ class Engine:
                 ctx.logger.warning("%s: %s", ctx.source_name, warning)
 
             if (
-                reconcile_live is not None
+                reconcile_scopes is not None
                 and ctx.mode in ("full", "reconcile")
                 and caps.supports_full_enumeration
             ):
-                existing_live = self.storage.live_external_ids(ctx.source_id)
-                would_delete = existing_live - reconcile_live
-                n_live = len(existing_live)
-                fraction = (len(would_delete) / n_live) if n_live else 0.0
-                unsafe = n_live > 0 and (
-                    not reconcile_live or fraction > self.sweep_safety_fraction
-                )
-                if unsafe:
-                    # Almost certainly a truncated/partial enumeration — refuse to
-                    # mass-delete. Data is preserved; surface a warning on the run
-                    # (a warning, not an `error`: the committed data is fine and
-                    # the status stays SUCCESS — but the caveat must be visible
-                    # in status/history rather than vanish with exit code 0).
-                    warning = (
-                        f"deletion sweep skipped for safety: enumeration would "
-                        f"delete {len(would_delete)}/{n_live} live items "
-                        f"({fraction:.0%} > {self.sweep_safety_fraction:.0%}); "
-                        f"the upstream listing looks incomplete"
+                swept_total = 0
+                for scope, live in reconcile_scopes.items():
+                    if scope == "source":
+                        tag = None
+                    elif scope.startswith("tag:"):
+                        tag = scope[len("tag:"):]
+                    else:
+                        # Defensive: a scope this engine can't map to a candidate
+                        # set must never widen into a source-wide sweep.
+                        warning = (
+                            f"deletion sweep skipped for unrecognized reconcile "
+                            f"scope {scope!r}"
+                        )
+                        warnings.append(warning)
+                        ctx.logger.warning(warning)
+                        continue
+                    existing_live = self.storage.live_external_ids(
+                        ctx.source_id, tag=tag
                     )
-                    warnings.append(warning)
-                    ctx.logger.warning(warning)
-                else:
+                    would_delete = existing_live - live
+                    n_live = len(existing_live)
+                    fraction = (len(would_delete) / n_live) if n_live else 0.0
+                    unsafe = n_live > 0 and (
+                        not live or fraction > self.sweep_safety_fraction
+                    )
+                    if unsafe:
+                        # Almost certainly a truncated/partial enumeration — refuse
+                        # to mass-delete. Data is preserved; surface a warning on
+                        # the run (a warning, not an `error`: the committed data is
+                        # fine and the status stays SUCCESS — but the caveat must
+                        # be visible in status/history rather than vanish with
+                        # exit code 0).
+                        where = f" within {scope!r}" if tag is not None else ""
+                        warning = (
+                            f"deletion sweep skipped for safety{where}: "
+                            f"enumeration would delete "
+                            f"{len(would_delete)}/{n_live} live items "
+                            f"({fraction:.0%} > {self.sweep_safety_fraction:.0%}); "
+                            f"the upstream listing looks incomplete"
+                        )
+                        warnings.append(warning)
+                        ctx.logger.warning(warning)
+                        continue
                     with self.storage.transaction():
                         swept = self.storage.soft_delete_missing(
-                            ctx.source_id, reconcile_live, ctx.run_id
+                            ctx.source_id, live, ctx.run_id, tag=tag
                         )
                     stats.deleted += swept
                     stats.revisions += swept
-                    if swept:
-                        emit(ProgressPhase.SWEEP, note=f"swept {swept} deleted")
+                    swept_total += swept
+                if swept_total:
+                    emit(ProgressPhase.SWEEP, note=f"swept {swept_total} deleted")
 
             if cancelled:
                 # A deliberate, graceful stop — not a failure. Committed data

@@ -12,12 +12,13 @@ from conftest import make_connector, run_fake
 UTC = timezone.utc
 
 
-def _bi(ext_id, *, kind="note", body="x", deleted=False, updated="2024-01-01T00:00:00Z"):
+def _bi(ext_id, *, kind="note", body="x", deleted=False, updated="2024-01-01T00:00:00Z", tags=()):
     return BackupItem(
         external_id=ext_id,
         item_kind=kind,
         raw={"id": ext_id, "body": body},
         body=body,
+        tags=list(tags),
         updated_at=datetime.fromisoformat(updated.replace("Z", "+00:00")),
         deleted=deleted,
     )
@@ -114,6 +115,77 @@ def test_reconcile_marker_ignored_in_incremental_mode(storage):
     assert result.deleted == 0
     _t, live, _g = storage.item_counts(src.id)
     assert live == 2
+
+
+def test_tag_scoped_marker_sweeps_only_within_its_tag(storage):
+    # Seed two partitions (tag A, tag B) plus an untagged item.
+    cls = make_connector()
+    cls.script = [
+        _bi("a1", tags=["A"]), _bi("a2", tags=["A"]),
+        _bi("b1", tags=["B"]), _bi("n1"),
+        Checkpoint(Cursor({"p": 1})),
+    ]
+    src, _ = run_fake(storage, cls, mode="full")
+
+    # Partition A fully enumerated with only a1 live; B has no marker at all
+    # (e.g. its community vanished from discovery) so b1 must survive, as must
+    # the untagged n1 — only a2 is swept.
+    cls2 = make_connector()
+    cls2.script = [
+        _bi("a1", tags=["A"]), Checkpoint(Cursor({"p": 1})),
+        ReconcileMarker(live_ids={"a1"}, scope="tag:A"),
+    ]
+    _src2, result = run_fake(storage, cls2, mode="reconcile")
+    assert result.deleted == 1
+    live = {
+        r["external_id"]
+        for r in storage.conn.execute("SELECT external_id FROM items WHERE deleted=0")
+    }
+    assert live == {"a1", "b1", "n1"}
+
+
+def test_scoped_and_source_markers_apply_safety_fraction_per_scope(storage):
+    cls = make_connector()
+    cls.script = [
+        _bi("a1", tags=["A"]), _bi("a2", tags=["A"]),
+        _bi("b1", tags=["B"]), _bi("b2", tags=["B"]), _bi("b3", tags=["B"]),
+        Checkpoint(Cursor({"p": 1})),
+    ]
+    run_fake(storage, cls, mode="full")
+
+    # Scope A would delete 2/2 (100% > 50%): skipped with a warning. Scope B
+    # deletes 1/3: fine. The unsafe scope must not poison the safe one.
+    cls2 = make_connector()
+    cls2.script = [
+        _bi("b1", tags=["B"]), _bi("b2", tags=["B"]), Checkpoint(Cursor({"p": 1})),
+        ReconcileMarker(live_ids=set(), scope="tag:A"),
+        ReconcileMarker(live_ids={"b1", "b2"}, scope="tag:B"),
+    ]
+    _src, result = run_fake(storage, cls2, mode="reconcile")
+    assert result.deleted == 1
+    assert any("skipped for safety" in w and "'tag:A'" in w for w in result.warnings)
+    live = {
+        r["external_id"]
+        for r in storage.conn.execute("SELECT external_id FROM items WHERE deleted=0")
+    }
+    assert live == {"a1", "a2", "b1", "b2"}
+
+
+def test_unrecognized_reconcile_scope_never_sweeps(storage):
+    cls = make_connector()
+    cls.script = [_bi("1"), _bi("2"), Checkpoint(Cursor({"p": 1}))]
+    run_fake(storage, cls, mode="full")
+
+    # A scope the engine can't map to a candidate set must skip (with a
+    # warning), never widen into a source-wide sweep.
+    cls2 = make_connector()
+    cls2.script = [
+        _bi("1"), Checkpoint(Cursor({"p": 1})),
+        ReconcileMarker(live_ids={"1"}, scope="community:whatever"),
+    ]
+    _src, result = run_fake(storage, cls2, mode="reconcile")
+    assert result.deleted == 0
+    assert any("unrecognized reconcile scope" in w for w in result.warnings)
 
 
 def test_native_delete_only_when_capability_set(storage):

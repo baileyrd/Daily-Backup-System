@@ -68,6 +68,10 @@ token_env = "RAINDROP_TOKEN"     # name of the env var holding your API token
 # download_videos = true                   # set false for catalog/resources only
 # video_quality = 1080                     # cap the HLS variant height; 0 = best
 # communities = ["your-community"]         # optional; OMIT to auto-detect every community you've joined
+# no_download_communities = ["lapsed-one"]  # catalog-only communities: no lesson pages / videos / resources.
+#                                          # For memberships you no longer pay for — their media is access-
+#                                          # gated, so every attempt would fail. Files downloaded while
+#                                          # access lasted are kept.
 # include_kinds = ["community", "course", "lesson"]
 # headless = true                          # set false if Skool blocks the automated browser
 # session_dir_env = "SKOOL_SESSION_DIR"

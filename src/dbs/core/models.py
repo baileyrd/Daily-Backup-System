@@ -128,6 +128,18 @@ class ReconcileMarker:
     After a *successful* full/reconcile run the engine soft-deletes any
     non-deleted item whose ``external_id`` is absent from ``live_ids``. Honored
     only when the connector declares ``supports_full_enumeration``.
+
+    ``scope`` bounds the sweep's candidate set:
+
+    * ``"source"`` (default) — every live item of the source is a candidate.
+    * ``"tag:<value>"`` — only live items carrying that tag are candidates.
+      A connector whose enumeration is complete per-partition but not overall
+      (e.g. skool: each fully-walked community, while an unjoined community is
+      absent from discovery entirely) yields one marker per completed
+      partition; items of partitions with no marker are never touched.
+
+    A connector may yield several markers. Markers with the same scope are
+    unioned; the engine sweeps (and applies its safety fraction) per scope.
     """
 
     live_ids: set[str]

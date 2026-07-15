@@ -559,24 +559,32 @@ class SqliteStorage(Storage):
         if updated_at and (res.max_updated_at is None or updated_at > res.max_updated_at):
             res.max_updated_at = updated_at
 
-    def live_external_ids(self, source_id: int) -> set[str]:
-        return {
-            r[0]
-            for r in self.conn.execute(
-                "SELECT external_id FROM items WHERE source_id=? AND deleted=0",
-                (source_id,),
-            )
-        }
+    # Restricts a query to items carrying a given tag (tags_json is a JSON
+    # array of strings). Used by the tag-scoped reconcile sweep.
+    _TAG_FILTER = (
+        " AND EXISTS (SELECT 1 FROM json_each(items.tags_json) "
+        "WHERE json_each.value = ?)"
+    )
+
+    def live_external_ids(self, source_id: int, *, tag: str | None = None) -> set[str]:
+        sql = "SELECT external_id FROM items WHERE source_id=? AND deleted=0"
+        params: list[Any] = [source_id]
+        if tag is not None:
+            sql += self._TAG_FILTER
+            params.append(tag)
+        return {r[0] for r in self.conn.execute(sql, params)}
 
     def soft_delete_missing(
-        self, source_id: int, live_ids: set[str], run_id: int
+        self, source_id: int, live_ids: set[str], run_id: int, *, tag: str | None = None
     ) -> int:
         """Soft-delete live items absent from ``live_ids`` (reconcile sweep).
 
         The live set goes into a temp table and the victims come from a SQL
         anti-join, so memory is O(victims) — a handful in steady state, and
         never more than the engine's sweep-safety fraction — instead of the
-        previous O(every live row loaded into Python) per sweep.
+        previous O(every live row loaded into Python) per sweep. With ``tag``,
+        only items carrying that tag are candidates (a tag-scoped sweep);
+        untagged items and other tags' items are left untouched.
         """
         now = self._now()
         count = 0
@@ -592,12 +600,16 @@ class SqliteStorage(Storage):
                     + ",".join(["(?)"] * len(chunk)),
                     chunk,
                 )
-            victims = self.conn.execute(
+            victims_sql = (
                 "SELECT id, revision, content_hash, raw_json, title "
                 "FROM items WHERE source_id=? AND deleted=0 "
-                "AND external_id NOT IN (SELECT external_id FROM _sweep_live)",
-                (source_id,),
-            ).fetchall()
+                "AND external_id NOT IN (SELECT external_id FROM _sweep_live)"
+            )
+            params = [source_id]
+            if tag is not None:
+                victims_sql += self._TAG_FILTER
+                params.append(tag)
+            victims = self.conn.execute(victims_sql, params).fetchall()
             for r in victims:
                 new_rev = int(r["revision"]) + 1
                 self.conn.execute(
