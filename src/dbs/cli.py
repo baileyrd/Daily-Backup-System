@@ -38,6 +38,7 @@ from .core.errors import (
 from .core.models import ProgressEvent, ProgressPhase, RunResult, RunStatus
 from .core.service import BackupService
 from .export.base import ExportQuery
+from .notes_export import export_notes as _export_notes
 from .templates import CONFIG_TEMPLATE, ENV_TEMPLATE
 
 app = typer.Typer(
@@ -653,6 +654,50 @@ def export(
             + (f", {result.revision_count} revision(s)" if result.revision_count else "")
             + (f", {media} media file(s)" if media else "")
             + f" to {result.path} ({result.format})",
+            fg=typer.colors.GREEN,
+        )
+    finally:
+        svc.close()
+
+
+@app.command(name="export-notes")
+def export_notes_cmd(
+    out_dir: Path = typer.Option(
+        ..., "--out-dir", "-d",
+        help="Directory to write one Markdown note per item into (e.g. a "
+             "remind_me watched folder).",
+    ),
+    source: Optional[list[str]] = typer.Option(None, "--source", help="Filter by source name (repeatable)."),
+    item_type: Optional[list[str]] = typer.Option(None, "--type", help="Filter by item kind (repeatable)."),
+    since: Optional[str] = typer.Option(
+        None, "--since",
+        help="Only items created on/after this date/time — overrides the "
+             "incremental state file for this run.",
+    ),
+    full: bool = typer.Option(
+        False, "--full",
+        help="Ignore the incremental state file and consider every live item.",
+    ),
+) -> None:
+    """Write one Markdown note per item into a plain directory (unzipped
+    Obsidian-format notes) for a downstream tool that watches a folder for
+    new files — e.g. remind_me's folder watcher. Incremental by default:
+    only items created since the last successful run are written, tracked
+    in <out-dir>/.dbs_export_state.json.
+    """
+    svc = _service()
+    try:
+        result = _export_notes(
+            svc,
+            out_dir,
+            sources=list(source) if source else None,
+            item_types=list(item_type) if item_type else None,
+            since=_parse_date(since),
+            incremental=not full,
+        )
+        since_desc = result.extra.get("since") or "the beginning"
+        typer.secho(
+            f"Wrote {result.item_count} note(s) to {result.path} (since {since_desc})",
             fg=typer.colors.GREEN,
         )
     finally:
