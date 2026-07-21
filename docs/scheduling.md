@@ -37,11 +37,40 @@ Or skip the wrapper: set `notify_url` (and optionally `notify_on =
 CLI, web UI, or the built-in scheduler — POSTs its outcome as JSON with
 `text`/`content` keys, rendering as-is in Slack and Discord webhooks.
 
+## Feeding a downstream knowledge base (e.g. remind_me)
+
+`dbs export-notes` writes one Markdown note per live item into a plain
+directory — unzipped Obsidian-format notes, not the `dbs export --format
+obsidian` zip — so a tool that watches a folder for new files can pick them
+up directly. It's incremental by default (tracked in
+`<out-dir>/.dbs_export_state.json`), so chaining it after `backup` only
+writes what's new:
+
+```bash
+dbs --config /path/to/dbs.toml backup --all
+dbs --config /path/to/dbs.toml export-notes --out-dir ~/notes/dbs
+```
+
+Point [remind_me](https://github.com/baileyrd/remind_me)'s folder watcher
+(`REMIND_ME_WATCH_DIRS=~/notes/dbs`) at that same directory and every new
+bookmark, save, or highlight becomes a searchable memory automatically. See
+[remind-me-integration-review-2026-07-21.md](remind-me-integration-review-2026-07-21.md)
+for the full rationale and the higher-fidelity options this is a stepping
+stone toward. Use `--full` to re-export every live item (e.g. after
+clearing the state file or the watch dir), or `--since` to override the
+incremental cutoff for one run.
+
 ## cron
 
 ```cron
 # Daily at 03:00 — back up everything, append logs.
 0 3 * * * /path/to/.venv/bin/dbs --config /path/to/dbs.toml backup --all >> ~/dbs.log 2>&1
+```
+
+Chain the notes export the same way for a remind_me-fed cron job:
+
+```cron
+0 3 * * * /path/to/.venv/bin/dbs --config /path/to/dbs.toml backup --all && /path/to/.venv/bin/dbs --config /path/to/dbs.toml export-notes --out-dir /home/you/notes/dbs >> ~/dbs.log 2>&1
 ```
 
 Use `backup --all --only-due` if you run more frequently but want at most one run

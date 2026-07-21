@@ -1,5 +1,9 @@
 # remind_me Integration Review — 2026-07-21
 
+> **Update (same day):** option 1 below has shipped as `dbs export-notes` —
+> see [Status](#status) at the end for what exists today and what's still
+> deferred.
+
 Review of [baileyrd/remind_me](https://github.com/baileyrd/remind_me) against
 `dbs`, prompted by a request to determine whether the two projects should be
 integrated. The relevant framing for dbs here: dbs isn't only a backup tool,
@@ -43,11 +47,18 @@ get started.
 
 ## Integration options, by effort/fidelity
 
-1. **Export → watched folder (lowest effort).** `dbs export --format
-   markdown` (or `obsidian`) into the directory remind_me already watches,
-   run after each `dbs backup`. Config-only; freshness is per-backup-cycle;
-   dbs's structured fields (source, tags, timestamps) become prose rather
-   than queryable metadata.
+1. **Export → watched folder (lowest effort). SHIPPED as `dbs
+   export-notes`.** `dbs export --format obsidian` only ever produces a
+   zip, which remind_me's watcher can't read directly (it watches loose
+   `.md`/`.txt`/`.json`/`.jsonl` files, not archives), so this needed a
+   small new command rather than being pure config: `dbs export-notes
+   --out-dir DIR` unzips the same tested obsidian-export path into one
+   Markdown file per item, incrementally by default (see
+   [scheduling.md](scheduling.md#feeding-a-downstream-knowledge-base-eg-remind_me)
+   for the full recipe). Freshness is per-backup-cycle; dbs's structured
+   fields (source, tags, timestamps) still land as YAML frontmatter in each
+   note, but remind_me ingests the whole file as plain text — prose, not
+   queryable metadata, until option 3 exists.
 2. **Per-item webhook push (moderate effort).** Extend dbs's notification
    path (or add a small adapter alongside `notify_url`) to `POST` each
    new/changed item to remind_me's `/ingest` right after an incremental
@@ -74,3 +85,19 @@ highlight) instead of unstructured paragraphs.
 No code has been changed in either repository as part of this review; this
 document exists to record the analysis so implementation can start directly
 from option 1 or 3 above without re-deriving the tradeoffs.
+
+## Status
+
+- **Option 1 — shipped.** `dbs export-notes` (`src/dbs/notes_export.py` +
+  the CLI command in `src/dbs/cli.py`) writes one Markdown note per live
+  item into a directory, incremental by default via a small state file.
+  Verified end-to-end: a real `dbs export-notes` run followed by remind_me's
+  actual `FolderWatcher.scan_once()` against the output directory produces
+  a memory row with the item's title/tags/body content. See
+  [BACKLOG.md #4](BACKLOG.md#4-export-notes-follow-ups-remind_me-integration-option-1-shipped)
+  for the known gaps left open (`item_created_at`-only incremental cutoff,
+  no delete propagation, the cross-run filename-collision workaround).
+- **Options 2 and 3 — not started.** Both remain valid next steps; option 3
+  (a dedicated `dbs` import connector in remind_me, preserving structured
+  entities instead of prose) is the one worth reaching for if dbs becomes a
+  primary, ongoing memory source rather than an occasional feed.

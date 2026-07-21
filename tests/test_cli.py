@@ -99,6 +99,18 @@ def test_export_empty_db(tmp_path):
     assert out.exists()
 
 
+def test_export_notes_empty_db(tmp_path):
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    out_dir = tmp_path / "notes"
+    result = runner.invoke(
+        app, ["--config", str(cfg), "export-notes", "--out-dir", str(out_dir)]
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "Wrote 0 note(s)" in result.stdout
+    assert out_dir.exists()
+
+
 def test_backup_unknown_source_exit_5(tmp_path):
     cfg = tmp_path / "dbs.toml"
     runner.invoke(app, ["--config", str(cfg), "init"])

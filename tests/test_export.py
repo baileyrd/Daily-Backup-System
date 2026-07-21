@@ -11,6 +11,7 @@ from dbs.config import Config
 from dbs.core.registry import ConnectorRegistry
 from dbs.core.service import BackupService
 from dbs.export.base import ExportQuery
+from dbs.notes_export import STATE_FILENAME, export_notes
 from dbs.storage.base import PreparedItem
 
 
@@ -225,3 +226,96 @@ def test_obsidian_links_archived_media(service, storage, tmp_path):
         text = zf.read(note_name).decode("utf-8")
         assert "Archived copy" in text
         assert media_names[0].split("/")[-1] in text
+
+
+# --------------------------------------------------------------------------- #
+# export_notes — unzipped, incremental notes export for folder watchers      #
+# --------------------------------------------------------------------------- #
+
+
+def _seed_notes_item(storage, *, ext_id, title, created_at, deleted=False, source="nt"):
+    src = storage.upsert_source(source, "raindrop", f"test:{source}", "{}", 1)
+    run = storage.begin_run(src.id, f"test:{source}", "full", None)
+    storage.upsert_items(src.id, run, [
+        PreparedItem(ext_id, "link", title, f"https://x/{ext_id}", None, [],
+                     created_at, created_at, f"h{ext_id}",
+                     json.dumps({"_id": ext_id}), deleted),
+    ])
+
+
+def test_export_notes_writes_one_file_per_live_item(service, storage, tmp_path):
+    _seed_notes_item(storage, ext_id="1", title="First", created_at="2000-01-01T00:00:00Z")
+    _seed_notes_item(storage, ext_id="2", title="Second", created_at="2000-02-01T00:00:00Z")
+    _seed_notes_item(storage, ext_id="3", title="Gone", created_at="2000-03-01T00:00:00Z", deleted=True)
+
+    out_dir = tmp_path / "notes"
+    result = export_notes(service, out_dir)
+
+    assert result.item_count == 2  # deleted item excluded, same default as every other exporter
+    assert result.format == "obsidian-notes"
+    md_files = sorted(p.name for p in out_dir.glob("*.md"))
+    assert md_files == ["First.md", "Second.md"]
+    assert not (out_dir / "manifest.json").exists()
+    assert not (out_dir / "media").exists()
+
+    state = json.loads((out_dir / STATE_FILENAME).read_text())
+    assert set(state["filenames"].values()) == {"First.md", "Second.md"}
+    assert state["last_export"]
+
+
+def test_export_notes_incremental_only_exports_new_items(service, storage, tmp_path):
+    _seed_notes_item(storage, ext_id="1", title="First", created_at="2000-01-01T00:00:00Z")
+    _seed_notes_item(storage, ext_id="2", title="Second", created_at="2000-02-01T00:00:00Z")
+    out_dir = tmp_path / "notes"
+
+    first = export_notes(service, out_dir)
+    assert first.item_count == 2
+
+    # Re-running with no new data should write nothing — both existing items
+    # were created long before this run's incremental cutoff.
+    second = export_notes(service, out_dir)
+    assert second.item_count == 0
+    assert second.extra["since"]  # cutoff carried forward from the first run
+
+    # A genuinely new item (created "after" the recorded cutoff) is picked up
+    # on the next incremental run, and existing notes are left alone.
+    _seed_notes_item(storage, ext_id="3", title="Third", created_at="2030-01-01T00:00:00Z")
+    third = export_notes(service, out_dir)
+    assert third.item_count == 1
+    assert sorted(p.name for p in out_dir.glob("*.md")) == ["First.md", "Second.md", "Third.md"]
+
+
+def test_export_notes_full_ignores_incremental_state(service, storage, tmp_path):
+    _seed_notes_item(storage, ext_id="1", title="First", created_at="2000-01-01T00:00:00Z")
+    out_dir = tmp_path / "notes"
+    export_notes(service, out_dir)
+
+    result = export_notes(service, out_dir, incremental=False)
+    assert result.item_count == 1
+    assert result.extra["since"] is None
+
+
+def test_export_notes_cross_run_title_collision_does_not_overwrite(service, storage, tmp_path):
+    out_dir = tmp_path / "notes"
+    _seed_notes_item(storage, ext_id="a", title="Same Title", created_at="2000-01-01T00:00:00Z")
+    export_notes(service, out_dir)
+    assert (out_dir / "Same_Title.md").read_text().count('dbs_external_id: "a"') == 1
+    cutoff = json.loads((out_dir / STATE_FILENAME).read_text())["last_export"]
+
+    # A different item with the same title, created right at the recorded
+    # cutoff, arrives in a later incremental run. The exporter's own
+    # within-zip dedup can't see across runs, so export_notes must detect
+    # the on-disk collision itself.
+    _seed_notes_item(storage, ext_id="b", title="Same Title", created_at=cutoff)
+    result = export_notes(service, out_dir)
+    assert result.item_count == 1
+
+    names = sorted(p.name for p in out_dir.glob("*.md"))
+    assert names == ["Same_Title-b.md", "Same_Title.md"]
+    assert 'dbs_external_id: "a"' in (out_dir / "Same_Title.md").read_text()
+    assert 'dbs_external_id: "b"' in (out_dir / "Same_Title-b.md").read_text()
+
+    # And re-running again with nothing new doesn't reshuffle either file.
+    result = export_notes(service, out_dir)
+    assert result.item_count == 0
+    assert sorted(p.name for p in out_dir.glob("*.md")) == ["Same_Title-b.md", "Same_Title.md"]
