@@ -3,12 +3,27 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from typer.testing import CliRunner
 
 from dbs.cli import app
 
 runner = CliRunner()
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    """Strip ANSI escape codes from Rich-rendered ``--help`` output.
+
+    Rich detects ``GITHUB_ACTIONS`` and forces styled output on CI even
+    though this is never a real terminal, splitting option names like
+    ``--query`` across separate escape-coded spans (``-`` and ``-query``
+    highlighted individually). A raw substring check then fails on CI while
+    passing locally, for a flag that is genuinely present either way.
+    """
+    return _ANSI_RE.sub("", text)
 
 
 def test_version():
@@ -155,8 +170,9 @@ def test_serve_command_registered():
     # The web UI command exists and documents its options (no server launched).
     result = runner.invoke(app, ["serve", "--help"])
     assert result.exit_code == 0
-    assert "--host" in result.stdout
-    assert "--port" in result.stdout
+    stdout = _plain(result.stdout)
+    assert "--host" in stdout
+    assert "--port" in stdout
 
 
 def test_research_youtube_command_registered():
@@ -164,17 +180,19 @@ def test_research_youtube_command_registered():
     # search/NotebookLM call made).
     result = runner.invoke(app, ["research", "youtube", "--help"])
     assert result.exit_code == 0
-    assert "--query" in result.stdout
-    assert "--question" in result.stdout
-    assert "--infographic" in result.stdout
+    stdout = _plain(result.stdout)
+    assert "--query" in stdout
+    assert "--question" in stdout
+    assert "--infographic" in stdout
 
 
 def test_research_youtube_backup_command_registered():
     result = runner.invoke(app, ["research", "youtube-backup", "--help"])
     assert result.exit_code == 0
-    assert "--source" in result.stdout
-    assert "--list" in result.stdout
-    assert "--count" in result.stdout
+    stdout = _plain(result.stdout)
+    assert "--source" in stdout
+    assert "--list" in stdout
+    assert "--count" in stdout
 
 
 def test_research_youtube_backup_empty_db_exit_4(tmp_path):
