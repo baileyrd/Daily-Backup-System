@@ -99,6 +99,19 @@ def test_export_empty_db(tmp_path):
     assert out.exists()
 
 
+def test_export_since_updated_flag_accepted(tmp_path):
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    out = tmp_path / "export.ndjson"
+    result = runner.invoke(
+        app,
+        ["--config", str(cfg), "export", "--out", str(out), "--format", "ndjson",
+         "--since-updated", "2024-01-01", "--until-updated", "2024-12-31"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert out.exists()
+
+
 def test_export_notes_empty_db(tmp_path):
     cfg = tmp_path / "dbs.toml"
     runner.invoke(app, ["--config", str(cfg), "init"])

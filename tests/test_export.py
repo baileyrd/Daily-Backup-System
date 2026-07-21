@@ -99,6 +99,30 @@ def test_item_type_and_date_filters(service, storage, tmp_path):
     assert r2.item_count == 1  # only the March item (live) after Feb 15
 
 
+def test_since_updated_filter_is_independent_of_since(service, storage, tmp_path):
+    from datetime import datetime, timezone
+
+    src = storage.upsert_source("upd", "raindrop", "test:upd", "{}", 1)
+    run = storage.begin_run(src.id, "test:upd", "full", None)
+    storage.upsert_items(src.id, run, [
+        PreparedItem("1", "link", "Old, unedited", "https://a", None, [],
+                     "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", "h1",
+                     json.dumps({"_id": 1}), False),
+        PreparedItem("2", "link", "Old, edited later", "https://b", None, [],
+                     "2024-01-01T00:00:00Z", "2024-06-01T00:00:00Z", "h2",
+                     json.dumps({"_id": 2}), False),
+    ])
+    cutoff = datetime(2024, 5, 1, tzinfo=timezone.utc)
+
+    out = tmp_path / "by_created.ndjson"
+    by_created = service.export(ExportQuery(sources=["upd"], since=cutoff), "ndjson", out)
+    assert by_created.item_count == 0  # both items were *created* in January
+
+    out2 = tmp_path / "by_updated.ndjson"
+    by_updated = service.export(ExportQuery(sources=["upd"], since_updated=cutoff), "ndjson", out2)
+    assert by_updated.item_count == 1  # only item "2" was *updated* after May
+
+
 def test_archive_bundle_has_manifest_and_items(service, storage, tmp_path):
     _seed(storage)
     out = tmp_path / "bundle.zip"
@@ -283,6 +307,31 @@ def test_export_notes_incremental_only_exports_new_items(service, storage, tmp_p
     third = export_notes(service, out_dir)
     assert third.item_count == 1
     assert sorted(p.name for p in out_dir.glob("*.md")) == ["First.md", "Second.md", "Third.md"]
+
+
+def test_export_notes_incremental_picks_up_edited_items(service, storage, tmp_path):
+    out_dir = tmp_path / "notes"
+    _seed_notes_item(storage, ext_id="1", title="First", created_at="2000-01-01T00:00:00Z")
+    export_notes(service, out_dir)
+    assert 'title: "First"' in (out_dir / "First.md").read_text()
+    cutoff = json.loads((out_dir / STATE_FILENAME).read_text())["last_export"]
+
+    # The item is edited (new title/hash, same identity) after the recorded
+    # cutoff, but its *creation* date is untouched and long in the past — a
+    # naive since=cutoff query would miss it forever (issue #87).
+    src = storage.upsert_source("nt", "raindrop", "test:nt", "{}", 1)
+    run = storage.begin_run(src.id, "test:nt", "full", None)
+    storage.upsert_items(src.id, run, [
+        PreparedItem("1", "link", "First (edited)", "https://x/1", None, [],
+                     "2000-01-01T00:00:00Z", cutoff, "h1-edited",
+                     json.dumps({"_id": "1"}), False),
+    ])
+
+    result = export_notes(service, out_dir)
+    assert result.item_count == 1
+    # Same identity -> same filename: the note updates in place, not a dupe.
+    assert sorted(p.name for p in out_dir.glob("*.md")) == ["First.md"]
+    assert 'title: "First (edited)"' in (out_dir / "First.md").read_text()
 
 
 def test_export_notes_full_ignores_incremental_state(service, storage, tmp_path):

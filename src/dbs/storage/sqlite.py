@@ -1064,6 +1064,12 @@ def _build_filter(query: ExportQuery, *, table: str) -> tuple[str, list[Any]]:
     if query.until:
         clauses.append(f"{table}.item_created_at <= ?")
         params.append(query.until_iso)
+    if query.since_updated:
+        clauses.append(f"{table}.item_updated_at >= ?")
+        params.append(query.since_updated_iso)
+    if query.until_updated:
+        clauses.append(f"{table}.item_updated_at <= ?")
+        params.append(query.until_updated_iso)
     if not query.include_deleted:
         clauses.append(f"{table}.deleted = 0")
     return " AND ".join(clauses), params

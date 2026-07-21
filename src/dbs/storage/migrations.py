@@ -157,6 +157,15 @@ ALTER TABLE sync_runs ADD COLUMN duration_ms INTEGER;
 ALTER TABLE sync_runs ADD COLUMN items_failed INTEGER NOT NULL DEFAULT 0;
 """
 
+# `ExportQuery.since_updated`/`until_updated` (item_updated_at filtering, for
+# picking up items edited after their creation date) needs the same
+# source-prefixed index item_created_at already had from v1 -- without it,
+# `dbs export --since-updated` and export_notes's automatic edited-item
+# pickup would force a full table scan per source.
+MIGRATION_0006 = """
+CREATE INDEX IF NOT EXISTS idx_items_source_updated ON items(source_id, item_updated_at);
+"""
+
 # (version, sql) in ascending order.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, MIGRATION_0001),
@@ -164,6 +173,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (3, MIGRATION_0003),
     (4, MIGRATION_0004),
     (5, MIGRATION_0005),
+    (6, MIGRATION_0006),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
