@@ -13,13 +13,22 @@ never has to filter them out.
 Incremental by default: a JSON state file at
 ``<out_dir>/.dbs_export_state.json`` records the wall-clock time (per
 ``BackupService.clock``) the previous successful call *started*, and passes
-it as ``ExportQuery.since`` on the next call so a scheduled
+it as the cutoff on the next call so a scheduled
 ``dbs backup && dbs export-notes`` run only writes new items, not the entire
 history every time. Recording the start time (not completion) means an item
 created mid-run is never permanently skipped — worst case it's picked up
 again on the next run, which is safe because unchanged notes are
 byte-identical and a downstream consumer's own content-hash dedup (e.g.
 remind_me's importer) treats a repeat as a no-op.
+
+The cutoff is applied as *created-or-updated* since ``ExportQuery`` itself
+only ANDs filters together (see its docstring): a plain ``since=cutoff``
+query would miss an item that was created long ago but edited (per the
+source's own updated timestamp) after the cutoff, leaving its note stale
+forever. So when a cutoff is in effect, `export_notes` issues two queries —
+one on ``since``, one on ``since_updated`` — and unions their results by
+``(source, external_id)`` identity before writing, so an item matching
+either one gets (re-)written exactly once.
 
 Filename stability across runs: the obsidian exporter only disambiguates
 title-slug collisions *within* one zip (a fresh ``seen_names`` set per
@@ -141,37 +150,57 @@ def export_notes(
         effective_since = parse_iso(state.get("last_export"))
 
     run_start = service.clock()
-    query = ExportQuery(
-        sources=sources,
-        item_types=item_types,
-        since=effective_since,
-        include_deleted=False,
-        include_revisions=False,
-        include_raw=False,
-    )
+    queries = [
+        ExportQuery(
+            sources=sources,
+            item_types=item_types,
+            since=effective_since,
+            include_deleted=False,
+            include_revisions=False,
+            include_raw=False,
+        )
+    ]
+    if effective_since is not None:
+        # Created-or-updated union (see module docstring): a second pass
+        # catches items created before the cutoff but edited since.
+        queries.append(
+            ExportQuery(
+                sources=sources,
+                item_types=item_types,
+                since_updated=effective_since,
+                include_deleted=False,
+                include_revisions=False,
+                include_raw=False,
+            )
+        )
 
-    written = 0
-    taken = set(filenames.values())
+    # identity_key -> (note text, zip's own basename, external_id). A dict
+    # so an item matched by both queries is written exactly once.
+    notes_by_identity: dict[str, tuple[str, str, str | None]] = {}
     with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_zip = Path(tmp_dir) / "notes.zip"
-        service.export(query, "obsidian", tmp_zip)
-        with zipfile.ZipFile(tmp_zip) as zf:
-            for name in zf.namelist():
-                if not (name.startswith("notes/") and name.endswith(".md")):
-                    continue  # media/ and manifest.json aren't notes
-                text = zf.read(name).decode("utf-8")
-                source_name, external_id = _parse_identity(text)
-                identity_key = f"{source_name}|{external_id}"
-                filename = _resolve_filename(
-                    identity_key, Path(name).name, external_id, filenames, taken
-                )
-                filenames[identity_key] = filename
-                taken.add(filename)
-                dest = out_dir / filename
-                dest_tmp = dest.with_name(dest.name + ".tmp")
-                dest_tmp.write_text(text, encoding="utf-8")
-                dest_tmp.replace(dest)
-                written += 1
+        for i, query in enumerate(queries):
+            tmp_zip = Path(tmp_dir) / f"notes-{i}.zip"
+            service.export(query, "obsidian", tmp_zip)
+            with zipfile.ZipFile(tmp_zip) as zf:
+                for name in zf.namelist():
+                    if not (name.startswith("notes/") and name.endswith(".md")):
+                        continue  # media/ and manifest.json aren't notes
+                    text = zf.read(name).decode("utf-8")
+                    source_name, external_id = _parse_identity(text)
+                    identity_key = f"{source_name}|{external_id}"
+                    notes_by_identity[identity_key] = (text, Path(name).name, external_id)
+
+        written = 0
+        taken = set(filenames.values())
+        for identity_key, (text, zip_basename, external_id) in notes_by_identity.items():
+            filename = _resolve_filename(identity_key, zip_basename, external_id, filenames, taken)
+            filenames[identity_key] = filename
+            taken.add(filename)
+            dest = out_dir / filename
+            dest_tmp = dest.with_name(dest.name + ".tmp")
+            dest_tmp.write_text(text, encoding="utf-8")
+            dest_tmp.replace(dest)
+            written += 1
 
     _save_state(out_dir, {"last_export": iso_z(run_start), "filenames": filenames})
 

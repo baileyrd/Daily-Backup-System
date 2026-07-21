@@ -616,6 +616,13 @@ def export(
     item_type: Optional[list[str]] = typer.Option(None, "--type", help="Filter by item kind (repeatable)."),
     since: Optional[str] = typer.Option(None, "--since", help="Only items created on/after (YYYY-MM-DD)."),
     until: Optional[str] = typer.Option(None, "--until", help="Only items created on/before."),
+    since_updated: Optional[str] = typer.Option(
+        None, "--since-updated",
+        help="Only items updated (per the source, e.g. Raindrop's lastUpdate) "
+             "on/after this date/time. Independent of --since — an item must "
+             "satisfy both when both are given.",
+    ),
+    until_updated: Optional[str] = typer.Option(None, "--until-updated", help="Only items updated on/before."),
     include_deleted: bool = typer.Option(False, "--include-deleted"),
     include_revisions: bool = typer.Option(False, "--include-revisions", help="(archive) full history."),
     no_raw: bool = typer.Option(False, "--no-raw", help="Omit verbatim raw payloads."),
@@ -638,6 +645,8 @@ def export(
             sources=list(source) if source else None,
             item_types=list(item_type) if item_type else None,
             since=_parse_date(since),
+            since_updated=_parse_date(since_updated),
+            until_updated=_parse_date(until_updated),
             until=_parse_date(until),
             include_deleted=include_deleted,
             include_revisions=include_revisions,

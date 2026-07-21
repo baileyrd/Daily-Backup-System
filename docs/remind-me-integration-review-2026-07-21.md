@@ -95,8 +95,15 @@ from option 1 or 3 above without re-deriving the tradeoffs.
   actual `FolderWatcher.scan_once()` against the output directory produces
   a memory row with the item's title/tags/body content. See
   [BACKLOG.md #4](BACKLOG.md#4-export-notes-follow-ups-remind_me-integration-option-1-shipped)
-  for the known gaps left open (`item_created_at`-only incremental cutoff,
-  no delete propagation, the cross-run filename-collision workaround).
+  for the known gaps left open (no delete propagation, the cross-run
+  filename-collision workaround).
+- **`item_created_at`-only incremental cutoff — FIXED** ([#87](https://github.com/baileyrd/Daily-Backup-System/issues/87)).
+  `ExportQuery` gained `since_updated`/`until_updated`; `export_notes` now
+  unions a `since` pass with a `since_updated` pass so an item edited after
+  its creation date gets its note refreshed in place instead of going
+  stale. Verified end-to-end: editing a seeded item's title/body after its
+  first export and re-running `export-notes` produced an updated note under
+  the same filename.
 - **Options 2 and 3 — not started.** Both remain valid next steps; option 3
   (a dedicated `dbs` import connector in remind_me, preserving structured
   entities instead of prose) is the one worth reaching for if dbs becomes a

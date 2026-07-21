@@ -115,14 +115,15 @@ like remind_me — see
 is deliberately the low-effort "option 1" stepping stone, not the end state.
 Known gaps, left for whoever picks up the next tier:
 
-- **Incremental cutoff is `item_created_at` only**, inherited from
-  `ExportQuery` (§6 of architecture-analysis.md already flags this as a
-  general export gap). An item edited after its creation date — a Raindrop
-  note's title corrected, tags added — never re-crosses the incremental
-  `since` filter, so its note in the watched directory goes stale silently.
-  Fixing this generally (an `updated_at`-aware `ExportQuery`, or reconcile
-  runs re-touching a comparable watermark) belongs with the general export
-  gap, not bolted onto `export_notes` alone.
+- ~~**Incremental cutoff is `item_created_at` only**~~ — **FIXED** (#87).
+  `ExportQuery` gained `since_updated`/`until_updated` (filtering on
+  `item_updated_at`, AND-ed with everything else per its docstring — no OR
+  semantics in the query itself). `export_notes` now issues two queries
+  when a cutoff is in effect — one on `since`, one on `since_updated` — and
+  unions the results by `(source, external_id)` identity, so an item edited
+  after its creation date gets its note rewritten in place instead of
+  staying stale. `dbs export`/`dbs export --since-updated` gained the same
+  filter for direct use outside `export_notes`.
 - **`export_notes`'s cross-run filename-collision map
   (`src/dbs/notes_export.py`) is a workaround**, not a first-class identity
   system — it exists only because the obsidian zip exporter's own
