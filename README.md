@@ -102,6 +102,15 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 Export filters: `--source`, `--type`, `--since`, `--until`, `--include-deleted`,
 `--include-revisions`, `--no-raw`.
 
+> **Feeding an AI memory (e.g. [remind_me](https://github.com/baileyrd/remind_me)):**
+> `dbs export-notes` above is the lowest-effort path (see
+> [docs/scheduling.md](docs/scheduling.md#feeding-a-downstream-knowledge-base-eg-remind_me)).
+> remind_me also ships its own `remind_me_import_dbs` tool that reads
+> `dbs.sqlite3` directly and preserves source/tags as knowledge-graph
+> entities instead of note text — no dbs-side setup needed. See
+> [docs/remind-me-integration-review-2026-07-21.md](docs/remind-me-integration-review-2026-07-21.md)
+> for the full comparison.
+
 ## Web UI
 
 ```bash

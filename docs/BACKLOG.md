@@ -127,11 +127,15 @@ Known gaps, left for whoever picks up the next tier:
 - **`export_notes`'s cross-run filename-collision map
   (`src/dbs/notes_export.py`) is a workaround**, not a first-class identity
   system — it exists only because the obsidian zip exporter's own
-  `seen_names` dedup is scoped to one call. A "dedicated `dbs` import
-  connector in remind_me" (option 3 in the integration review) that reads
-  `(source, external_id)` rows directly wouldn't need slug-based filenames
-  or this workaround at all — worth keeping in mind if/when that's built,
-  rather than growing `notes_export.py` further.
+  `seen_names` dedup is scoped to one call. Option 3 in the integration
+  review — a dedicated `dbs` import connector in remind_me that reads
+  `(source, external_id)` rows directly instead — has since shipped
+  ([`remind_me_mcp/dbs_import.py`](https://github.com/baileyrd/remind_me/blob/main/remind_me_mcp/dbs_import.py)),
+  with no such workaround needed there. This one stays local to
+  `notes_export.py`'s own file-based identity problem and isn't worth
+  removing — the two paths serve different fidelity/effort tradeoffs (see
+  `docs/remind-me-integration-review-2026-07-21.md`), not one superseding
+  the other.
 - **No delete propagation.** An item that gets deleted upstream (and swept
   by dbs) leaves its note behind in the watched directory forever — `dbs
   export-notes` only ever adds files, matching `export`'s existing

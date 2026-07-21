@@ -53,12 +53,18 @@ dbs --config /path/to/dbs.toml export-notes --out-dir ~/notes/dbs
 
 Point [remind_me](https://github.com/baileyrd/remind_me)'s folder watcher
 (`REMIND_ME_WATCH_DIRS=~/notes/dbs`) at that same directory and every new
-bookmark, save, or highlight becomes a searchable memory automatically. See
+bookmark, save, or highlight becomes a searchable memory automatically. Use
+`--full` to re-export every live item (e.g. after clearing the state file or
+the watch dir), or `--since` to override the incremental cutoff for one run.
+
+This is the lowest-effort of the two shipped integration paths, and the
+lower-fidelity one: dbs's source/tags land as YAML frontmatter inside each
+note's *text*, not as queryable structure. remind_me's own
+`remind_me_import_dbs` tool (added directly to remind_me — no dbs-side
+code) reads `dbs.sqlite3` itself and preserves source/tags as real
+knowledge-graph entities instead; see
 [remind-me-integration-review-2026-07-21.md](remind-me-integration-review-2026-07-21.md)
-for the full rationale and the higher-fidelity options this is a stepping
-stone toward. Use `--full` to re-export every live item (e.g. after
-clearing the state file or the watch dir), or `--since` to override the
-incremental cutoff for one run.
+for the full comparison of both.
 
 ## cron
 
