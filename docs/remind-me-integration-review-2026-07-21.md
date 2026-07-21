@@ -58,20 +58,23 @@ get started.
    for the full recipe). Freshness is per-backup-cycle; dbs's structured
    fields (source, tags, timestamps) still land as YAML frontmatter in each
    note, but remind_me ingests the whole file as plain text — prose, not
-   queryable metadata, until option 3 exists.
-2. **Per-item webhook push (moderate effort).** Extend dbs's notification
-   path (or add a small adapter alongside `notify_url`) to `POST` each
-   new/changed item to remind_me's `/ingest` right after an incremental
-   fetch. Near real-time; same flattened-text fidelity unless the payload
-   also carries structured fields.
+   queryable metadata (option 3, below, is the higher-fidelity alternative
+   now that it's shipped too).
+2. **Per-item webhook push (moderate effort). Not started.** Extend dbs's
+   notification path (or add a small adapter alongside `notify_url`) to
+   `POST` each new/changed item to remind_me's `/ingest` right after an
+   incremental fetch. Near real-time; same flattened-text fidelity unless
+   the payload also carries structured fields.
 3. **Dedicated `dbs` import connector in remind_me (highest effort, best
-   fit).** A connector that reads dbs's SQLite directly — using dbs's own
-   idempotent, cursor-based item model — and writes structured entities
-   (subreddit, channel, tags, kind) into remind_me's knowledge graph rather
-   than collapsing to prose. Matches the extension points both projects
-   already expose (dbs's `dbs.connectors` plugin pattern on one side,
-   remind_me's import connector registry on the other) instead of routing
-   around them.
+   fit). SHIPPED, entirely on the remind_me side.**
+   [`remind_me_mcp/dbs_import.py`](https://github.com/baileyrd/remind_me/blob/main/remind_me_mcp/dbs_import.py)
+   reads dbs's SQLite directly — using dbs's own idempotent, content-hash
+   item model — and writes structured entities (source, tags) into
+   remind_me's knowledge graph rather than collapsing to prose, via the new
+   `remind_me_import_dbs` tool. No dbs-side changes were needed. Matches
+   the extension points both projects already expose (dbs's
+   `dbs.connectors` plugin pattern on one side, remind_me's import
+   connector registry on the other) instead of routing around them.
 
 ## Recommendation
 
@@ -104,7 +107,17 @@ from option 1 or 3 above without re-deriving the tradeoffs.
   stale. Verified end-to-end: editing a seeded item's title/body after its
   first export and re-running `export-notes` produced an updated note under
   the same filename.
-- **Options 2 and 3 — not started.** Both remain valid next steps; option 3
-  (a dedicated `dbs` import connector in remind_me, preserving structured
-  entities instead of prose) is the one worth reaching for if dbs becomes a
-  primary, ongoing memory source rather than an occasional feed.
+- **Option 3 — shipped**, entirely on the remind_me side
+  ([`remind_me_mcp/dbs_import.py`](https://github.com/baileyrd/remind_me/blob/main/remind_me_mcp/dbs_import.py)
+  + the `remind_me_import_dbs` tool). Reads dbs's SQLite directly; each
+  item becomes a memory with its dbs source and tags linked as entities via
+  `memory_entities`, tracked in a new `dbs_imports` table keyed on
+  `(dbs_source, external_id)` + content_hash. An edited item gets a fresh,
+  superseding memory — since every pull compares the actual current
+  content_hash rather than a creation-date cutoff, this has no equivalent
+  to option 1's `item_created_at`-only staleness gap. Verified end-to-end
+  against a real `dbs.sqlite3` produced by the actual `dbs` CLI.
+- **Option 2 — not started.** The remaining gap: near-real-time push
+  instead of on-demand/scheduled pulls. Worth reaching for only if option
+  3's pull cadence (call `remind_me_import_dbs` after each `dbs backup`)
+  turns out to be too slow for a given use case.
