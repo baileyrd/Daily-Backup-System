@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import threading
 
 import pytest
 
 from dbs.core.models import Cursor
 from dbs.export.base import ExportQuery
+from dbs.storage import migrations
 from dbs.storage.base import PreparedItem
 from dbs.storage.sqlite import SqliteStorage
 
@@ -46,6 +49,55 @@ def test_migrations_idempotent(tmp_path):
     )}
     assert {"sources", "items", "item_revisions", "sync_runs", "sync_state"} <= tables
     st.close()
+
+
+def test_migrate_concurrent_connections_race_safe(tmp_path):
+    """Regression: open_service() opens a fresh connection per web request,
+    so two requests landing while a migration is still pending can both see
+    it unapplied and race to insert the same schema_migrations row. Each
+    should instead re-check under the write lock and one should no-op."""
+    path = tmp_path / "race.sqlite3"
+    conn0 = sqlite3.connect(str(path), isolation_level=None)
+    conn0.execute("PRAGMA journal_mode=WAL")
+    for version, sql in migrations.MIGRATIONS[:-1]:
+        conn0.execute("BEGIN IMMEDIATE")
+        for stmt in migrations._split_statements(sql):
+            conn0.execute(stmt)
+        conn0.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (version, "2024-01-01T00:00:00Z"),
+        )
+        conn0.execute("COMMIT")
+    conn0.close()
+
+    barrier = threading.Barrier(2)
+    errors: list[Exception] = []
+
+    def worker():
+        conn = sqlite3.connect(str(path), isolation_level=None, timeout=30)
+        conn.execute("PRAGMA busy_timeout=30000")
+        barrier.wait()
+        try:
+            migrations.migrate(conn)
+        except Exception as exc:  # pragma: no cover - failure path under test
+            errors.append(exc)
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+
+    conn = sqlite3.connect(str(path))
+    versions = [
+        r[0] for r in conn.execute("SELECT version FROM schema_migrations ORDER BY version")
+    ]
+    conn.close()
+    assert versions == [v for v, _ in migrations.MIGRATIONS]
 
 
 def test_upsert_classifies_created_updated_unchanged(storage):
