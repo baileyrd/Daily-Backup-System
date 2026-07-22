@@ -1042,6 +1042,106 @@ def serve(
 
 
 @app.command()
+def capture(
+    target: str = typer.Argument(..., help="Connector type or configured source name to capture a login for."),
+    out: Optional[Path] = typer.Option(
+        None, "--out", "-o",
+        help="Where to write the captured artifact. Defaults to ./<target>-cookies.txt / "
+             "-storage_state.json / -session.zip depending on the capture kind.",
+    ),
+) -> None:
+    """Capture a login session on this machine, for import into a headless server.
+
+    Opens a real browser here — the same interactive login the web UI's
+    "Capture via browser" button drives — and writes the result to a local
+    file. Copy that file to the server and import it via
+    ``POST /api/connectors/{type}/import`` (or ``/api/sources/{name}/import``),
+    or the web UI's "Import…" control — instead of needing a display on the
+    server itself.
+    """
+    try:
+        from .web import setup as setupmod
+    except ModuleNotFoundError:
+        typer.secho(
+            "Session capture requires the optional 'web' dependencies. Install them with:\n"
+            "    pip install 'daily-backup-system[web]'",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(4)
+
+    svc = _service()
+    try:
+        try:
+            rc = svc.registry.get(target)
+        except ConnectorLoadError:
+            sc = svc.config.sources.get(target)
+            if sc is None:
+                typer.secho(f"No such connector or source: {target!r}", fg=typer.colors.RED, err=True)
+                raise typer.Exit(4)
+            try:
+                rc = svc.registry.get(sc.type)
+            except ConnectorLoadError as exc:
+                typer.secho(str(exc), fg=typer.colors.RED, err=True)
+                raise typer.Exit(4)
+        spec = rc.cls.auth_capture
+        if spec is None:
+            typer.secho(f"{target!r} has no interactive auth capture.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(4)
+    finally:
+        svc.close()
+
+    if not setupmod.playwright_present():
+        typer.echo("Playwright not found — installing (this only happens once)...")
+        try:
+            setupmod.run_commands(setupmod.playwright_install_commands())(emit=typer.echo)
+        except RuntimeError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(4)
+
+    import shutil
+    import tempfile
+
+    tmp_profile_dir: Optional[str] = None
+    if spec.kind == "browser_session":
+        tmp_profile_dir = tempfile.mkdtemp(prefix="dbs-capture-")
+        capture_target = tmp_profile_dir
+        default_out = Path(f"./{target}-session.zip")
+    elif spec.kind == "browser_cookies":
+        default_out = Path(f"./{target}-cookies.txt")
+        capture_target = str(out or default_out)
+    elif spec.kind == "browser_storage_state":
+        default_out = Path(f"./{target}-storage_state.json")
+        capture_target = str(out or default_out)
+    else:
+        typer.secho(f"Unsupported capture kind: {spec.kind!r}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+    out_path = out or default_out
+
+    try:
+        setupmod.browser_capture_runner(
+            spec.kind, capture_target, spec.login_url, on_success=lambda: None,
+        )(emit=typer.echo)
+    except RuntimeError as exc:
+        if tmp_profile_dir:
+            shutil.rmtree(tmp_profile_dir, ignore_errors=True)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+
+    if spec.kind == "browser_session":
+        archive_base = str(out_path.with_suffix(""))
+        archive_path = shutil.make_archive(archive_base, "zip", root_dir=tmp_profile_dir)
+        shutil.rmtree(tmp_profile_dir, ignore_errors=True)
+        out_path = Path(archive_path)
+
+    typer.secho(f"Captured to {out_path}", fg=typer.colors.GREEN)
+    typer.echo(
+        "Copy this file to your server and import it:\n"
+        f"  curl -F file=@{out_path} http://<server-host>:<port>/api/connectors/{target}/import\n"
+        "(or use the web UI's Import control next to the capture button)"
+    )
+
+
+@app.command()
 def version() -> None:
     """Print the tool and core API versions."""
     typer.echo(f"daily-backup-system {__version__} (core API v{CORE_API_VERSION})")

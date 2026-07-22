@@ -103,6 +103,34 @@ def test_connectors_describe(tmp_path):
     assert "RAINDROP_TOKEN" in result.stdout
 
 
+def test_capture_unknown_connector_or_source(tmp_path):
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    result = runner.invoke(app, ["--config", str(cfg), "capture", "nope"])
+    assert result.exit_code == 4
+    assert "No such connector or source" in _plain(result.output)
+
+
+def test_capture_connector_without_auth_capture(tmp_path):
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    # raindrop authenticates with a token, not a browser session.
+    result = runner.invoke(app, ["--config", str(cfg), "capture", "raindrop"])
+    assert result.exit_code == 4
+    assert "has no interactive auth capture" in _plain(result.output)
+
+
+def test_capture_resolves_source_name_to_connector(tmp_path):
+    # A source name that differs from its connector type exercises the
+    # registry.get(target) -> sources.get(target) fallback path.
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    runner.invoke(app, ["--config", str(cfg), "sources", "add", "myrd", "--type", "raindrop"])
+    result = runner.invoke(app, ["--config", str(cfg), "capture", "myrd"])
+    assert result.exit_code == 4
+    assert "has no interactive auth capture" in _plain(result.output)
+
+
 def test_export_empty_db(tmp_path):
     cfg = tmp_path / "dbs.toml"
     runner.invoke(app, ["--config", str(cfg), "init"])
