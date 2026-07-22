@@ -265,6 +265,43 @@ def test_export_unknown_format_400(client):
     assert client.get("/api/export", params={"format": "nope"}).status_code == 400
 
 
+def test_export_notes_writes_directory(client, tmp_path):
+    job = client.post("/api/backup", json={"source": "courses"}).json()
+    _wait_done(client, job["id"])
+    out_dir = tmp_path / "notes-out"
+    r = client.post("/api/export-notes", json={"out_dir": str(out_dir)})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["item_count"] == 1
+    assert body["path"] == str(out_dir)
+    md_files = list(out_dir.glob("*.md"))
+    assert len(md_files) == 1
+    # not a bundle -- no manifest/media extracted alongside the loose notes.
+    assert not (out_dir / "manifest.json").exists()
+
+
+def test_export_notes_incremental_second_run_is_empty(client, tmp_path):
+    job = client.post("/api/backup", json={"source": "courses"}).json()
+    _wait_done(client, job["id"])
+    out_dir = tmp_path / "notes-out"
+    client.post("/api/export-notes", json={"out_dir": str(out_dir)})
+    r = client.post("/api/export-notes", json={"out_dir": str(out_dir)})
+    assert r.status_code == 200
+    assert r.json()["item_count"] == 0
+
+
+def test_export_notes_requires_out_dir(client):
+    r = client.post("/api/export-notes", json={})
+    assert r.status_code == 400
+
+
+def test_export_notes_bad_since_400(client, tmp_path):
+    r = client.post(
+        "/api/export-notes", json={"out_dir": str(tmp_path / "x"), "since": "not-a-date"}
+    )
+    assert r.status_code == 400
+
+
 # --- browse (items / detail / media / metrics) -----------------------------
 
 

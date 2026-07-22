@@ -353,6 +353,25 @@
           <label class="check"><input type="checkbox" id="export-noraw" /> Omit raw payloads</label>
           <div class="row"><button type="submit" class="btn primary">Download export</button></div>
         </form>
+
+        <div class="view-head" style="margin-top:1.5rem;">
+          <h2>Notes export</h2>
+          <span class="desc">One Markdown note per item, written into a watched folder (e.g. remind_me)</span>
+        </div>
+        <p class="muted hint-line">Writes loose <code>.md</code> notes into a directory on this machine instead of
+          downloading a bundle — for a downstream tool that watches a folder for new files. Incremental by
+          default: only items created or updated since the last successful run are (re-)written.</p>
+        <form id="notes-export-form" class="card pad form">
+          <label>Output directory <input id="notes-export-dir" required placeholder="/path/to/watched/folder" /></label>
+          <label>Source(s) <input id="notes-export-source" placeholder="comma,separated (optional)" /></label>
+          <label>Type(s) <input id="notes-export-type" placeholder="comma,separated (optional)" /></label>
+          <label>Since <input id="notes-export-since" type="date" /></label>
+          <label class="check"><input type="checkbox" id="notes-export-full" /> Full (ignore incremental state)</label>
+          <div class="row">
+            <button type="submit" class="btn primary">Write notes</button>
+            <span id="notes-export-result" class="result"></span>
+          </div>
+        </form>
       </section>
 
       <!-- ============ Research ============ -->
