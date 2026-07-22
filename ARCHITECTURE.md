@@ -8,7 +8,7 @@ GitHub stars, and more) into one local SQLite database with full revision
 history, plus exporters that flatten the archive into other formats and a
 web UI/CLI for browsing it. It is not a cloud backup service, not an AI/
 search/memory layer (that's a downstream consumer's job — see
-`docs/dbs-integration-review-2026-07-21.md`), and not multi-user.
+`docs/remind-me-integration-review-2026-07-21.md`), and not multi-user.
 
 ## Boundaries
 
@@ -53,5 +53,5 @@ Explicitly out of scope, per the project's own architecture docs: no
 built-in cloud/S3 storage backend (local-disk-first by design), and no
 built-in AI/embedding/search layer — dbs's job is to feed a downstream
 knowledge base (e.g. remind_me), not compete with one. See
-`docs/dbs-integration-review-2026-07-21.md` for the analysis behind that
+`docs/remind-me-integration-review-2026-07-21.md` for the analysis behind that
 boundary.

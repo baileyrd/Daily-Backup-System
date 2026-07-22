@@ -1405,6 +1405,30 @@ $("#export-form").addEventListener("submit", (e) => {
   window.location.assign(withToken("/api/export?" + qs.toString()));
 });
 
+$("#notes-export-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const result = $("#notes-export-result");
+  result.textContent = "";
+  const csvList = (id) => $(id).value.split(",").map((s) => s.trim()).filter(Boolean);
+  try {
+    const body = JSON.stringify({
+      out_dir: $("#notes-export-dir").value.trim(),
+      source: csvList("#notes-export-source"),
+      type: csvList("#notes-export-type"),
+      since: $("#notes-export-since").value.trim() || null,
+      full: $("#notes-export-full").checked,
+    });
+    const res = await api("/api/export-notes", { method: "POST", body });
+    const sinceDesc = res.since || "the beginning";
+    result.textContent = `Wrote ${res.item_count} note(s) to ${res.path} (since ${sinceDesc}).`;
+    result.className = "result st-success";
+    toast(`Wrote ${res.item_count} note(s).`, "ok");
+  } catch (err) {
+    result.textContent = err.message;
+    result.className = "result st-failed";
+  }
+});
+
 // --- research (YouTube -> NotebookLM -> report) ------------------------------
 
 let researchES = null;

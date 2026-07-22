@@ -291,6 +291,7 @@ def create_app(
     from ..core.service import BackupService
     from ..export import EXPORTERS
     from ..export.base import ExportQuery
+    from ..notes_export import export_notes as notes_export_fn
     from ..research.notebooklm_client import (
         DBS_STATE_SUBPATH,
         default_state_present,
@@ -1130,6 +1131,38 @@ def create_app(
             filename=f"dbs-export.{ext}",
             background=BackgroundTask(lambda: shutil.rmtree(tmp_dir, ignore_errors=True)),
         )
+
+    @app.post("/api/export-notes")
+    def export_notes_route(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """Write one Markdown note per item into a server-side directory.
+
+        Unlike ``/api/export`` this doesn't stream a download — it writes loose
+        files on the host for a folder-watching downstream consumer (e.g.
+        remind_me). Incremental by default, same as ``dbs export-notes``.
+        """
+        out_dir = (payload.get("out_dir") or "").strip()
+        if not out_dir:
+            raise HTTPException(status_code=400, detail="'out_dir' is required")
+        try:
+            since = _parse_date(payload.get("since"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"bad date: {exc}")
+        sources = payload.get("source") or None
+        item_types = payload.get("type") or None
+        svc = open_service()
+        try:
+            result = notes_export_fn(
+                svc, out_dir,
+                sources=sources, item_types=item_types,
+                since=since, incremental=not bool(payload.get("full")),
+            )
+        finally:
+            svc.close()
+        return {
+            "item_count": result.item_count,
+            "path": result.path,
+            "since": result.extra.get("since"),
+        }
 
     # -- research (topic -> NotebookLM -> markdown report) -------------------
     # Long-running jobs on their own SetupManager-style log stream; the
