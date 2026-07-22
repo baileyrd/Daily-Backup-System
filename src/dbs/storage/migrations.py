@@ -199,15 +199,22 @@ def migrate(conn: sqlite3.Connection) -> list[int]:
     so we control transactions explicitly. ``executescript`` is intentionally
     avoided because it forces an implicit ``COMMIT`` that would break atomicity;
     each migration's DDL and its bookkeeping row commit together or not at all.
+
+    Each pending migration re-checks ``applied`` *after* acquiring the write
+    lock (``BEGIN IMMEDIATE``), not just once up front: ``open_service()``
+    opens a fresh connection per web request, so concurrent requests can race
+    to apply the same migration. Without the re-check, a loser thread would
+    still attempt its stale plan's INSERT and crash on the UNIQUE constraint
+    instead of seeing the version already applied and skipping it.
     """
-    applied = _applied_versions(conn)
     newly: list[int] = []
     for version, sql in MIGRATIONS:
-        if version in applied:
-            continue
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        conn.execute("BEGIN IMMEDIATE")
         try:
-            conn.execute("BEGIN")
+            if version in _applied_versions(conn):
+                conn.execute("ROLLBACK")
+                continue
             for statement in _split_statements(sql):
                 conn.execute(statement)
             conn.execute(
