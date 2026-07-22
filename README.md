@@ -96,6 +96,7 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | `dbs maintain [--vacuum] [--snapshot PATH] [--json]` | Database housekeeping: flush the WAL and refresh query-planner stats; `--vacuum` compacts the file, per-source `keep_revisions` retention is applied, `--snapshot` writes a consistent single-file copy that's safe to move off-machine (a raw copy of a live WAL-mode DB misses the `-wal` sidecar). |
 | `dbs schedule [--interval daily\|hourly]` | Print ready-to-use cron / systemd snippets. |
 | `dbs serve [--host H] [--port P] [--no-setup] [--token T] [--schedule]` | Launch the web management UI (needs the `[web]` extra). In-UI setup (dependency install + browser-login capture) is on by default; `--no-setup` disables it. `--schedule` backs up due sources automatically while the server runs (no external cron needed); `--token` adds bearer-token auth (required off-localhost). |
+| `dbs capture TARGET [--out PATH]` | Capture a login session locally (needs a display + the `[web]` extra) and write it to a file, for import into a headless `dbs serve` via its Import control or `POST /api/connectors/{type}/import` — see [Capturing on a headless server](#capturing-on-a-headless-server-dbs-capture--import). |
 | `dbs research youtube TOPIC [...]` \| `dbs research youtube-backup TOPIC [...]` | Ad-hoc YouTube research: search (or reuse a backed-up list), synthesize via NotebookLM, write a markdown report. See [docs/research.md](docs/research.md). |
 | `dbs version` | Tool + core API version. |
 
@@ -177,8 +178,7 @@ the window, and the artifact is captured and recorded in `.env`:
 Capture drives the browser with **Playwright**. It's **one click** — if Playwright
 or its browser are missing, capture installs them first (watch the streamed log),
 then opens the login window. Because the browser opens on the host, this works
-when `dbs serve` runs on your desktop; on a headless server, capture on a desktop
-and point the `*_env` secret at the resulting path. (For youtube you can skip
+directly when `dbs serve` runs on your desktop. (For youtube you can also skip
 capture entirely and set `cookies_from_browser` in the source config instead.)
 
 In-UI setup (the **Install** and **Log in** actions, which run `pip install` /
@@ -186,10 +186,25 @@ In-UI setup (the **Install** and **Log in** actions, which run `pip install` /
 pass `dbs serve --no-setup` to disable it (the buttons then hide and the
 Connectors tab just shows what to install/set by hand).
 
-> The reddit/youtube auth artifacts (a Playwright session dir / a `cookies.txt`)
-> are inherently created on a machine with a browser — the UI can drive that when
-> it runs on your desktop, but on a headless server you create them locally and
-> point the `*_env` secret at the path.
+#### Capturing on a headless server: `dbs capture` + Import
+
+The capture button needs a display, which a headless server doesn't have. Instead,
+capture on a machine that *does* have one — your desktop — and import the result:
+
+```
+dbs capture youtube --out yt-cookies.txt      # or: dbs capture <source-name>
+# copy yt-cookies.txt to the server, then either:
+curl -F file=@yt-cookies.txt http://<server>:<port>/api/connectors/youtube/import
+#   ...or click "Import…" next to the capture button in the web UI.
+```
+
+`dbs capture` runs the *exact same* Playwright login flow as the UI's capture
+button, just writing the artifact to a local file instead of straight into a
+running server's config — a `cookies.txt` (youtube), a `storageState` JSON
+(skool), or a zipped session directory (reddit). The import endpoint validates
+the upload against the connector's expected format before writing it into
+place and recording the secret in `.env`, gated behind the same
+`--allow-setup`/`--no-setup` flag as live capture.
 
 ### API keys in the UI
 
