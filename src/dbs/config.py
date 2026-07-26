@@ -97,6 +97,15 @@ class Config(BaseModel):
     # Used only for sources with requires_vpn = true.
     vpn_exec: str = "sudo vpn-netns exec"
     vpn_status: str = "sudo vpn-netns status"
+    # The Linux network namespace `vpn_exec` runs commands inside. The CLI/engine
+    # uses it to detect whether a requires_vpn source is actually running through
+    # the VPN, so an off-VPN `dbs backup` can't silently expose the host IP.
+    vpn_netns: str = "vpn"
+    # What to do when a requires_vpn source is launched outside `vpn_netns`:
+    #   skip (default) — refuse it with an actionable message; other sources run
+    #   warn           — proceed but log a warning (for non-netns VPN setups)
+    #   off            — disable the guard entirely
+    vpn_guard: Literal["skip", "warn", "off"] = "skip"
     # Webhook POSTed on backup completion (JSON with "text"/"content" keys —
     # Slack/Discord-compatible out of the box). A backup tool's classic
     # failure is failing silently for months; this is the alarm. The URL may
@@ -206,6 +215,8 @@ def load_config(path: str | Path) -> Config:
             default_overlap_seconds=int(dbs_section.get("default_overlap_seconds", 300)),
             vpn_exec=str(dbs_section.get("vpn_exec", "sudo vpn-netns exec")),
             vpn_status=str(dbs_section.get("vpn_status", "sudo vpn-netns status")),
+            vpn_netns=str(dbs_section.get("vpn_netns", "vpn")),
+            vpn_guard=dbs_section.get("vpn_guard", "skip"),
             notify_url=dbs_section.get("notify_url"),
             notify_on=dbs_section.get("notify_on", "failure"),
             http_timeout=float(dbs_section.get("http_timeout", 30.0)),

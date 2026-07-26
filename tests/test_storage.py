@@ -3,23 +3,29 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import threading
 
 import pytest
 
 from dbs.core.models import Cursor
 from dbs.export.base import ExportQuery
+from dbs.storage import migrations
 from dbs.storage.base import PreparedItem
 from dbs.storage.sqlite import SqliteStorage
 
 
-def _item(ext_id: str, content_hash: str, *, updated="2024-01-01T00:00:00Z", deleted=False, kind="note"):
+def _item(
+    ext_id: str, content_hash: str, *,
+    updated="2024-01-01T00:00:00Z", deleted=False, kind="note", tags=("a", "b"),
+):
     return PreparedItem(
         external_id=ext_id,
         item_kind=kind,
         title=f"title-{ext_id}",
         url=f"https://example/{ext_id}",
         body="body",
-        tags=["a", "b"],
+        tags=list(tags),
         item_created_at="2024-01-01T00:00:00Z",
         item_updated_at=updated,
         content_hash=content_hash,
@@ -43,6 +49,55 @@ def test_migrations_idempotent(tmp_path):
     )}
     assert {"sources", "items", "item_revisions", "sync_runs", "sync_state"} <= tables
     st.close()
+
+
+def test_migrate_concurrent_connections_race_safe(tmp_path):
+    """Regression: open_service() opens a fresh connection per web request,
+    so two requests landing while a migration is still pending can both see
+    it unapplied and race to insert the same schema_migrations row. Each
+    should instead re-check under the write lock and one should no-op."""
+    path = tmp_path / "race.sqlite3"
+    conn0 = sqlite3.connect(str(path), isolation_level=None)
+    conn0.execute("PRAGMA journal_mode=WAL")
+    for version, sql in migrations.MIGRATIONS[:-1]:
+        conn0.execute("BEGIN IMMEDIATE")
+        for stmt in migrations._split_statements(sql):
+            conn0.execute(stmt)
+        conn0.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (version, "2024-01-01T00:00:00Z"),
+        )
+        conn0.execute("COMMIT")
+    conn0.close()
+
+    barrier = threading.Barrier(2)
+    errors: list[Exception] = []
+
+    def worker():
+        conn = sqlite3.connect(str(path), isolation_level=None, timeout=30)
+        conn.execute("PRAGMA busy_timeout=30000")
+        barrier.wait()
+        try:
+            migrations.migrate(conn)
+        except Exception as exc:  # pragma: no cover - failure path under test
+            errors.append(exc)
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+
+    conn = sqlite3.connect(str(path))
+    versions = [
+        r[0] for r in conn.execute("SELECT version FROM schema_migrations ORDER BY version")
+    ]
+    conn.close()
+    assert versions == [v for v, _ in migrations.MIGRATIONS]
 
 
 def test_upsert_classifies_created_updated_unchanged(storage):
@@ -92,6 +147,22 @@ def test_soft_delete_missing_and_undelete(storage):
         )
     ]
     assert kinds == ["created", "deleted", "undeleted"]
+
+
+def test_tag_scoped_live_ids_and_sweep(storage):
+    src, run = _setup(storage)
+    storage.upsert_items(src.id, run, [
+        _item("a1", "h1", tags=["A"]), _item("a2", "h2", tags=["A"]),
+        _item("b1", "h3", tags=["B"]), _item("n1", "h4", tags=[]),
+    ])
+    assert storage.live_external_ids(src.id, tag="A") == {"a1", "a2"}
+    assert storage.live_external_ids(src.id) == {"a1", "a2", "b1", "n1"}
+
+    # A tag-scoped sweep only considers items carrying that tag: a2 goes,
+    # while b1 (other tag) and n1 (untagged) are not candidates at all.
+    run2 = storage.begin_run(src.id, "test:fake", "reconcile", None)
+    assert storage.soft_delete_missing(src.id, {"a1"}, run2, tag="A") == 1
+    assert storage.live_external_ids(src.id) == {"a1", "b1", "n1"}
 
 
 def test_native_delete_inserts_as_deleted(storage):

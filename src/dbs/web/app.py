@@ -267,7 +267,7 @@ def create_app(
     progress and history like any other run.
     """
     try:
-        from fastapi import Body, FastAPI, HTTPException, Query
+        from fastapi import Body, FastAPI, File, HTTPException, Query
         from fastapi.responses import (
             FileResponse,
             HTMLResponse,
@@ -291,6 +291,7 @@ def create_app(
     from ..core.service import BackupService
     from ..export import EXPORTERS
     from ..export.base import ExportQuery
+    from ..notes_export import export_notes as notes_export_fn
     from ..research.notebooklm_client import (
         DBS_STATE_SUBPATH,
         default_state_present,
@@ -797,26 +798,20 @@ def create_app(
             setupmod.run_commands(setupmod.playwright_install_commands()), capture
         )
 
-    @app.post("/api/connectors/{ctype}/capture")
-    def capture_connector(ctype: str) -> dict[str, Any]:
-        """Connector-level browser login capture (target lives in the dbs dir)."""
-        _require_setup()
-        svc = open_service()
+    def _resolve_connector_capture(svc, ctype: str) -> tuple[Any, str, Path]:
+        """Resolve ``(spec, target, env_path)`` for a connector-level capture/import."""
         try:
-            try:
-                rc = svc.registry.get(ctype)
-            except ConnectorLoadError as exc:
-                raise HTTPException(status_code=404, detail=str(exc))
-            spec = rc.cls.auth_capture
-            base = svc.config.base_dir
-        finally:
-            svc.close()
+            rc = svc.registry.get(ctype)
+        except ConnectorLoadError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        spec = rc.cls.auth_capture
+        base = svc.config.base_dir
         if spec is None:
             raise HTTPException(status_code=400, detail=f"{ctype!r} has no interactive auth capture")
         if spec.target_dir_option:
             raise HTTPException(
                 status_code=400,
-                detail=f"{ctype!r} captures per source — use POST /api/sources/{{name}}/capture",
+                detail=f"{ctype!r} captures per source — use the {{name}} source endpoint instead",
             )
         if spec.kind == "browser_session":
             target = str((base / f".{ctype}-session").resolve())
@@ -824,7 +819,48 @@ def create_app(
             target = str((base / f".{ctype}-cookies.txt").resolve())
         else:
             raise HTTPException(status_code=400, detail=f"unsupported capture kind {spec.kind!r}")
-        env_path = base / ".env"
+        return spec, target, base / ".env"
+
+    def _resolve_source_capture(svc, name: str) -> tuple[Any, str, Path]:
+        """Resolve ``(spec, target, env_path)`` for a per-source capture/import.
+
+        For connectors whose ``AuthCapture`` sets ``target_dir_option`` — the
+        session artifact is written under a directory named in that source's
+        config (e.g. an external tool's checkout) rather than the dbs dir.
+        """
+        sc = svc.config.sources.get(name)
+        if sc is None:
+            raise HTTPException(status_code=404, detail=f"no such source {name!r}")
+        try:
+            rc = svc.registry.get(sc.type)
+        except ConnectorLoadError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        spec = rc.cls.auth_capture
+        env_path = svc.config.base_dir / ".env"
+        if spec is None or not spec.target_dir_option:
+            raise HTTPException(status_code=400, detail=f"{sc.type!r} has no per-source login capture")
+        try:
+            cfg = rc.cls.config_model(**sc.options)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"invalid config for {name!r}: {exc}")
+        target_dir = getattr(cfg, spec.target_dir_option, None)
+        if not target_dir:
+            raise HTTPException(
+                status_code=400,
+                detail=f"set {spec.target_dir_option!r} in the {name!r} source config first",
+            )
+        target = str((Path(target_dir).expanduser() / spec.target_path).resolve())
+        return spec, target, env_path
+
+    @app.post("/api/connectors/{ctype}/capture")
+    def capture_connector(ctype: str) -> dict[str, Any]:
+        """Connector-level browser login capture (target lives in the dbs dir)."""
+        _require_setup()
+        svc = open_service()
+        try:
+            spec, target, env_path = _resolve_connector_capture(svc, ctype)
+        finally:
+            svc.close()
 
         def on_success() -> None:
             if spec.secret_key:
@@ -838,37 +874,11 @@ def create_app(
 
     @app.post("/api/sources/{name}/capture")
     def source_capture(name: str) -> dict[str, Any]:
-        """Per-source browser login capture (target lives in the source's tool dir).
-
-        For connectors whose ``AuthCapture`` sets ``target_dir_option`` — the
-        session artifact is written under a directory named in that source's
-        config (e.g. an external tool's checkout) rather than the dbs dir.
-        """
+        """Per-source browser login capture (target lives in the source's tool dir)."""
         _require_setup()
         svc = open_service()
         try:
-            sc = svc.config.sources.get(name)
-            if sc is None:
-                raise HTTPException(status_code=404, detail=f"no such source {name!r}")
-            try:
-                rc = svc.registry.get(sc.type)
-            except ConnectorLoadError as exc:
-                raise HTTPException(status_code=404, detail=str(exc))
-            spec = rc.cls.auth_capture
-            env_path = svc.config.base_dir / ".env"
-            if spec is None or not spec.target_dir_option:
-                raise HTTPException(status_code=400, detail=f"{sc.type!r} has no per-source login capture")
-            try:
-                cfg = rc.cls.config_model(**sc.options)
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=f"invalid config for {name!r}: {exc}")
-            target_dir = getattr(cfg, spec.target_dir_option, None)
-            if not target_dir:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"set {spec.target_dir_option!r} in the {name!r} source config first",
-                )
-            target = str((Path(target_dir).expanduser() / spec.target_path).resolve())
+            spec, target, env_path = _resolve_source_capture(svc, name)
         finally:
             svc.close()
 
@@ -881,6 +891,77 @@ def create_app(
         except JobAlreadyRunning as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         return {**job.snapshot(), "target": target}
+
+    def _write_import(spec, target: str, data: bytes) -> str:
+        """Validate an uploaded desktop-captured artifact and write it into place.
+
+        Mirrors what :func:`~dbs.web.setup.browser_capture_runner` writes on a
+        live capture, so downstream connectors can't tell the two apart.
+        Validates fully before writing anything — a malformed upload leaves no
+        partial file behind.
+        """
+        target_path = Path(target)
+        if spec.kind == "browser_cookies":
+            text = data.decode("utf-8", errors="replace")
+            try:
+                setupmod.validate_netscape_cookies(text)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(text, encoding="utf-8")
+            return f"Imported cookies to {target}"
+        if spec.kind == "browser_storage_state":
+            text = data.decode("utf-8", errors="replace")
+            try:
+                state = setupmod.validate_storage_state(text)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(json.dumps(state), encoding="utf-8")
+            (target_path.parent / "cookies.txt").write_text(
+                setupmod.to_netscape_cookies(state.get("cookies", [])), encoding="utf-8"
+            )
+            return f"Imported storageState to {target}"
+        if spec.kind == "browser_session":
+            try:
+                setupmod.extract_session_zip(data, target_path)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            return f"Imported session profile to {target}"
+        raise HTTPException(status_code=400, detail=f"unsupported capture kind {spec.kind!r}")
+
+    @app.post("/api/connectors/{ctype}/import")
+    def import_connector(ctype: str, file: bytes = File(...)) -> dict[str, Any]:
+        """Import a desktop-captured auth artifact for a connector-level capture.
+
+        The counterpart to browser capture for headless servers: capture on a
+        machine with a display via ``dbs capture <ctype>``, then upload the
+        resulting artifact here instead of running a browser on the server host.
+        """
+        _require_setup()
+        svc = open_service()
+        try:
+            spec, target, env_path = _resolve_connector_capture(svc, ctype)
+        finally:
+            svc.close()
+        note = _write_import(spec, target, file)
+        if spec.secret_key:
+            envfile.set_var(env_path, spec.secret_key, target)
+        return {"status": "ok", "target": target, "secret_key": spec.secret_key, "note": note}
+
+    @app.post("/api/sources/{name}/import")
+    def import_source(name: str, file: bytes = File(...)) -> dict[str, Any]:
+        """Import a desktop-captured auth artifact for a per-source capture."""
+        _require_setup()
+        svc = open_service()
+        try:
+            spec, target, env_path = _resolve_source_capture(svc, name)
+        finally:
+            svc.close()
+        note = _write_import(spec, target, file)
+        if spec.secret_key:
+            envfile.set_var(env_path, spec.secret_key, target)
+        return {"status": "ok", "target": target, "secret_key": spec.secret_key, "note": note}
 
     @app.get("/api/setup/current")
     def setup_current() -> dict[str, Any]:
@@ -962,6 +1043,19 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc))
         return job.snapshot()
 
+    @app.post("/api/backup/{job_id}/cancel")
+    def cancel_backup(job_id: int) -> dict[str, Any]:
+        """Request a graceful early stop of a running backup ("Stop" button).
+
+        Cooperative: the in-flight source finishes committing and no further
+        source starts, so the job keeps running briefly, then reports ``done``
+        with whatever completed. 404 if the job is unknown; ``stopping`` is
+        False if it had already finished.
+        """
+        if jobs.get(job_id) is None:
+            raise HTTPException(status_code=404, detail=f"no such job {job_id}")
+        return {"job_id": job_id, "stopping": jobs.cancel(job_id)}
+
     @app.get("/api/backup/current")
     def backup_current() -> dict[str, Any]:
         return jobs.current() or {"status": "idle"}
@@ -1037,6 +1131,38 @@ def create_app(
             filename=f"dbs-export.{ext}",
             background=BackgroundTask(lambda: shutil.rmtree(tmp_dir, ignore_errors=True)),
         )
+
+    @app.post("/api/export-notes")
+    def export_notes_route(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """Write one Markdown note per item into a server-side directory.
+
+        Unlike ``/api/export`` this doesn't stream a download — it writes loose
+        files on the host for a folder-watching downstream consumer (e.g.
+        remind_me). Incremental by default, same as ``dbs export-notes``.
+        """
+        out_dir = (payload.get("out_dir") or "").strip()
+        if not out_dir:
+            raise HTTPException(status_code=400, detail="'out_dir' is required")
+        try:
+            since = _parse_date(payload.get("since"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"bad date: {exc}")
+        sources = payload.get("source") or None
+        item_types = payload.get("type") or None
+        svc = open_service()
+        try:
+            result = notes_export_fn(
+                svc, out_dir,
+                sources=sources, item_types=item_types,
+                since=since, incremental=not bool(payload.get("full")),
+            )
+        finally:
+            svc.close()
+        return {
+            "item_count": result.item_count,
+            "path": result.path,
+            "since": result.extra.get("since"),
+        }
 
     # -- research (topic -> NotebookLM -> markdown report) -------------------
     # Long-running jobs on their own SetupManager-style log stream; the

@@ -16,7 +16,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, Iterator, Mapping
+from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Iterator, Mapping
 
 import httpx
 
@@ -34,6 +34,7 @@ from .errors import (
     SourceLockedError,
 )
 from .http import ManagedHTTPClient
+from .netns import in_named_netns, named_netns_exists
 from .models import (
     ConnectorInfo,
     Cursor,
@@ -51,6 +52,9 @@ from .models import (
 )
 from .registry import ConnectorRegistry
 from .secrets import Secrets
+
+if TYPE_CHECKING:
+    from .cancel import CancelToken
 
 _DEFAULT_RECONCILE_EVERY = 7
 # Per-cadence "due again after" windows. Each is deliberately short of its
@@ -151,6 +155,7 @@ class BackupService:
         dry_run: bool = False,
         limit: int | None = None,
         on_progress: ProgressCallback | None = None,
+        cancel: "CancelToken | None" = None,
         _reap: bool = True,
     ) -> RunResult:
         # Crash recovery: flip stale 'running' runs to 'interrupted'. backup_all
@@ -167,6 +172,10 @@ class BackupService:
                 source=name, status=RunStatus.SKIPPED, started_at=now,
                 finished_at=now, error="source disabled",
             )
+
+        vpn_skip = self._vpn_guard_skip(name, sc)
+        if vpn_skip is not None:
+            return vpn_skip
 
         rc = self.registry.get(sc.type)
         try:
@@ -230,6 +239,7 @@ class BackupService:
                 store_media=sc.store_media,
                 max_media_bytes=max(0, sc.max_media_mb) * 1024 * 1024,
                 download_dir=self.config.download_dir_for(name),
+                cancel=cancel,
             )
             result = self.engine.run_source(rc, ctx, on_progress=on_progress)
         finally:
@@ -257,7 +267,11 @@ class BackupService:
         continue_on_error: bool = True,
         limit: int | None = None,
         parallel: int | None = None,
+        force_full: bool = False,
+        force_reconcile: bool = False,
+        dry_run: bool = False,
         on_progress: ProgressCallback | None = None,
+        cancel: "CancelToken | None" = None,
     ) -> list[RunResult]:
         # Reap once, up front, while no run of ours is live yet — a per-source
         # reap inside a parallel batch would flip siblings' running runs.
@@ -271,13 +285,19 @@ class BackupService:
         ]
         total = len(due)
         workers = max(1, parallel if parallel is not None else self.config.parallel)
-        if workers > 1 and total > 1:
+        # A dry-run only resolves each source's chosen mode — no connector runs,
+        # so there is nothing to parallelize; keep it on the simple sequential
+        # path (which threads dry_run through to backup_source).
+        if workers > 1 and total > 1 and not dry_run:
             results = self._backup_all_parallel(
                 due,
                 workers=min(workers, total),
                 continue_on_error=continue_on_error,
                 limit=limit,
+                force_full=force_full,
+                force_reconcile=force_reconcile,
                 on_progress=on_progress,
+                cancel=cancel,
             )
             if results is not None:
                 return results
@@ -286,11 +306,19 @@ class BackupService:
             )
         results = []
         for index, (name, sc) in enumerate(due, start=1):
+            # A manual stop halts before the next source starts; whatever has
+            # already run is returned. The in-flight source (if any) has
+            # already committed and returned by the time we get here.
+            if cancel is not None and cancel.cancelled:
+                break
             framed = self._frame_progress(on_progress, index, total)
             try:
                 results.append(
                     self.backup_source(
-                        name, limit=limit, on_progress=framed, _reap=False
+                        name, limit=limit,
+                        force_full=force_full, force_reconcile=force_reconcile,
+                        dry_run=dry_run, on_progress=framed, cancel=cancel,
+                        _reap=False,
                     )
                 )
             except Exception as exc:  # isolation: one source must not abort others
@@ -312,7 +340,10 @@ class BackupService:
         workers: int,
         continue_on_error: bool,
         limit: int | None,
+        force_full: bool = False,
+        force_reconcile: bool = False,
         on_progress: ProgressCallback | None,
+        cancel: "CancelToken | None" = None,
     ) -> list[RunResult] | None:
         """Run the work-list on a bounded thread pool (``--parallel N``).
 
@@ -364,7 +395,12 @@ class BackupService:
 
         total = len(due)
 
-        def run_one(index: int, name: str, sc: SourceConfig) -> RunResult:
+        def run_one(index: int, name: str, sc: SourceConfig) -> RunResult | None:
+            # A source not yet started when the stop lands is simply skipped
+            # (returns None, dropped from results below); a source already
+            # in-flight gets the token via its RunContext and stops itself.
+            if cancel is not None and cancel.cancelled:
+                return None
             framed = self._frame_progress(safe_progress, index, total)
             svc = service_for_thread()
             serial = False
@@ -376,10 +412,14 @@ class BackupService:
             if serial:
                 with serial_gate:
                     return svc.backup_source(
-                        name, limit=limit, on_progress=framed, _reap=False
+                        name, limit=limit,
+                        force_full=force_full, force_reconcile=force_reconcile,
+                        on_progress=framed, cancel=cancel, _reap=False,
                     )
             return svc.backup_source(
-                name, limit=limit, on_progress=framed, _reap=False
+                name, limit=limit,
+                force_full=force_full, force_reconcile=force_reconcile,
+                on_progress=framed, cancel=cancel, _reap=False,
             )
 
         results: list[RunResult | None] = [None] * total
@@ -436,6 +476,57 @@ class BackupService:
             on_progress(ev)
 
         return framed
+
+    def _vpn_doctor_check(self, name: str) -> "DoctorCheck":
+        """Readiness of a requires_vpn source's VPN routing (see _vpn_guard_skip)."""
+        cfg = self.config
+        ns = cfg.vpn_netns
+        key = f"source.{name}.vpn"
+        if cfg.vpn_guard == "off":
+            return DoctorCheck(key, "ok", "requires_vpn set but vpn_guard=off (not enforced)")
+        if in_named_netns(ns):
+            return DoctorCheck(key, "ok", f"running inside the {ns!r} netns")
+        if named_netns_exists(ns):
+            return DoctorCheck(
+                key, "ok",
+                f"requires VPN; the {ns!r} netns is up — run via "
+                f"`{cfg.vpn_exec} dbs backup {name}` (a direct run here is skipped)",
+            )
+        return DoctorCheck(
+            key, "warn",
+            f"requires VPN but the {ns!r} netns is not up — start it (e.g. "
+            f"`sudo systemctl start vpn-netns`), then run via `{cfg.vpn_exec}`",
+        )
+
+    def _vpn_guard_skip(self, name: str, sc: SourceConfig) -> RunResult | None:
+        """Guard a ``requires_vpn`` source against running off-VPN.
+
+        Returns a SKIPPED result to abort the run when the source must go
+        through the VPN but this process is not inside ``vpn_netns`` — so an
+        off-VPN ``dbs backup`` can't silently expose the host IP (the recorded
+        failure mode for the IP-blocked youtube/skool connectors). ``vpn_guard``
+        downgrades this to a warning (``warn``) or disables it (``off``); when
+        already inside the namespace the run proceeds normally.
+        """
+        cfg = self.config
+        if not sc.requires_vpn or cfg.vpn_guard == "off":
+            return None
+        if in_named_netns(cfg.vpn_netns):
+            return None
+        msg = (
+            f"{name} is marked requires_vpn but this process is not in the "
+            f"{cfg.vpn_netns!r} network namespace — run it through the VPN "
+            f"wrapper, e.g. `{cfg.vpn_exec} dbs backup {name}`"
+        )
+        if cfg.vpn_guard == "warn":
+            logger.warning("%s (proceeding anyway: vpn_guard=warn)", msg)
+            return None
+        logger.warning("skipping %s", msg)
+        now = self.clock()
+        return RunResult(
+            source=name, status=RunStatus.SKIPPED, started_at=now,
+            finished_at=now, error=msg,
+        )
 
     def _choose_mode(
         self,
@@ -1039,6 +1130,8 @@ class BackupService:
                 "runtime dependencies importable" if ready
                 else f"missing optional deps — {hint or 'see the connector docs'}",
             ))
+            if sc.requires_vpn:
+                checks.append(self._vpn_doctor_check(name))
             declared = tuple(rc.cls.secret_keys)
             if rc.cls.capabilities.requires_auth and declared:
                 present = [k for k in declared if self.secret_store.get(k)]

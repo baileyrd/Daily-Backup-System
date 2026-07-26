@@ -106,3 +106,39 @@ js_runtimes) since those have real, confirmed failure modes of their own —
 but if all of them check out and it still fails, test the same request over
 a different network before assuming there's a remaining code bug to find.
 There may not be one.
+
+## 4. `export-notes` follow-ups (remind_me integration, option 1 SHIPPED)
+
+`dbs export-notes` (unzipped Obsidian notes for a folder-watching consumer
+like remind_me — see
+[docs/remind-me-integration-review-2026-07-21.md](remind-me-integration-review-2026-07-21.md))
+is deliberately the low-effort "option 1" stepping stone, not the end state.
+Known gaps, left for whoever picks up the next tier:
+
+- ~~**Incremental cutoff is `item_created_at` only**~~ — **FIXED** (#87).
+  `ExportQuery` gained `since_updated`/`until_updated` (filtering on
+  `item_updated_at`, AND-ed with everything else per its docstring — no OR
+  semantics in the query itself). `export_notes` now issues two queries
+  when a cutoff is in effect — one on `since`, one on `since_updated` — and
+  unions the results by `(source, external_id)` identity, so an item edited
+  after its creation date gets its note rewritten in place instead of
+  staying stale. `dbs export`/`dbs export --since-updated` gained the same
+  filter for direct use outside `export_notes`.
+- **`export_notes`'s cross-run filename-collision map
+  (`src/dbs/notes_export.py`) is a workaround**, not a first-class identity
+  system — it exists only because the obsidian zip exporter's own
+  `seen_names` dedup is scoped to one call. Option 3 in the integration
+  review — a dedicated `dbs` import connector in remind_me that reads
+  `(source, external_id)` rows directly instead — has since shipped
+  ([`remind_me_mcp/dbs_import.py`](https://github.com/baileyrd/remind_me/blob/main/remind_me_mcp/dbs_import.py)),
+  with no such workaround needed there. This one stays local to
+  `notes_export.py`'s own file-based identity problem and isn't worth
+  removing — the two paths serve different fidelity/effort tradeoffs (see
+  `docs/remind-me-integration-review-2026-07-21.md`), not one superseding
+  the other.
+- **No delete propagation.** An item that gets deleted upstream (and swept
+  by dbs) leaves its note behind in the watched directory forever — `dbs
+  export-notes` only ever adds files, matching `export`'s existing
+  `include_deleted=False` default everywhere else, but it means the two
+  stores can drift apart over time for anyone who churns through sources
+  with real deletions (most of dbs's connectors barely see any).

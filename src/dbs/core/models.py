@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from .capabilities import Capabilities, ItemKind
 
 if TYPE_CHECKING:  # avoid importing httpx/secrets at model import time
+    from .cancel import CancelToken
     from .http import ManagedHTTPClient
     from .secrets import Secrets
 
@@ -127,6 +128,18 @@ class ReconcileMarker:
     After a *successful* full/reconcile run the engine soft-deletes any
     non-deleted item whose ``external_id`` is absent from ``live_ids``. Honored
     only when the connector declares ``supports_full_enumeration``.
+
+    ``scope`` bounds the sweep's candidate set:
+
+    * ``"source"`` (default) — every live item of the source is a candidate.
+    * ``"tag:<value>"`` — only live items carrying that tag are candidates.
+      A connector whose enumeration is complete per-partition but not overall
+      (e.g. skool: each fully-walked community, while an unjoined community is
+      absent from discovery entirely) yields one marker per completed
+      partition; items of partitions with no marker are never touched.
+
+    A connector may yield several markers. Markers with the same scope are
+    unioned; the engine sweeps (and applies its safety fraction) per scope.
     """
 
     live_ids: set[str]
@@ -162,6 +175,20 @@ class RunContext:
     # by the service. Connectors that write files should default to it; an
     # explicit per-source option (e.g. skool's downloads_dir) still wins.
     download_dir: Path | None = None
+    # Connector-reported soft failures for this run — things that did not abort
+    # the run but did not fully succeed either (e.g. a media download that
+    # failed and will retry next run). The engine reads this at finish and
+    # records it on the run so it is visible in history, not just the logs.
+    items_failed: int = 0
+    # Cooperative cancellation signal (CLI Ctrl+C / web "Stop"). The engine
+    # polls it between fetched items and halts gracefully when set — committing
+    # buffered items + the last checkpoint cursor and recording the run
+    # 'interrupted'. None means the run cannot be cancelled.
+    cancel: "CancelToken | None" = None
+
+    def report_failed(self, n: int = 1) -> None:
+        """Record ``n`` connector-side soft failures for this run."""
+        self.items_failed += n
 
 
 # --------------------------------------------------------------------------- #
@@ -194,11 +221,18 @@ class RunResult:
     deleted: int = 0
     undeleted: int = 0
     revisions: int = 0
+    # Connector-reported soft failures (e.g. media that failed and will retry).
+    items_failed: int = 0
     error: str | None = None
     # "Succeeded with caveats" — e.g. a refused deletion sweep or a zero-item
     # run. Kept separate from `error` so a SUCCESS run's caveats are visible
     # without masquerading as a failure (and vice versa).
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def duration_ms(self) -> int:
+        """Wall-clock milliseconds from start to finish."""
+        return max(0, int((self.finished_at - self.started_at).total_seconds() * 1000))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -208,6 +242,7 @@ class RunResult:
             "run_id": self.run_id,
             "started_at": self.started_at.isoformat(),
             "finished_at": self.finished_at.isoformat(),
+            "duration_ms": self.duration_ms,
             "fetched": self.fetched,
             "created": self.created,
             "updated": self.updated,
@@ -215,6 +250,7 @@ class RunResult:
             "deleted": self.deleted,
             "undeleted": self.undeleted,
             "revisions": self.revisions,
+            "items_failed": self.items_failed,
             "error": self.error,
             "warnings": list(self.warnings),
         }

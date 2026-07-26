@@ -70,6 +70,11 @@ def _lesson(lid="les1", title="Lesson 1", updated="2024-01-01T00:00:00Z", **kw):
     return rec
 
 
+def _complete(name="Community A"):
+    """The control event _walk emits after fully enumerating a community."""
+    return {"_kind": "_community_complete", "groupName": name}
+
+
 def _connector(records):
     class FakeSkool(SkoolConnector):
         _records = list(records)
@@ -101,6 +106,7 @@ def test_maps_hierarchy_and_one_reconcile_marker():
                 _resources=[{"path": "/dl/comm-a/Course X/les1/notes.pdf",
                              "filename": "notes.pdf", "mime": "application/pdf"}]),
         _lesson("les2"),
+        _complete(),
     ])
     events = list(conn.fetch(_ctx()))
     items = [e for e in events if isinstance(e, BackupItem)]
@@ -110,6 +116,7 @@ def test_maps_hierarchy_and_one_reconcile_marker():
     assert set(by_id) == {"community:comm-a", "course:comm-a/Course X", "les1", "les2"}
     assert {i.item_kind for i in items} == {"community", "course", "lesson"}
     assert len(markers) == 1
+    assert markers[0].scope == "tag:Community A"
     assert markers[0].live_ids == set(by_id)
 
     course = by_id["course:comm-a/Course X"]
@@ -160,51 +167,138 @@ def test_course_selected_matching():
         ["Nope", "chase-ai/claude code masterclass"], "chase-ai", course) is True
 
 
-def test_courses_filter_suppresses_reconcile_marker():
-    # A course filter is a partial enumeration: emitting a ReconcileMarker
-    # would soft-delete everything outside the filter. It must be withheld.
-    cfg = SkoolConfig(downloads_dir="/dl", courses=["Course X"])
+def test_no_marker_for_a_community_without_the_complete_event():
+    # A community whose walk had a gap (a course page failed to load) never
+    # gets a _community_complete event, so no marker is emitted for it and
+    # its already-backed-up items are never sweep-deleted.
+    cfg = SkoolConfig(downloads_dir="/dl")  # no communities/courses filter
     conn = _connector([_community(), _course(), _lesson("les1")])
     events = list(conn.fetch(_ctx(cfg)))
     assert [e for e in events if isinstance(e, ReconcileMarker)] == []
     assert any(isinstance(e, BackupItem) for e in events)  # items still flow
 
 
-def test_communities_filter_alone_also_suppresses_reconcile_marker():
-    # Same partial-enumeration risk as `courses`, but via `communities` only
-    # — previously only `cfg.courses` was checked, so this alone would have
-    # let a ReconcileMarker through and soft-deleted every other community.
+def test_communities_filter_still_sweeps_walked_communities():
+    # With per-community scoping, a `communities` filter no longer disables
+    # deletion detection wholesale: the walked community sweeps within its own
+    # tag scope, while unselected communities have no marker and are safe.
     cfg = SkoolConfig(downloads_dir="/dl", communities=["comm-a"])
-    conn = _connector([_community(), _course(), _lesson("les1")])
+    conn = _connector([_community(), _course(), _lesson("les1"), _complete()])
     events = list(conn.fetch(_ctx(cfg)))
-    assert [e for e in events if isinstance(e, ReconcileMarker)] == []
-    assert any(isinstance(e, BackupItem) for e in events)
+    markers = [e for e in events if isinstance(e, ReconcileMarker)]
+    assert len(markers) == 1
+    assert markers[0].scope == "tag:Community A"
 
 
-def test_partial_enumeration_marker_suppresses_reconcile_even_unfiltered():
-    # A course whose classroom page transiently failed to load leaves its
-    # lessons out of live_ids for reasons that have nothing to do with any
-    # configured filter — a plain ReconcileMarker here would still wrongly
-    # soft-delete that course's lessons.
-    cfg = SkoolConfig(downloads_dir="/dl")  # no communities/courses filter
-    conn = _connector([_community(), {"_kind": "_partial_enumeration"}, _lesson("les1")])
-    events = list(conn.fetch(_ctx(cfg)))
-    assert [e for e in events if isinstance(e, ReconcileMarker)] == []
-    assert any(isinstance(e, BackupItem) for e in events)
+def test_one_marker_per_complete_community_only():
+    # Two communities interleave; only Community A finished cleanly. Its
+    # marker carries exactly its own ids — Community B's are absent, so B is
+    # untouched by the sweep.
+    lesson_b = _lesson("les-b", _group_name="Community B", _course_name="Course Y")
+    conn = _connector([
+        _community(), _lesson("les-a"),
+        _community(slug="comm-b", name="Community B"), lesson_b,
+        _complete("Community A"),
+    ])
+    events = list(conn.fetch(_ctx()))
+    markers = [e for e in events if isinstance(e, ReconcileMarker)]
+    assert len(markers) == 1
+    assert markers[0].scope == "tag:Community A"
+    assert markers[0].live_ids == {"community:comm-a", "les-a"}
 
 
-def test_walk_flags_partial_when_community_classroom_fails_to_load(tmp_path):
+def test_walk_emits_no_complete_event_when_classroom_fails_to_load(tmp_path):
     # A community whose classroom page yields no __NEXT_DATA__ leaves every
-    # course and lesson it contains out of live_ids — the same gap as a failed
-    # course fetch. _walk must emit the partial-enumeration sentinel rather
-    # than skip silently, or the sweep would soft-delete the whole community.
+    # course and lesson it contains out of this run's live ids — _walk must
+    # withhold its _community_complete event, or the sweep would soft-delete
+    # the whole community.
     class _NoData(SkoolConnector):
         def _classroom_next_data(self, page, slug, ctx, course_slug=None):
             return None
 
     cfg = SkoolConfig(communities=["c1"], downloads_dir=str(tmp_path))
     out = list(_NoData()._walk(object(), cfg, tmp_path, _ctx(cfg)))
-    assert {"_kind": "_partial_enumeration"} in out
+    assert [r for r in out if r.get("_kind") == "_community_complete"] == []
+
+
+class _WalkableSkool(SkoolConnector):
+    """One community, one course ("Intro"), one lesson — walked offline."""
+
+    def _classroom_next_data(self, page, slug, ctx, course_slug=None):
+        if course_slug is None:
+            return {"props": {"pageProps": {
+                "currentGroup": {"name": slug, "metadata": {"displayName": "Community A"}},
+                "allCourses": [{"id": "c1", "name": "intro",
+                                "metadata": {"title": "Intro"}}],
+            }}}
+        return {"props": {"pageProps": {"course": {"children": [
+            {"course": {"id": "l1", "metadata": {"title": "Lesson 1"}}, "children": []},
+        ]}}}}
+
+    def _process_lesson(self, page, lesson, lesson_dir, slug, course_slug,
+                        cfg, ctx, *, downloads_enabled=True):
+        type(self).seen_downloads_enabled = downloads_enabled
+        return "cached"
+
+
+def test_walk_emits_complete_event_after_clean_community(tmp_path):
+    cfg = SkoolConfig(communities=["comm-a"], downloads_dir=str(tmp_path))
+    out = list(_WalkableSkool()._walk(object(), cfg, tmp_path, _ctx(cfg)))
+    assert _complete() in out
+    assert any(r.get("_kind") == "lesson" for r in out)
+
+
+def test_walk_withholds_complete_event_when_courses_filtered(tmp_path):
+    # A course filtered out leaves its lessons unenumerated: the community is
+    # partial, so it must not offer itself for a sweep.
+    cfg = SkoolConfig(
+        communities=["comm-a"], courses=["No Such Course"], downloads_dir=str(tmp_path)
+    )
+    out = list(_WalkableSkool()._walk(object(), cfg, tmp_path, _ctx(cfg)))
+    assert [r for r in out if r.get("_kind") == "_community_complete"] == []
+
+
+def test_no_download_communities_disables_lesson_downloads(tmp_path):
+    # A community listed in no_download_communities is walked with downloads
+    # disabled (catalog-only) — and still finishes complete, so its stale
+    # catalog entries are swept.
+    cfg = SkoolConfig(
+        communities=["comm-a"], no_download_communities=["comm-a"],
+        downloads_dir=str(tmp_path),
+    )
+    out = list(_WalkableSkool()._walk(object(), cfg, tmp_path, _ctx(cfg)))
+    assert _WalkableSkool.seen_downloads_enabled is False
+    assert _complete() in out
+
+
+def test_process_lesson_skips_without_downloads_but_keeps_cached(tmp_path):
+    conn = SkoolConnector()
+    cfg = SkoolConfig(downloads_dir=str(tmp_path), write_markdown=False)
+    ctx = _ctx(cfg)
+
+    # Not on disk yet: indexed from tree data alone, no page visit (the fake
+    # page would explode if one were attempted), no failure reported.
+    lesson = _lesson("les1")
+    outcome = conn._process_lesson(
+        object(), lesson, tmp_path / "les1", "comm-a", "c1", cfg, ctx,
+        downloads_enabled=False,
+    )
+    assert outcome == "skipped"
+    assert ctx.items_failed == 0
+
+    # Already complete on disk (sidecar from a paid-era run): still "cached",
+    # with the sidecar's fields merged, exactly as with downloads enabled.
+    lesson_dir = tmp_path / "les2"
+    lesson_dir.mkdir(parents=True)
+    (lesson_dir / ".meta.json").write_text(json.dumps({
+        "lessonId": "les2", "videoId": None, "videoLink": None,
+        "video_downloaded": False, "no_native_video": True, "resources": [],
+    }))
+    outcome = conn._process_lesson(
+        object(), _lesson("les2"), lesson_dir, "comm-a", "c1", cfg, ctx,
+        downloads_enabled=False,
+    )
+    assert outcome == "cached"
 
 
 def test_discover_communities_raises_instead_of_silent_zero_item_backup(tmp_path):
@@ -229,7 +323,7 @@ def test_discover_communities_raises_instead_of_silent_zero_item_backup(tmp_path
 
 def test_include_kinds_filter_keeps_excluded_ids_live():
     cfg = SkoolConfig(downloads_dir="/dl", include_kinds=["lesson"])
-    conn = _connector([_community(), _course(), _lesson("les1")])
+    conn = _connector([_community(), _course(), _lesson("les1"), _complete()])
     events = list(conn.fetch(_ctx(cfg)))
     items = [e for e in events if isinstance(e, BackupItem)]
     marker = next(e for e in events if isinstance(e, ReconcileMarker))
@@ -576,15 +670,35 @@ def _run(storage, conn, *, mode="full"):
 def test_engine_soft_deletes_removed_lessons(storage):
     src, r1 = _run(storage, _connector([
         _community(), _course(), _lesson("les1"), _lesson("les2"), _lesson("les3"),
+        _complete(),
     ]))
     assert r1.created == 5
 
     _src, r2 = _run(storage, _connector([
-        _community(), _course(), _lesson("les1"), _lesson("les3"),
+        _community(), _course(), _lesson("les1"), _lesson("les3"), _complete(),
     ]))
     assert r2.deleted == 1
     total, live, gone = storage.item_counts(src.id)
     assert (total, live, gone) == (5, 4, 1)
+
+
+def test_engine_leaves_unwalked_community_untouched(storage):
+    # Community B was backed up once, then vanished from discovery (e.g. a
+    # membership the user dropped). Later runs that never see B must leave its
+    # items live — B has no marker, so no sweep can touch it.
+    lesson_b = _lesson("les-b", _group_name="Community B", _course_name="Course Y")
+    src, _ = _run(storage, _connector([
+        _community(), _lesson("les-a"),
+        _community(slug="comm-b", name="Community B"), lesson_b,
+        _complete("Community A"), _complete("Community B"),
+    ]))
+
+    _src, r2 = _run(storage, _connector([
+        _community(), _lesson("les-a"), _complete("Community A"),
+    ]))
+    assert r2.deleted == 0
+    _total, live, _gone = storage.item_counts(src.id)
+    assert live == 4
 
 
 def test_volatile_updatedat_does_not_spawn_revisions(storage):

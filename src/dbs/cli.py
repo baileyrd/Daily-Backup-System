@@ -16,16 +16,18 @@ from __future__ import annotations
 import json
 import logging
 import re
+import signal
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, TextIO
+from typing import Callable, Optional, TextIO
 
 import typer
 
 from . import CORE_API_VERSION, __version__
 from .config import load_config
+from .core.cancel import CancelToken
 from .core.errors import (
     BackupRunError,
     ConfigError,
@@ -36,6 +38,7 @@ from .core.errors import (
 from .core.models import ProgressEvent, ProgressPhase, RunResult, RunStatus
 from .core.service import BackupService
 from .export.base import ExportQuery
+from .notes_export import export_notes as _export_notes
 from .templates import CONFIG_TEMPLATE, ENV_TEMPLATE
 
 app = typer.Typer(
@@ -138,6 +141,17 @@ def _human_bytes(n: int) -> str:
     return f"{value:,.1f} TiB"
 
 
+def _human_duration(ms: int | None) -> str:
+    """Compact wall-clock duration, e.g. '0.8s', '55.0s', '2m45s'. '-' if unknown."""
+    if ms is None:
+        return "-"
+    secs = ms / 1000
+    if secs < 60:
+        return f"{secs:.1f}s"
+    minutes, secs = divmod(int(secs), 60)
+    return f"{minutes}m{secs:02d}s"
+
+
 def _status_color(status: str) -> str:
     return {
         "success": typer.colors.GREEN,
@@ -149,10 +163,12 @@ def _status_color(status: str) -> str:
 
 
 def _print_run(r: RunResult) -> None:
+    failed = f" !{r.items_failed}" if r.items_failed else ""
     typer.secho(
         f"  {r.source:<24} {r.status.value:<11} "
         f"[{r.mode}] +{r.created} ~{r.updated} ={r.unchanged} "
-        f"x{r.deleted} ^{r.undeleted} (fetched {r.fetched})",
+        f"x{r.deleted} ^{r.undeleted}{failed} (fetched {r.fetched}) "
+        f"{_human_duration(r.duration_ms)}",
         fg=_status_color(r.status.value),
     )
     if r.error:
@@ -235,6 +251,52 @@ class _ProgressRenderer:
         self._clear()
 
 
+def _install_stop_handler(
+    renderer: "_ProgressRenderer", *, all_sources: bool
+) -> tuple[CancelToken, Callable[[], None]]:
+    """Route Ctrl+C into a graceful early stop for a running backup.
+
+    Returns the :class:`CancelToken` to hand to the service plus a callable
+    that restores the previous SIGINT handler (call it in a ``finally``). The
+    first Ctrl+C sets the token — the service stops before the next source and
+    the engine halts the in-flight one at its next item boundary. A second
+    Ctrl+C restores the default handler and raises ``KeyboardInterrupt`` for an
+    immediate abort. Signal handlers can only be installed from the main
+    thread; off the main thread this is a no-op (the backup still runs, just
+    without Ctrl+C cancellation).
+    """
+    cancel = CancelToken()
+    state = {"count": 0}
+
+    def _handle(signum, frame) -> None:  # noqa: ANN001 - signal handler contract
+        state["count"] += 1
+        if state["count"] == 1:
+            cancel.cancel()
+            renderer.close()  # wipe the live line so the message reads cleanly
+            msg = (
+                "\nStopping — the current source will finish, then no more "
+                "start (Ctrl+C again to abort now)."
+                if all_sources
+                else "\nStopping the current backup (Ctrl+C again to abort now)."
+            )
+            typer.secho(msg, fg=typer.colors.YELLOW, err=True)
+        else:
+            signal.signal(signal.SIGINT, original)
+            raise KeyboardInterrupt
+
+    try:
+        original = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, _handle)
+    except ValueError:
+        # Not the main thread — cancellation via Ctrl+C isn't available here.
+        return cancel, lambda: None
+
+    def restore() -> None:
+        signal.signal(signal.SIGINT, original)
+
+    return cancel, restore
+
+
 # --------------------------------------------------------------------------- #
 # commands                                                                     #
 # --------------------------------------------------------------------------- #
@@ -294,15 +356,22 @@ def backup(
         help="Show a live progress status line (default: auto — on for a TTY).",
     ),
 ) -> None:
-    """Back up one source or, with --all, every enabled source."""
+    """Back up one source or, with --all, every enabled source.
+
+    Press Ctrl+C once to stop early: the in-flight source finishes committing
+    and no further source starts (a graceful stop; committed data is kept).
+    Press Ctrl+C a second time to abort immediately.
+    """
     svc = _service()
     show_progress = progress if progress is not None else sys.stderr.isatty()
     renderer = _ProgressRenderer(enabled=show_progress)
+    cancel, restore_sigint = _install_stop_handler(renderer, all_sources=all_sources)
     try:
         if all_sources:
             results = svc.backup_all(
                 only_due=only_due, limit=limit, parallel=parallel,
-                on_progress=renderer,
+                force_full=force_full, force_reconcile=reconcile,
+                dry_run=dry_run, on_progress=renderer, cancel=cancel,
             )
         elif source:
             try:
@@ -310,7 +379,7 @@ def backup(
                     svc.backup_source(
                         source, force_full=force_full,
                         force_reconcile=reconcile, dry_run=dry_run,
-                        limit=limit, on_progress=renderer,
+                        limit=limit, on_progress=renderer, cancel=cancel,
                     )
                 ]
             except SourceLockedError as exc:  # subclass of BackupRunError — must come first
@@ -332,7 +401,12 @@ def backup(
         for r in results:
             _print_run(r)
         raise typer.Exit(_exit_code(results))
+    except KeyboardInterrupt:  # second Ctrl+C: abort now, before results print
+        renderer.close()
+        typer.secho("Aborted.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(130)
     finally:
+        restore_sigint()
         renderer.close()
         svc.close()
 
@@ -380,10 +454,12 @@ def history(
             typer.echo(json.dumps(runs, indent=2, default=str))
             return
         for run in runs:
+            failed = f" !{run['items_failed']}" if run.get("items_failed") else ""
             typer.secho(
                 f"{run['started_at']}  {run.get('source_name','?'):<20} "
                 f"{run['status']:<11} [{run['mode']}] "
-                f"+{run['items_created']} ~{run['items_updated']} x{run['items_deleted']}",
+                f"+{run['items_created']} ~{run['items_updated']} x{run['items_deleted']}{failed}"
+                f"  {_human_duration(run.get('duration_ms'))}",
                 fg=_status_color(run["status"]),
             )
             if run.get("error"):
@@ -540,6 +616,13 @@ def export(
     item_type: Optional[list[str]] = typer.Option(None, "--type", help="Filter by item kind (repeatable)."),
     since: Optional[str] = typer.Option(None, "--since", help="Only items created on/after (YYYY-MM-DD)."),
     until: Optional[str] = typer.Option(None, "--until", help="Only items created on/before."),
+    since_updated: Optional[str] = typer.Option(
+        None, "--since-updated",
+        help="Only items updated (per the source, e.g. Raindrop's lastUpdate) "
+             "on/after this date/time. Independent of --since — an item must "
+             "satisfy both when both are given.",
+    ),
+    until_updated: Optional[str] = typer.Option(None, "--until-updated", help="Only items updated on/before."),
     include_deleted: bool = typer.Option(False, "--include-deleted"),
     include_revisions: bool = typer.Option(False, "--include-revisions", help="(archive) full history."),
     no_raw: bool = typer.Option(False, "--no-raw", help="Omit verbatim raw payloads."),
@@ -562,6 +645,8 @@ def export(
             sources=list(source) if source else None,
             item_types=list(item_type) if item_type else None,
             since=_parse_date(since),
+            since_updated=_parse_date(since_updated),
+            until_updated=_parse_date(until_updated),
             until=_parse_date(until),
             include_deleted=include_deleted,
             include_revisions=include_revisions,
@@ -578,6 +663,50 @@ def export(
             + (f", {result.revision_count} revision(s)" if result.revision_count else "")
             + (f", {media} media file(s)" if media else "")
             + f" to {result.path} ({result.format})",
+            fg=typer.colors.GREEN,
+        )
+    finally:
+        svc.close()
+
+
+@app.command(name="export-notes")
+def export_notes_cmd(
+    out_dir: Path = typer.Option(
+        ..., "--out-dir", "-d",
+        help="Directory to write one Markdown note per item into (e.g. a "
+             "remind_me watched folder).",
+    ),
+    source: Optional[list[str]] = typer.Option(None, "--source", help="Filter by source name (repeatable)."),
+    item_type: Optional[list[str]] = typer.Option(None, "--type", help="Filter by item kind (repeatable)."),
+    since: Optional[str] = typer.Option(
+        None, "--since",
+        help="Only items created on/after this date/time — overrides the "
+             "incremental state file for this run.",
+    ),
+    full: bool = typer.Option(
+        False, "--full",
+        help="Ignore the incremental state file and consider every live item.",
+    ),
+) -> None:
+    """Write one Markdown note per item into a plain directory (unzipped
+    Obsidian-format notes) for a downstream tool that watches a folder for
+    new files — e.g. remind_me's folder watcher. Incremental by default:
+    only items created since the last successful run are written, tracked
+    in <out-dir>/.dbs_export_state.json.
+    """
+    svc = _service()
+    try:
+        result = _export_notes(
+            svc,
+            out_dir,
+            sources=list(source) if source else None,
+            item_types=list(item_type) if item_type else None,
+            since=_parse_date(since),
+            incremental=not full,
+        )
+        since_desc = result.extra.get("since") or "the beginning"
+        typer.secho(
+            f"Wrote {result.item_count} note(s) to {result.path} (since {since_desc})",
             fg=typer.colors.GREEN,
         )
     finally:
@@ -910,6 +1039,106 @@ def serve(
     elif not allow_setup:
         typer.echo("  (setup actions disabled — install/login buttons hidden)")
     uvicorn.run(app_instance, host=host, port=port)
+
+
+@app.command()
+def capture(
+    target: str = typer.Argument(..., help="Connector type or configured source name to capture a login for."),
+    out: Optional[Path] = typer.Option(
+        None, "--out", "-o",
+        help="Where to write the captured artifact. Defaults to ./<target>-cookies.txt / "
+             "-storage_state.json / -session.zip depending on the capture kind.",
+    ),
+) -> None:
+    """Capture a login session on this machine, for import into a headless server.
+
+    Opens a real browser here — the same interactive login the web UI's
+    "Capture via browser" button drives — and writes the result to a local
+    file. Copy that file to the server and import it via
+    ``POST /api/connectors/{type}/import`` (or ``/api/sources/{name}/import``),
+    or the web UI's "Import…" control — instead of needing a display on the
+    server itself.
+    """
+    try:
+        from .web import setup as setupmod
+    except ModuleNotFoundError:
+        typer.secho(
+            "Session capture requires the optional 'web' dependencies. Install them with:\n"
+            "    pip install 'daily-backup-system[web]'",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(4)
+
+    svc = _service()
+    try:
+        try:
+            rc = svc.registry.get(target)
+        except ConnectorLoadError:
+            sc = svc.config.sources.get(target)
+            if sc is None:
+                typer.secho(f"No such connector or source: {target!r}", fg=typer.colors.RED, err=True)
+                raise typer.Exit(4)
+            try:
+                rc = svc.registry.get(sc.type)
+            except ConnectorLoadError as exc:
+                typer.secho(str(exc), fg=typer.colors.RED, err=True)
+                raise typer.Exit(4)
+        spec = rc.cls.auth_capture
+        if spec is None:
+            typer.secho(f"{target!r} has no interactive auth capture.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(4)
+    finally:
+        svc.close()
+
+    if not setupmod.playwright_present():
+        typer.echo("Playwright not found — installing (this only happens once)...")
+        try:
+            setupmod.run_commands(setupmod.playwright_install_commands())(emit=typer.echo)
+        except RuntimeError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(4)
+
+    import shutil
+    import tempfile
+
+    tmp_profile_dir: Optional[str] = None
+    if spec.kind == "browser_session":
+        tmp_profile_dir = tempfile.mkdtemp(prefix="dbs-capture-")
+        capture_target = tmp_profile_dir
+        default_out = Path(f"./{target}-session.zip")
+    elif spec.kind == "browser_cookies":
+        default_out = Path(f"./{target}-cookies.txt")
+        capture_target = str(out or default_out)
+    elif spec.kind == "browser_storage_state":
+        default_out = Path(f"./{target}-storage_state.json")
+        capture_target = str(out or default_out)
+    else:
+        typer.secho(f"Unsupported capture kind: {spec.kind!r}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+    out_path = out or default_out
+
+    try:
+        setupmod.browser_capture_runner(
+            spec.kind, capture_target, spec.login_url, on_success=lambda: None,
+        )(emit=typer.echo)
+    except RuntimeError as exc:
+        if tmp_profile_dir:
+            shutil.rmtree(tmp_profile_dir, ignore_errors=True)
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+
+    if spec.kind == "browser_session":
+        archive_base = str(out_path.with_suffix(""))
+        archive_path = shutil.make_archive(archive_base, "zip", root_dir=tmp_profile_dir)
+        shutil.rmtree(tmp_profile_dir, ignore_errors=True)
+        out_path = Path(archive_path)
+
+    typer.secho(f"Captured to {out_path}", fg=typer.colors.GREEN)
+    typer.echo(
+        "Copy this file to your server and import it:\n"
+        f"  curl -F file=@{out_path} http://<server-host>:<port>/api/connectors/{target}/import\n"
+        "(or use the web UI's Import control next to the capture button)"
+    )
 
 
 @app.command()

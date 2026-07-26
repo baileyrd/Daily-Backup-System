@@ -165,13 +165,20 @@ class Storage(ABC):
 
     @abstractmethod
     def soft_delete_missing(
-        self, source_id: int, live_ids: set[str], run_id: int
+        self, source_id: int, live_ids: set[str], run_id: int, *, tag: str | None = None
     ) -> int:
-        """Soft-delete non-deleted items absent from ``live_ids``. Returns count."""
+        """Soft-delete non-deleted items absent from ``live_ids``. Returns count.
+
+        With ``tag``, only items carrying that tag are sweep candidates — the
+        storage half of a tag-scoped :class:`~dbs.core.models.ReconcileMarker`.
+        """
 
     @abstractmethod
-    def live_external_ids(self, source_id: int) -> set[str]:
-        """Return the set of currently-live (non-deleted) external ids for a source."""
+    def live_external_ids(self, source_id: int, *, tag: str | None = None) -> set[str]:
+        """Return the set of currently-live (non-deleted) external ids for a source.
+
+        With ``tag``, only ids of items carrying that tag are returned.
+        """
 
     # -- cursor / state -----------------------------------------------------
 

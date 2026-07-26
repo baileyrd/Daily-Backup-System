@@ -28,6 +28,36 @@ def test_healthy_empty_config_has_no_failures(storage, tmp_path):
     assert not any(c.status == "fail" for c in checks.values())
 
 
+def test_requires_vpn_source_warns_when_netns_down(storage, tmp_path, monkeypatch):
+    monkeypatch.setattr("dbs.core.service.in_named_netns", lambda _n: False)
+    monkeypatch.setattr("dbs.core.service.named_netns_exists", lambda _n: False)
+    rd = SourceConfig(name="rd", type="raindrop", options={}, requires_vpn=True)
+    checks = _by_name(_svc(
+        storage, tmp_path, sources=[rd], secret_store={"RAINDROP_TOKEN": "tok"},
+    ).doctor())
+    assert checks["source.rd.vpn"].status == "warn"
+    assert "not up" in checks["source.rd.vpn"].detail
+
+
+def test_requires_vpn_source_ok_when_netns_up(storage, tmp_path, monkeypatch):
+    monkeypatch.setattr("dbs.core.service.in_named_netns", lambda _n: False)
+    monkeypatch.setattr("dbs.core.service.named_netns_exists", lambda _n: True)
+    rd = SourceConfig(name="rd", type="raindrop", options={}, requires_vpn=True)
+    checks = _by_name(_svc(
+        storage, tmp_path, sources=[rd], secret_store={"RAINDROP_TOKEN": "tok"},
+    ).doctor())
+    assert checks["source.rd.vpn"].status == "ok"
+    assert "vpn-netns exec" in checks["source.rd.vpn"].detail
+
+
+def test_non_vpn_source_has_no_vpn_check(storage, tmp_path):
+    rd = SourceConfig(name="rd", type="raindrop", options={})
+    checks = _by_name(_svc(
+        storage, tmp_path, sources=[rd], secret_store={"RAINDROP_TOKEN": "tok"},
+    ).doctor())
+    assert "source.rd.vpn" not in checks
+
+
 def test_missing_secret_fails_and_set_secret_passes(storage, tmp_path):
     rd = SourceConfig(name="rd", type="raindrop", options={})
     checks = _by_name(_svc(storage, tmp_path, sources=[rd]).doctor())

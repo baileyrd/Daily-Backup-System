@@ -25,12 +25,24 @@ ItemRow = dict[str, Any]
 
 @dataclass(slots=True)
 class ExportQuery:
-    """Filters applied to an export. ``since``/``until`` match ``item_created_at``."""
+    """Filters applied to an export.
+
+    ``since``/``until`` match ``item_created_at``; ``since_updated``/
+    ``until_updated`` independently match ``item_updated_at`` (the
+    connector-reported upstream edit time, e.g. Raindrop's ``lastUpdate`` —
+    not dbs's own bookkeeping). The two pairs are AND-ed together with every
+    other filter here, same as `sources`/`item_types` — this query has no OR
+    semantics. A caller that wants "created OR updated since X" (e.g.
+    `notes_export.export_notes`'s incremental cutoff) issues two queries —
+    one per pair — and unions the results itself.
+    """
 
     sources: list[str] | None = None
     item_types: list[str] | None = None
     since: datetime | None = None
     until: datetime | None = None
+    since_updated: datetime | None = None
+    until_updated: datetime | None = None
     include_deleted: bool = False
     include_revisions: bool = False
     include_raw: bool = True
@@ -42,6 +54,14 @@ class ExportQuery:
     @property
     def until_iso(self) -> str | None:
         return iso_z(self.until) if self.until else None
+
+    @property
+    def since_updated_iso(self) -> str | None:
+        return iso_z(self.since_updated) if self.since_updated else None
+
+    @property
+    def until_updated_iso(self) -> str | None:
+        return iso_z(self.until_updated) if self.until_updated else None
 
 
 @dataclass(slots=True)

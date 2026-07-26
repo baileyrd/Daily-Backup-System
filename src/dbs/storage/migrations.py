@@ -148,12 +148,32 @@ CREATE INDEX IF NOT EXISTS idx_media_with_data
     ON media(item_id) WHERE data IS NOT NULL;
 """
 
+# Per-run observability: how long a run took (derivable from the timestamps,
+# but stored so history/analytics need no date math) and a connector-reported
+# failure count — e.g. skool media downloads that failed and will retry — which
+# previously lived only in logs, so an operator could not see it in history.
+MIGRATION_0005 = """
+ALTER TABLE sync_runs ADD COLUMN duration_ms INTEGER;
+ALTER TABLE sync_runs ADD COLUMN items_failed INTEGER NOT NULL DEFAULT 0;
+"""
+
+# `ExportQuery.since_updated`/`until_updated` (item_updated_at filtering, for
+# picking up items edited after their creation date) needs the same
+# source-prefixed index item_created_at already had from v1 -- without it,
+# `dbs export --since-updated` and export_notes's automatic edited-item
+# pickup would force a full table scan per source.
+MIGRATION_0006 = """
+CREATE INDEX IF NOT EXISTS idx_items_source_updated ON items(source_id, item_updated_at);
+"""
+
 # (version, sql) in ascending order.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, MIGRATION_0001),
     (2, MIGRATION_0002),
     (3, MIGRATION_0003),
     (4, MIGRATION_0004),
+    (5, MIGRATION_0005),
+    (6, MIGRATION_0006),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
@@ -179,15 +199,22 @@ def migrate(conn: sqlite3.Connection) -> list[int]:
     so we control transactions explicitly. ``executescript`` is intentionally
     avoided because it forces an implicit ``COMMIT`` that would break atomicity;
     each migration's DDL and its bookkeeping row commit together or not at all.
+
+    Each pending migration re-checks ``applied`` *after* acquiring the write
+    lock (``BEGIN IMMEDIATE``), not just once up front: ``open_service()``
+    opens a fresh connection per web request, so concurrent requests can race
+    to apply the same migration. Without the re-check, a loser thread would
+    still attempt its stale plan's INSERT and crash on the UNIQUE constraint
+    instead of seeing the version already applied and skipping it.
     """
-    applied = _applied_versions(conn)
     newly: list[int] = []
     for version, sql in MIGRATIONS:
-        if version in applied:
-            continue
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        conn.execute("BEGIN IMMEDIATE")
         try:
-            conn.execute("BEGIN")
+            if version in _applied_versions(conn):
+                conn.execute("ROLLBACK")
+                continue
             for statement in _split_statements(sql):
                 conn.execute(statement)
             conn.execute(

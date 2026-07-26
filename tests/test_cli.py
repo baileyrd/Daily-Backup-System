@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from typer.testing import CliRunner
 
@@ -10,11 +11,35 @@ from dbs.cli import app
 
 runner = CliRunner()
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    """Strip ANSI escape codes from Rich-rendered ``--help`` output.
+
+    Rich detects ``GITHUB_ACTIONS`` and forces styled output on CI even
+    though this is never a real terminal, splitting option names like
+    ``--query`` across separate escape-coded spans (``-`` and ``-query``
+    highlighted individually). A raw substring check then fails on CI while
+    passing locally, for a flag that is genuinely present either way.
+    """
+    return _ANSI_RE.sub("", text)
+
 
 def test_version():
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert "daily-backup-system" in result.stdout
+
+
+def test_human_duration_formatting():
+    from dbs.cli import _human_duration
+
+    assert _human_duration(None) == "-"
+    assert _human_duration(0) == "0.0s"
+    assert _human_duration(800) == "0.8s"
+    assert _human_duration(55_000) == "55.0s"
+    assert _human_duration(165_200) == "2m45s"
 
 
 def test_configure_logging_makes_dbs_info_logs_visible_and_is_idempotent():
@@ -78,6 +103,34 @@ def test_connectors_describe(tmp_path):
     assert "RAINDROP_TOKEN" in result.stdout
 
 
+def test_capture_unknown_connector_or_source(tmp_path):
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    result = runner.invoke(app, ["--config", str(cfg), "capture", "nope"])
+    assert result.exit_code == 4
+    assert "No such connector or source" in _plain(result.output)
+
+
+def test_capture_connector_without_auth_capture(tmp_path):
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    # raindrop authenticates with a token, not a browser session.
+    result = runner.invoke(app, ["--config", str(cfg), "capture", "raindrop"])
+    assert result.exit_code == 4
+    assert "has no interactive auth capture" in _plain(result.output)
+
+
+def test_capture_resolves_source_name_to_connector(tmp_path):
+    # A source name that differs from its connector type exercises the
+    # registry.get(target) -> sources.get(target) fallback path.
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    runner.invoke(app, ["--config", str(cfg), "sources", "add", "myrd", "--type", "raindrop"])
+    result = runner.invoke(app, ["--config", str(cfg), "capture", "myrd"])
+    assert result.exit_code == 4
+    assert "has no interactive auth capture" in _plain(result.output)
+
+
 def test_export_empty_db(tmp_path):
     cfg = tmp_path / "dbs.toml"
     runner.invoke(app, ["--config", str(cfg), "init"])
@@ -87,6 +140,31 @@ def test_export_empty_db(tmp_path):
     )
     assert result.exit_code == 0, result.stdout
     assert out.exists()
+
+
+def test_export_since_updated_flag_accepted(tmp_path):
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    out = tmp_path / "export.ndjson"
+    result = runner.invoke(
+        app,
+        ["--config", str(cfg), "export", "--out", str(out), "--format", "ndjson",
+         "--since-updated", "2024-01-01", "--until-updated", "2024-12-31"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert out.exists()
+
+
+def test_export_notes_empty_db(tmp_path):
+    cfg = tmp_path / "dbs.toml"
+    runner.invoke(app, ["--config", str(cfg), "init"])
+    out_dir = tmp_path / "notes"
+    result = runner.invoke(
+        app, ["--config", str(cfg), "export-notes", "--out-dir", str(out_dir)]
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "Wrote 0 note(s)" in result.stdout
+    assert out_dir.exists()
 
 
 def test_backup_unknown_source_exit_5(tmp_path):
@@ -120,8 +198,9 @@ def test_serve_command_registered():
     # The web UI command exists and documents its options (no server launched).
     result = runner.invoke(app, ["serve", "--help"])
     assert result.exit_code == 0
-    assert "--host" in result.stdout
-    assert "--port" in result.stdout
+    stdout = _plain(result.stdout)
+    assert "--host" in stdout
+    assert "--port" in stdout
 
 
 def test_research_youtube_command_registered():
@@ -129,17 +208,19 @@ def test_research_youtube_command_registered():
     # search/NotebookLM call made).
     result = runner.invoke(app, ["research", "youtube", "--help"])
     assert result.exit_code == 0
-    assert "--query" in result.stdout
-    assert "--question" in result.stdout
-    assert "--infographic" in result.stdout
+    stdout = _plain(result.stdout)
+    assert "--query" in stdout
+    assert "--question" in stdout
+    assert "--infographic" in stdout
 
 
 def test_research_youtube_backup_command_registered():
     result = runner.invoke(app, ["research", "youtube-backup", "--help"])
     assert result.exit_code == 0
-    assert "--source" in result.stdout
-    assert "--list" in result.stdout
-    assert "--count" in result.stdout
+    stdout = _plain(result.stdout)
+    assert "--source" in stdout
+    assert "--list" in stdout
+    assert "--count" in stdout
 
 
 def test_research_youtube_backup_empty_db_exit_4(tmp_path):

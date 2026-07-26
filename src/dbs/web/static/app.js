@@ -261,6 +261,10 @@ function sourceRow(s, { compact = false } = {}) {
       ? sourceCapture(s.name, ac.label, login)
       : captureConnector(s.type, login));
     row.append(login);
+    const importUrl = ac.per_source
+      ? `/api/sources/${encodeURIComponent(s.name)}/import`
+      : `/api/connectors/${encodeURIComponent(s.type)}/import`;
+    row.append(importControl(importUrl));
   }
   const run = el("button", { className: "btn small run-btn", textContent: "Run", disabled: !s.enabled });
   if (!s.enabled) run.dataset.srcDisabled = "1";
@@ -1024,6 +1028,7 @@ async function loadConnectors() {
         cap.title = "Opens a browser on the server host so you can log in; the session is captured into .env";
         cap.addEventListener("click", () => captureConnector(c.type, cap));
         actions.append(cap);
+        actions.append(importControl(`/api/connectors/${encodeURIComponent(c.type)}/import`));
       }
       if (c.secret_keys.length) {
         const jump = el("a", { href: "#", textContent: "set API key →" });
@@ -1079,6 +1084,50 @@ async function sourceCapture(name, label, btn) {
     const job = await api(`/api/sources/${encodeURIComponent(name)}/capture`, { method: "POST" });
     streamSetup(job.id, `${label} — check the server host for a browser window`);
   } catch (e) { toast(e.message, "err"); if (btn) btn.disabled = false; }
+}
+
+// Counterpart to live capture for headless servers: `dbs capture <name>` on a
+// machine with a display produces this file; upload it here instead.
+async function apiUpload(path, file) {
+  const headers = {};
+  const t = localStorage.getItem(TOKEN_KEY);
+  if (t) headers["Authorization"] = "Bearer " + t;
+  const body = new FormData();
+  body.append("file", file);
+  const res = await fetch(path, { method: "POST", headers, body });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (_) {}
+    throw new Error(detail);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+async function importCapture(url, fileInput) {
+  const file = fileInput.files && fileInput.files[0];
+  if (!file) return;
+  try {
+    const res = await apiUpload(url, file);
+    toast(res.note || "Import complete.", "ok");
+    loadConnectors();
+    loadSecrets();
+  } catch (e) {
+    toast(e.message, "err");
+  } finally {
+    fileInput.value = "";
+  }
+}
+
+// A small "Import…" button + hidden file input, for uploading a `dbs capture`
+// artifact captured on a machine with a display into this (possibly headless)
+// server.
+function importControl(url) {
+  const input = el("input", { type: "file", className: "hidden" });
+  input.addEventListener("change", () => importCapture(url, input));
+  const btn = el("button", { className: "btn small", textContent: "Import…" });
+  btn.title = "Import a session captured elsewhere with `dbs capture` (for headless servers)";
+  btn.addEventListener("click", () => input.click());
+  return el("span", {}, btn, input);
 }
 
 function streamSetup(jobId, title) {
@@ -1242,6 +1291,9 @@ function renderCaptureArea(type) {
     const btn = el("button", { type: "button", className: "btn primary small", textContent: `${ac.label} (open browser)` });
     btn.addEventListener("click", () => captureConnector(type, btn));
     wrap.append(btn);
+    wrap.append(importControl(`/api/connectors/${encodeURIComponent(type)}/import`));
+    wrap.append(el("div", { className: "hint",
+      textContent: "No display on this server? Run `dbs capture " + type + "` on your desktop instead, then Import the file it produces." }));
     if (c.capture_ready === false) {
       wrap.append(el("div", { className: "tag", textContent: "First run installs Playwright + a browser, then opens the login window (watch the log)." }));
     }
@@ -1351,6 +1403,30 @@ $("#export-form").addEventListener("submit", (e) => {
   if ($("#export-revisions").checked) qs.set("include_revisions", "true");
   if ($("#export-noraw").checked) qs.set("no_raw", "true");
   window.location.assign(withToken("/api/export?" + qs.toString()));
+});
+
+$("#notes-export-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const result = $("#notes-export-result");
+  result.textContent = "";
+  const csvList = (id) => $(id).value.split(",").map((s) => s.trim()).filter(Boolean);
+  try {
+    const body = JSON.stringify({
+      out_dir: $("#notes-export-dir").value.trim(),
+      source: csvList("#notes-export-source"),
+      type: csvList("#notes-export-type"),
+      since: $("#notes-export-since").value.trim() || null,
+      full: $("#notes-export-full").checked,
+    });
+    const res = await api("/api/export-notes", { method: "POST", body });
+    const sinceDesc = res.since || "the beginning";
+    result.textContent = `Wrote ${res.item_count} note(s) to ${res.path} (since ${sinceDesc}).`;
+    result.className = "result st-success";
+    toast(`Wrote ${res.item_count} note(s).`, "ok");
+  } catch (err) {
+    result.textContent = err.message;
+    result.className = "result st-failed";
+  }
 });
 
 // --- research (YouTube -> NotebookLM -> report) ------------------------------
@@ -1521,7 +1597,9 @@ $("#run-verify").addEventListener("click", runVerify);
 // --- backup progress (SSE) -------------------------------------------------
 
 let activeES = null;
+let activeJobId = null;
 let progressHadFailure = false;
+let progressWasStopped = false;
 
 function setBackupButtons(disabled) {
   // While a backup runs, lock the triggers. On finish, the source lists are
@@ -1547,9 +1625,18 @@ function openProgress(job) {
   $("#progress-results").innerHTML = "";
   $("#progress-line").textContent = "";
   progressHadFailure = false;
+  progressWasStopped = false;
   const bar = $("#progress-bar");
   bar.style.width = "0%";
   setBackupButtons(true);
+
+  // Arm the Stop button for this job (graceful early stop).
+  activeJobId = job.id;
+  const stop = $("#progress-stop");
+  stop.classList.remove("hidden");
+  stop.disabled = false;
+  stop.textContent = "Stop";
+  if (job.stopping) { stop.disabled = true; stop.textContent = "Stopping…"; }
 
   let doneCount = 0;
   let total = job.spec.all ? null : 1;
@@ -1588,6 +1675,7 @@ function openProgress(job) {
 
 function addResult(r) {
   if (r.status === "failed") progressHadFailure = true;
+  if (r.status === "interrupted") progressWasStopped = true;
   const line = `${r.source}: ${r.status} [${r.mode}] +${r.created} ~${r.updated} =${r.unchanged} ✕${r.deleted} (fetched ${r.fetched})`;
   const notes = [r.error, ...(r.warnings || [])].filter(Boolean);
   $("#progress-results").append(el("div", { className: "mono " + statusClass(r.status), textContent: line + (notes.length ? `  — ${notes.join(" — ")}` : "") }));
@@ -1595,8 +1683,30 @@ function addResult(r) {
 
 let progressHideTimer = null;
 
+async function stopBackup() {
+  if (activeJobId == null) return;
+  const stop = $("#progress-stop");
+  stop.disabled = true;
+  stop.textContent = "Stopping…";
+  try {
+    await api(`/api/backup/${activeJobId}/cancel`, { method: "POST" });
+    toast("Stopping — the current source will finish, then it halts.", "ok");
+  } catch (e) {
+    // Re-arm so the user can retry if the request itself failed.
+    stop.disabled = false;
+    stop.textContent = "Stop";
+    toast(e.message, "err");
+  }
+}
+$("#progress-stop").addEventListener("click", stopBackup);
+
 function finishProgress(snap) {
   if (activeES) { activeES.close(); activeES = null; }
+  activeJobId = null;
+  const stop = $("#progress-stop");
+  stop.classList.add("hidden");
+  stop.disabled = false;
+  stop.textContent = "Stop";
   const bar = $("#progress-bar");
   bar.classList.remove("indeterminate");
   bar.style.width = "100%";
@@ -1610,11 +1720,14 @@ function finishProgress(snap) {
   // failures in the headline rather than calling a failed run "complete".
   const failed = snap.status === "error" || progressHadFailure;
   $("#progress-title").textContent = snap.status === "error" ? "Backup failed"
-    : progressHadFailure ? "Backup finished with errors" : "Backup complete";
+    : progressHadFailure ? "Backup finished with errors"
+    : progressWasStopped ? "Backup stopped" : "Backup complete";
   setBackupButtons(false);
   loadSources();
   loadDashboard();
-  toast(failed ? "Backup finished with errors." : "Backup complete.", failed ? "err" : "ok");
+  toast(failed ? "Backup finished with errors."
+    : progressWasStopped ? "Backup stopped." : "Backup complete.",
+    failed ? "err" : "ok");
   // Clean runs dismiss themselves; anything with a failure stays until dismissed.
   clearTimeout(progressHideTimer);
   if (!failed) {

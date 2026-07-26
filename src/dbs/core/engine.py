@@ -85,11 +85,14 @@ class Engine:
         committed_any = False
         last_cursor: Cursor | None = ctx.cursor
         watermark_dt = ctx.since
-        reconcile_live: set[str] | None = None
+        # scope -> union of live_ids from that scope's ReconcileMarkers.
+        # None = no marker seen (or sweep disabled by a cancel/limit break).
+        reconcile_scopes: dict[str, set[str]] | None = None
         started = ctx.now()
         status = RunStatus.SUCCESS
         error: str | None = None
         warnings: list[str] = []
+        cancelled = False
 
         def emit(phase: ProgressPhase, *, note: str = "", result: RunResult | None = None) -> None:
             # Best-effort: a progress renderer must never break or slow a backup.
@@ -136,6 +139,18 @@ class Engine:
         try:
             connector.open(ctx)
             for event in connector.fetch(ctx):
+                if ctx.cancel is not None and ctx.cancel.cancelled:
+                    # Manual early stop (CLI Ctrl+C / web "Stop"): halt at this
+                    # item boundary, commit what's buffered below, and — like
+                    # the --limit path — never sweep-delete from a partial
+                    # enumeration.
+                    cancelled = True
+                    reconcile_scopes = None
+                    ctx.logger.warning(
+                        "%s: manual stop requested — halting after commit",
+                        ctx.source_name,
+                    )
+                    break
                 if isinstance(event, BackupItem):
                     if ctx.limit is not None and items_seen >= ctx.limit:
                         # Engine-enforced item cap (backup --limit): a smoke
@@ -148,7 +163,7 @@ class Engine:
                         )
                         warnings.append(warning)
                         ctx.logger.warning("%s: %s", ctx.source_name, warning)
-                        reconcile_live = None
+                        reconcile_scopes = None
                         break
                     items_seen += 1
                     buffer.append(self._prepare(event, caps, volatile, valid_kinds))
@@ -159,7 +174,9 @@ class Engine:
                     flush(event.cursor)
                     emit(ProgressPhase.CHECKPOINT, note=event.note)
                 elif isinstance(event, ReconcileMarker):
-                    reconcile_live = (reconcile_live or set()) | set(event.live_ids)
+                    if reconcile_scopes is None:
+                        reconcile_scopes = {}
+                    reconcile_scopes.setdefault(event.scope, set()).update(event.live_ids)
                 else:
                     raise ConnectorContractError(
                         f"fetch() yielded unsupported event type {type(event).__name__}"
@@ -168,10 +185,11 @@ class Engine:
             if buffer or not committed_any:
                 flush(last_cursor)
 
-            if items_seen == 0:
+            if items_seen == 0 and not cancelled:
                 # Not an error (a source can be legitimately empty), but the
                 # historical failure mode here is a silent auth/scrape problem
-                # dressed up as success — make it visible.
+                # dressed up as success — make it visible. A manual stop before
+                # the first item is not this case, so skip it.
                 warning = (
                     "run enumerated 0 items — if this source should not be "
                     "empty, check its auth/config"
@@ -180,42 +198,77 @@ class Engine:
                 ctx.logger.warning("%s: %s", ctx.source_name, warning)
 
             if (
-                reconcile_live is not None
+                reconcile_scopes is not None
                 and ctx.mode in ("full", "reconcile")
                 and caps.supports_full_enumeration
             ):
-                existing_live = self.storage.live_external_ids(ctx.source_id)
-                would_delete = existing_live - reconcile_live
-                n_live = len(existing_live)
-                fraction = (len(would_delete) / n_live) if n_live else 0.0
-                unsafe = n_live > 0 and (
-                    not reconcile_live or fraction > self.sweep_safety_fraction
-                )
-                if unsafe:
-                    # Almost certainly a truncated/partial enumeration — refuse to
-                    # mass-delete. Data is preserved; surface a warning on the run
-                    # (a warning, not an `error`: the committed data is fine and
-                    # the status stays SUCCESS — but the caveat must be visible
-                    # in status/history rather than vanish with exit code 0).
-                    warning = (
-                        f"deletion sweep skipped for safety: enumeration would "
-                        f"delete {len(would_delete)}/{n_live} live items "
-                        f"({fraction:.0%} > {self.sweep_safety_fraction:.0%}); "
-                        f"the upstream listing looks incomplete"
+                swept_total = 0
+                for scope, live in reconcile_scopes.items():
+                    if scope == "source":
+                        tag = None
+                    elif scope.startswith("tag:"):
+                        tag = scope[len("tag:"):]
+                    else:
+                        # Defensive: a scope this engine can't map to a candidate
+                        # set must never widen into a source-wide sweep.
+                        warning = (
+                            f"deletion sweep skipped for unrecognized reconcile "
+                            f"scope {scope!r}"
+                        )
+                        warnings.append(warning)
+                        ctx.logger.warning(warning)
+                        continue
+                    existing_live = self.storage.live_external_ids(
+                        ctx.source_id, tag=tag
                     )
-                    warnings.append(warning)
-                    ctx.logger.warning(warning)
-                else:
+                    would_delete = existing_live - live
+                    n_live = len(existing_live)
+                    fraction = (len(would_delete) / n_live) if n_live else 0.0
+                    unsafe = n_live > 0 and (
+                        not live or fraction > self.sweep_safety_fraction
+                    )
+                    if unsafe:
+                        # Almost certainly a truncated/partial enumeration — refuse
+                        # to mass-delete. Data is preserved; surface a warning on
+                        # the run (a warning, not an `error`: the committed data is
+                        # fine and the status stays SUCCESS — but the caveat must
+                        # be visible in status/history rather than vanish with
+                        # exit code 0).
+                        where = f" within {scope!r}" if tag is not None else ""
+                        warning = (
+                            f"deletion sweep skipped for safety{where}: "
+                            f"enumeration would delete "
+                            f"{len(would_delete)}/{n_live} live items "
+                            f"({fraction:.0%} > {self.sweep_safety_fraction:.0%}); "
+                            f"the upstream listing looks incomplete"
+                        )
+                        warnings.append(warning)
+                        ctx.logger.warning(warning)
+                        continue
                     with self.storage.transaction():
                         swept = self.storage.soft_delete_missing(
-                            ctx.source_id, reconcile_live, ctx.run_id
+                            ctx.source_id, live, ctx.run_id, tag=tag
                         )
                     stats.deleted += swept
                     stats.revisions += swept
-                    if swept:
-                        emit(ProgressPhase.SWEEP, note=f"swept {swept} deleted")
+                    swept_total += swept
+                if swept_total:
+                    emit(ProgressPhase.SWEEP, note=f"swept {swept_total} deleted")
 
-            status = RunStatus.SUCCESS
+            if cancelled:
+                # A deliberate, graceful stop — not a failure. Committed data
+                # and the cursor are intact; recording it 'interrupted' (not
+                # 'success') keeps the incomplete run honest in status/history
+                # and the next run simply resumes from the saved cursor.
+                warning = (
+                    "manually stopped before completion — committed data and "
+                    "the cursor are preserved; the next run resumes from the "
+                    "last checkpoint"
+                )
+                warnings.append(warning)
+                status = RunStatus.INTERRUPTED
+            else:
+                status = RunStatus.SUCCESS
         except (ConnectorConfigError, ConnectorAuthError) as exc:
             status = RunStatus.PARTIAL if committed_any else RunStatus.FAILED
             error = str(exc)
@@ -243,7 +296,7 @@ class Engine:
             self.storage.finish_run(
                 ctx.run_id, status.value, stats,
                 items_seen=items_seen, cursor_after=cursor_after, error=error,
-                warnings=warnings,
+                warnings=warnings, items_failed=ctx.items_failed,
             )
         except Exception as exc:  # noqa: BLE001
             try:
@@ -251,7 +304,7 @@ class Engine:
                     ctx.run_id, status.value, BatchResult(),
                     items_seen=items_seen, cursor_after=cursor_after,
                     error=(error or "") + f" [finish_run failed: {type(exc).__name__}: {exc}]",
-                    warnings=warnings,
+                    warnings=warnings, items_failed=ctx.items_failed,
                 )
             except Exception:
                 pass
@@ -269,6 +322,7 @@ class Engine:
             deleted=stats.deleted,
             undeleted=stats.undeleted,
             revisions=stats.revisions,
+            items_failed=ctx.items_failed,
             error=error,
             warnings=warnings,
         )

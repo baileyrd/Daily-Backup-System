@@ -79,12 +79,13 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | Command | Description |
 |---|---|
 | `dbs init [--force]` | Create config + `.env.example` and initialize the DB (idempotent; `--force` overwrites an existing config). |
-| `dbs backup [SOURCE] [--all] [--only-due] [--force-full] [--reconcile] [--dry-run] [--limit N] [--parallel N] [--progress/--no-progress]` | Run an incremental backup. `auto` mode picks incremental vs. reconcile. `--only-due` skips sources whose `schedule` cadence (`hourly`/`daily`/`weekly`, default daily ≈ 20h of slack) hasn't elapsed (for `--all` runs more than once a day). `--parallel N` backs up to N sources at once (default 1, or `[dbs] parallel` in config); browser/downloader-heavy connectors (reddit, skool, youtube) never overlap each other. A live status line (running item counter + per-source `[i/N]` position) shows automatically on a TTY; force it with `--progress` or silence it with `--no-progress`. |
+| `dbs backup [SOURCE] [--all] [--only-due] [--force-full] [--reconcile] [--dry-run] [--limit N] [--parallel N] [--progress/--no-progress]` | Run an incremental backup. `auto` mode picks incremental vs. reconcile. `--only-due` skips sources whose `schedule` cadence (`hourly`/`daily`/`weekly`, default daily ≈ 20h of slack) hasn't elapsed (for `--all` runs more than once a day). `--parallel N` backs up to N sources at once (default 1, or `[dbs] parallel` in config); browser/downloader-heavy connectors (reddit, skool, youtube) never overlap each other. A live status line (running item counter + per-source `[i/N]` position) shows automatically on a TTY; force it with `--progress` or silence it with `--no-progress`. Press **Ctrl+C** once to stop early: the in-flight source finishes committing (recorded `interrupted`, so the next run resumes from its last checkpoint) and no further source starts; press Ctrl+C again to abort immediately. |
 | `dbs status [SOURCE] [--json]` | Per-source item counts, last run, cursor watermark, warnings. |
 | `dbs history [SOURCE] [-n N] [--json]` | Recent backup runs and their stats. |
 | `dbs items [ID] [--source S] [--type T] [--since D] [--until D] [--include-deleted] [-q TEXT] [-n N] [--offset N] [--json]` | Browse what's actually stored — the CLI counterpart of the web *Browse* tab. Lists items newest-first with the same filters and full-text search as the web UI (FTS5 with a substring fallback); `-n`/`--offset` page through. `dbs items ID` shows one item's full detail: fields, archived-media list, and the verbatim raw payload. |
 | `dbs stats [--json]` | Aggregate database metrics — the web UI's metrics strip, in the terminal: live/deleted item counts per source and kind, revision count, archived media count + bytes. |
-| `dbs export --format FMT --out PATH [filters] [--encrypt]` | Export to `json`/`ndjson`/`csv`/`markdown`/`obsidian`/`archive`. `--encrypt` seals the output with a passphrase (scrypt + AES-256-GCM, from `DBS_EXPORT_PASSPHRASE` in `.env`/the environment — never argv) so it's safe to park on untrusted storage; needs the `[crypto]` extra. |
+| `dbs export --format FMT --out PATH [filters] [--encrypt]` | Export to `json`/`ndjson`/`csv`/`markdown`/`obsidian`/`archive`. Filters include `--since`/`--until` (item creation date) and `--since-updated`/`--until-updated` (item update date, per the source's own reported edit time — e.g. Raindrop's `lastUpdate`); the two pairs are independent (AND-ed like every other filter). `--encrypt` seals the output with a passphrase (scrypt + AES-256-GCM, from `DBS_EXPORT_PASSPHRASE` in `.env`/the environment — never argv) so it's safe to park on untrusted storage; needs the `[crypto]` extra. |
+| `dbs export-notes --out-dir DIR [--source S] [--type T] [--since D \| --full]` | Write one Markdown note per live item into a plain directory (unzipped `obsidian`-format notes) for a tool that watches a folder for new files, e.g. [remind_me](https://github.com/baileyrd/remind_me)'s folder watcher. Incremental by default — items created *or updated* since the last successful run are (re-)written, tracked in `<out-dir>/.dbs_export_state.json`. See [docs/scheduling.md](docs/scheduling.md#feeding-a-downstream-knowledge-base-eg-remind_me). |
 | `dbs decrypt SRC [--out PATH]` | Decrypt a `dbs export --encrypt` file back to its plain form (`dbs restore` reads encrypted bundles directly). |
 | `dbs restore PATH [--dry-run] [--json]` | Restore an exported backup (archive `.zip` or raw-bearing `.ndjson`) into the database. Idempotent — re-restoring the same bundle changes nothing. |
 | `dbs sources list [--json] \| add NAME --type TYPE [--set k=v] \| check` | Manage and validate configured sources. |
@@ -95,11 +96,24 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | `dbs maintain [--vacuum] [--snapshot PATH] [--json]` | Database housekeeping: flush the WAL and refresh query-planner stats; `--vacuum` compacts the file, per-source `keep_revisions` retention is applied, `--snapshot` writes a consistent single-file copy that's safe to move off-machine (a raw copy of a live WAL-mode DB misses the `-wal` sidecar). |
 | `dbs schedule [--interval daily\|hourly]` | Print ready-to-use cron / systemd snippets. |
 | `dbs serve [--host H] [--port P] [--no-setup] [--token T] [--schedule]` | Launch the web management UI (needs the `[web]` extra). In-UI setup (dependency install + browser-login capture) is on by default; `--no-setup` disables it. `--schedule` backs up due sources automatically while the server runs (no external cron needed); `--token` adds bearer-token auth (required off-localhost). |
+| `dbs capture TARGET [--out PATH]` | Capture a login session locally (needs a display + the `[web]` extra) and write it to a file, for import into a headless `dbs serve` via its Import control or `POST /api/connectors/{type}/import` — see [Capturing on a headless server](#capturing-on-a-headless-server-dbs-capture--import). |
 | `dbs research youtube TOPIC [...]` \| `dbs research youtube-backup TOPIC [...]` | Ad-hoc YouTube research: search (or reuse a backed-up list), synthesize via NotebookLM, write a markdown report. See [docs/research.md](docs/research.md). |
 | `dbs version` | Tool + core API version. |
 
 Export filters: `--source`, `--type`, `--since`, `--until`, `--include-deleted`,
 `--include-revisions`, `--no-raw`.
+
+> **Feeding an AI memory (e.g. [remind_me](https://github.com/baileyrd/remind_me)):**
+> `dbs export-notes` above is the lowest-effort path (see
+> [docs/scheduling.md](docs/scheduling.md#feeding-a-downstream-knowledge-base-eg-remind_me)) —
+> also available from the web UI's **Export** tab as **Notes export**, below the
+> regular bundle-export form: point it at a watched folder and it writes/updates
+> notes the same way, incrementally. remind_me also ships its own
+> `remind_me_import_dbs` tool that reads `dbs.sqlite3` directly and preserves
+> source/tags as knowledge-graph entities instead of note text — no dbs-side
+> setup needed. See
+> [docs/remind-me-integration-review-2026-07-21.md](docs/remind-me-integration-review-2026-07-21.md)
+> for the full comparison.
 
 ## Web UI
 
@@ -114,7 +128,9 @@ it you can:
 
 - see per-source **status** and recent **run history**;
 - **run a backup** (one source or all) and watch a **live progress bar** —
-  it streams the engine's progress events over Server-Sent Events;
+  it streams the engine's progress events over Server-Sent Events; a **Stop**
+  button on the running job halts it gracefully (the in-flight source finishes
+  committing, no further source starts) — the same early stop as Ctrl+C on the CLI;
 - **browse what's actually stored** (the *Browse* tab) — filter items by
   source/type/date and **full-text search** over titles and bodies (SQLite
   FTS5: all words must match, across fields, with prefix matching on the
@@ -165,8 +181,7 @@ the window, and the artifact is captured and recorded in `.env`:
 Capture drives the browser with **Playwright**. It's **one click** — if Playwright
 or its browser are missing, capture installs them first (watch the streamed log),
 then opens the login window. Because the browser opens on the host, this works
-when `dbs serve` runs on your desktop; on a headless server, capture on a desktop
-and point the `*_env` secret at the resulting path. (For youtube you can skip
+directly when `dbs serve` runs on your desktop. (For youtube you can also skip
 capture entirely and set `cookies_from_browser` in the source config instead.)
 
 In-UI setup (the **Install** and **Log in** actions, which run `pip install` /
@@ -174,10 +189,25 @@ In-UI setup (the **Install** and **Log in** actions, which run `pip install` /
 pass `dbs serve --no-setup` to disable it (the buttons then hide and the
 Connectors tab just shows what to install/set by hand).
 
-> The reddit/youtube auth artifacts (a Playwright session dir / a `cookies.txt`)
-> are inherently created on a machine with a browser — the UI can drive that when
-> it runs on your desktop, but on a headless server you create them locally and
-> point the `*_env` secret at the path.
+#### Capturing on a headless server: `dbs capture` + Import
+
+The capture button needs a display, which a headless server doesn't have. Instead,
+capture on a machine that *does* have one — your desktop — and import the result:
+
+```
+dbs capture youtube --out yt-cookies.txt      # or: dbs capture <source-name>
+# copy yt-cookies.txt to the server, then either:
+curl -F file=@yt-cookies.txt http://<server>:<port>/api/connectors/youtube/import
+#   ...or click "Import…" next to the capture button in the web UI.
+```
+
+`dbs capture` runs the *exact same* Playwright login flow as the UI's capture
+button, just writing the artifact to a local file instead of straight into a
+running server's config — a `cookies.txt` (youtube), a `storageState` JSON
+(skool), or a zipped session directory (reddit). The import endpoint validates
+the upload against the connector's expected format before writing it into
+place and recording the secret in `.env`, gated behind the same
+`--allow-setup`/`--no-setup` flag as live capture.
 
 ### API keys in the UI
 
