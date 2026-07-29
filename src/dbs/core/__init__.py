@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from .. import CORE_API_VERSION
 from .capabilities import AuthCapture, Capabilities, ItemKind
-from .export_profile import ExportProfile, ExportProfileOverride, resolve_export_profile
 from .connector import Connector
 from .errors import (
     ConnectorAuthError,
@@ -21,6 +20,7 @@ from .errors import (
     RateLimitedError,
     TransientFetchError,
 )
+from .export_profile import ExportProfile, ExportProfileOverride, resolve_export_profile
 from .hashing import content_hash
 from .http import ManagedHTTPClient
 from .models import (

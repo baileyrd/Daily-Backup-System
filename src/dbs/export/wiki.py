@@ -54,7 +54,8 @@ from __future__ import annotations
 import json
 import re
 import zipfile
-from typing import Any, BinaryIO, Iterable
+from collections.abc import Iterable
+from typing import Any, BinaryIO
 
 from ..core.export_profile import ExportProfile, axis_label, group_values, raw_value
 from .base import Exporter, ExportQuery, ExportResult, ExportSource
@@ -112,7 +113,7 @@ def _plural(count: int, noun: str) -> str:
 class _Page:
     """One rendered wiki page, pre-slug-collision-resolution."""
 
-    __slots__ = ("slug", "title", "topic", "front", "body")
+    __slots__ = ("body", "front", "slug", "title", "topic")
 
     def __init__(
         self,
@@ -444,8 +445,10 @@ class WikiExporter(Exporter):
         labels = sorted({label for label, _ in keys})
         axis_desc = ", ".join(f"{label.lower()}" for label in labels) or "no axis"
         lines = [
-            f"{_plural(total, 'item')} backed up from the `{src}` source, "
-            f"grouped by {axis_desc}.",
+            (
+                f"{_plural(total, 'item')} backed up from the `{src}` source, "
+                f"grouped by {axis_desc}."
+            ),
             "",
         ]
         for label, value in keys:
@@ -476,8 +479,10 @@ class WikiExporter(Exporter):
         srcs: list[str],
     ) -> list[str]:
         lines = [
-            f"{_plural(len(records), 'item')} with {label.lower()} `{value}`, "
-            f"from {_plural(len(srcs), 'source')}.",
+            (
+                f"{_plural(len(records), 'item')} with {label.lower()} `{value}`, "
+                f"from {_plural(len(srcs), 'source')}."
+            ),
             "",
         ]
         for record in records:
@@ -520,4 +525,4 @@ class WikiExporter(Exporter):
         return "\n".join(lines).rstrip() + "\n"
 
 
-__all__ = ["WikiExporter", "slugify", "GROUPINGS"]
+__all__ = ["GROUPINGS", "WikiExporter", "slugify"]

@@ -115,7 +115,7 @@ def _resolve_filename(
 
 
 def export_notes(
-    service: "BackupService",
+    service: BackupService,
     out_dir: str | Path,
     *,
     sources: list[str] | None = None,
@@ -213,7 +213,7 @@ def export_notes(
 
 
 def export_wiki_dir(
-    service: "BackupService",
+    service: BackupService,
     out_dir: str | Path,
     *,
     sources: list[str] | None = None,
@@ -294,4 +294,4 @@ def export_wiki_dir(
     )
 
 
-__all__ = ["export_notes", "export_wiki_dir", "STATE_FILENAME"]
+__all__ = ["STATE_FILENAME", "export_notes", "export_wiki_dir"]

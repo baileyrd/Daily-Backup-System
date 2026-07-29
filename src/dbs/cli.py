@@ -758,26 +758,29 @@ def export_profiles_cmd(
         if not profiles:
             typer.secho("No sources configured.", fg=typer.colors.YELLOW)
             return
+        def mark(field: str, over: dict) -> str:
+            """`*` when the config set this field, blank when it's the default."""
+            return "*" if field in over else " "
+
         for name, p in profiles.items():
             over = overrides.get(name, {})
-            mark = lambda f: "*" if f in over else " "  # noqa: E731
             state = "enabled" if p.enabled else typer.style("EXCLUDED", fg=typer.colors.RED)
             typer.echo(
                 f"\n{typer.style(name, bold=True)}  "
-                f"({svc.config.sources[name].type}) — {state}{mark('enabled')}"
+                f"({svc.config.sources[name].type}) — {state}{mark('enabled', over)}"
             )
             kinds = ", ".join(p.item_kinds) if p.item_kinds else "all"
-            typer.echo(f"  {mark('item_kinds')} item kinds : {kinds}")
+            typer.echo(f"  {mark('item_kinds', over)} item kinds : {kinds}")
             typer.echo(
-                f"  {mark('group_by')} group by   : "
+                f"  {mark('group_by', over)} group by   : "
                 + (", ".join(p.group_by) if p.group_by else "tags (generic fallback)")
             )
             typer.echo(
-                f"  {mark('body_from')} body from  : "
+                f"  {mark('body_from', over)} body from  : "
                 + (", ".join(p.body_from) if p.body_from else "the item's body column")
             )
             typer.echo(
-                f"  {mark('page_per')} page per   : {p.page_per or 'follows --grouping'}"
+                f"  {mark('page_per', over)} page per   : {p.page_per or 'follows --grouping'}"
             )
         typer.echo("\n* = set by a [sources.NAME.export] block; the rest are connector defaults.")
         typer.echo("group_by/body_from read the raw payload, so --no-raw falls back to tags.")
