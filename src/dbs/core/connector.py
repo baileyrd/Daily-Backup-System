@@ -40,6 +40,7 @@ from pydantic import BaseModel
 
 from .. import CORE_API_VERSION
 from .capabilities import AuthCapture, Capabilities, ItemKind
+from .export_profile import ExportProfile
 
 if TYPE_CHECKING:
     from .models import FetchEvent, RunContext
@@ -72,6 +73,11 @@ class Connector(ABC):
     volatile_fields
         Keys stripped from ``raw`` before computing the content hash (timestamps,
         caches, derived fields) to avoid revision spam.
+    export_profile
+        Default per-source export rules — which of this connector's raw fields
+        are the natural grouping axes for a wiki export (Reddit's subreddit,
+        YouTube's channel) and where an item's body text lives. Pure metadata;
+        a ``[sources.NAME.export]`` config block overrides it field by field.
     """
 
     type: ClassVar[str]
@@ -83,6 +89,7 @@ class Connector(ABC):
     item_kinds: ClassVar[tuple[ItemKind, ...]] = ()
     wants_managed_http: ClassVar[bool] = False
     volatile_fields: ClassVar[tuple[str, ...]] = ()
+    export_profile: ClassVar[ExportProfile] = ExportProfile()
     display_name: ClassVar[str] = ""
     description: ClassVar[str] = ""
     docs_url: ClassVar[str] = ""

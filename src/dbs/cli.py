@@ -39,6 +39,7 @@ from .core.models import ProgressEvent, ProgressPhase, RunResult, RunStatus
 from .core.service import BackupService
 from .export.base import ExportQuery
 from .notes_export import export_notes as _export_notes
+from .notes_export import export_wiki_dir as _export_wiki_dir
 from .templates import CONFIG_TEMPLATE, ENV_TEMPLATE
 
 app = typer.Typer(
@@ -611,7 +612,7 @@ def stats(json_out: bool = typer.Option(False, "--json")) -> None:
 @app.command()
 def export(
     out: Path = typer.Option(..., "--out", "-o", help="Output file (or .zip for archive)."),
-    fmt: str = typer.Option("ndjson", "--format", "-f", help="json|ndjson|csv|markdown|archive|obsidian."),
+    fmt: str = typer.Option("ndjson", "--format", "-f", help="json|ndjson|csv|markdown|archive|obsidian|wiki."),
     source: Optional[list[str]] = typer.Option(None, "--source", help="Filter by source name (repeatable)."),
     item_type: Optional[list[str]] = typer.Option(None, "--type", help="Filter by item kind (repeatable)."),
     since: Optional[str] = typer.Option(None, "--since", help="Only items created on/after (YYYY-MM-DD)."),
@@ -626,6 +627,11 @@ def export(
     include_deleted: bool = typer.Option(False, "--include-deleted"),
     include_revisions: bool = typer.Option(False, "--include-revisions", help="(archive) full history."),
     no_raw: bool = typer.Option(False, "--no-raw", help="Omit verbatim raw payloads."),
+    wiki_grouping: str = typer.Option(
+        "topic", "--wiki-grouping",
+        help="(wiki) Page layout: 'topic' for cross-linked source/tag hub "
+             "pages, 'item' for one page per item. Ignored by other formats.",
+    ),
     encrypt: bool = typer.Option(
         False, "--encrypt",
         help="Encrypt the output with a passphrase (scrypt + AES-256-GCM). "
@@ -651,17 +657,23 @@ def export(
             include_deleted=include_deleted,
             include_revisions=include_revisions,
             include_raw=not no_raw,
+            wiki_grouping=wiki_grouping,
         )
         try:
             result = svc.export(query, fmt, out, encrypt=encrypt, passphrase_env=passphrase_env)
         except KeyError as exc:
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(4)
+        except ValueError as exc:  # e.g. an unknown --wiki-grouping
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(4)
         media = result.extra.get("media") if result.extra else 0
+        pages = result.extra.get("pages") if result.extra else 0
         typer.secho(
             f"Exported {result.item_count} item(s)"
             + (f", {result.revision_count} revision(s)" if result.revision_count else "")
             + (f", {media} media file(s)" if media else "")
+            + (f" as {pages} wiki page(s)" if pages else "")
             + f" to {result.path} ({result.format})",
             fg=typer.colors.GREEN,
         )
@@ -707,6 +719,117 @@ def export_notes_cmd(
         since_desc = result.extra.get("since") or "the beginning"
         typer.secho(
             f"Wrote {result.item_count} note(s) to {result.path} (since {since_desc})",
+            fg=typer.colors.GREEN,
+        )
+    finally:
+        svc.close()
+
+
+@app.command(name="export-profiles")
+def export_profiles_cmd(
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Show each source's resolved export rules — what gets exported and how.
+
+    Rules come from the connector's own defaults, overridden field by field by
+    a `[sources.NAME.export]` block. Fields the config set are marked `*`, so
+    it's clear which behavior is yours and which is the connector's.
+    """
+    svc = _service()
+    try:
+        profiles = svc.export_profiles()
+        overrides = {
+            name: (sc.export.model_dump(exclude_none=True) if sc.export else {})
+            for name, sc in svc.config.sources.items()
+        }
+        if as_json:
+            typer.echo(json.dumps(
+                {
+                    name: {
+                        "type": svc.config.sources[name].type,
+                        "resolved": p.model_dump(),
+                        "overridden": sorted(overrides.get(name, {})),
+                    }
+                    for name, p in profiles.items()
+                },
+                indent=2,
+            ))
+            return
+        if not profiles:
+            typer.secho("No sources configured.", fg=typer.colors.YELLOW)
+            return
+        def mark(field: str, over: dict) -> str:
+            """`*` when the config set this field, blank when it's the default."""
+            return "*" if field in over else " "
+
+        for name, p in profiles.items():
+            over = overrides.get(name, {})
+            state = "enabled" if p.enabled else typer.style("EXCLUDED", fg=typer.colors.RED)
+            typer.echo(
+                f"\n{typer.style(name, bold=True)}  "
+                f"({svc.config.sources[name].type}) — {state}{mark('enabled', over)}"
+            )
+            kinds = ", ".join(p.item_kinds) if p.item_kinds else "all"
+            typer.echo(f"  {mark('item_kinds', over)} item kinds : {kinds}")
+            typer.echo(
+                f"  {mark('group_by', over)} group by   : "
+                + (", ".join(p.group_by) if p.group_by else "tags (generic fallback)")
+            )
+            typer.echo(
+                f"  {mark('body_from', over)} body from  : "
+                + (", ".join(p.body_from) if p.body_from else "the item's body column")
+            )
+            typer.echo(
+                f"  {mark('page_per', over)} page per   : {p.page_per or 'follows --grouping'}"
+            )
+        typer.echo("\n* = set by a [sources.NAME.export] block; the rest are connector defaults.")
+        typer.echo("group_by/body_from read the raw payload, so --no-raw falls back to tags.")
+    finally:
+        svc.close()
+
+
+@app.command(name="export-wiki")
+def export_wiki_cmd(
+    out_dir: Path = typer.Option(
+        ..., "--out-dir", "-d",
+        help="Directory to write loose wiki pages into (e.g. a remind_me "
+             "watched folder).",
+    ),
+    grouping: str = typer.Option(
+        "topic", "--grouping",
+        help="'topic' for cross-linked source/tag hub pages, 'item' for one "
+             "page per item.",
+    ),
+    source: Optional[list[str]] = typer.Option(None, "--source", help="Filter by source name (repeatable)."),
+    item_type: Optional[list[str]] = typer.Option(None, "--type", help="Filter by item kind (repeatable)."),
+    since: Optional[str] = typer.Option(None, "--since", help="Only items created on/after (YYYY-MM-DD)."),
+) -> None:
+    """Write wiki-shaped Markdown pages loose into a directory (unzipped
+    `--format wiki`) for a wiki that ingests files — remind_me's folder
+    watcher, or `rusty-remind-me wiki-import`.
+
+    Not incremental: hub pages are aggregates, so the full page set is
+    rebuilt every run. Safe to repeat — pages are keyed by slug and
+    overwritten in place.
+    """
+    svc = _service()
+    try:
+        try:
+            result = _export_wiki_dir(
+                svc,
+                out_dir,
+                sources=list(source) if source else None,
+                item_types=list(item_type) if item_type else None,
+                since=_parse_date(since),
+                grouping=grouping,
+            )
+        except ValueError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(4)
+        typer.secho(
+            f"Wrote {result.extra['pages']} page(s) + index from "
+            f"{result.item_count} item(s) to {result.path} "
+            f"(grouping: {result.extra['grouping']})",
             fg=typer.colors.GREEN,
         )
     finally:

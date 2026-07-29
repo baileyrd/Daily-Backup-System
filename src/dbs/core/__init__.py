@@ -20,6 +20,7 @@ from .errors import (
     RateLimitedError,
     TransientFetchError,
 )
+from .export_profile import ExportProfile, ExportProfileOverride, resolve_export_profile
 from .hashing import content_hash
 from .http import ManagedHTTPClient
 from .models import (
@@ -45,6 +46,9 @@ __all__ = [
     # plugin base + declarations
     "Connector",
     "Capabilities",
+    "ExportProfile",
+    "ExportProfileOverride",
+    "resolve_export_profile",
     "ItemKind",
     "AuthCapture",
     # models a connector emits / receives

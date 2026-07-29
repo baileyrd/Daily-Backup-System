@@ -121,3 +121,45 @@ from option 1 or 3 above without re-deriving the tradeoffs.
   instead of on-demand/scheduled pulls. Worth reaching for only if option
   3's pull cadence (call `remind_me_import_dbs` after each `dbs backup`)
   turns out to be too slow for a given use case.
+- **Option 4 (wiki feed) — shipped, 2026-07-29.** A new `wiki` export format
+  (`src/dbs/export/wiki.py`) plus `dbs export-wiki --out-dir` writes
+  wiki-shaped Markdown rather than the item mirror `export-notes` produces.
+  The distinction that motivated it: on both remind_me implementations the
+  wiki is explicitly a *synthesis* layer ("distilled from raw memories, not
+  a copy of them"), so `export-notes`' one-note-per-item output is the wrong
+  shape for it — it floods the wiki with thin pages and carries no
+  cross-links. `--grouping topic` (default) emits one cross-linked page per
+  source and per tag; `--grouping item` keeps the per-item shape for callers
+  that want it.
+
+  Front matter is deliberately **format-neutral** so one export feeds both
+  ports: `slug`/`title`/`topic` are exactly the three columns the Rust
+  port's `wiki_pages` table needs, carried explicitly instead of re-derived,
+  while the Python port derives its own slug from the title and ignores the
+  rest. Page titles are prefixed (`Source: raindrop` / `Tag: rust`) so a
+  source and a tag sharing a name stay distinct pages.
+
+  Deliberate scope cut: `export-wiki` is **not** incremental, unlike
+  `export-notes`. A hub page is an aggregate — writing only items newer than
+  a cutoff would produce a source page that silently shed its history each
+  run — so the full page set is rebuilt every call. That is safe to repeat
+  because pages are keyed by slug and overwritten in place.
+
+## Note on the two remind_me implementations
+
+This review predates [baileyrd/rusty_remind_me](https://github.com/baileyrd/rusty_remind_me),
+a Rust port. The two are not interchangeable for integration purposes:
+
+| | Python `remind_me` | Rust `rusty_remind_me` |
+|---|---|---|
+| Wiki storage | files + `index.md`/`log.md` | `wiki_pages(slug, title, content, topic)` in SQLite |
+| Wiki write API | `remind_me_wiki_write(title, content)`, slug derived | `remind_me_wiki_write(slug, title, content, topic)` |
+| Synthesis loop | `remind_me_wiki_compile` watermark | none |
+| File ingestion | folder watcher, `import_directory`, `import_dbs` | none as of `de891ed` |
+
+Everything above about options 1–3 refers to the **Python** port; the Rust
+port has no importer at all, so none of those paths reach it. `export-wiki`
+is therefore paired with a new `wiki-import` command contributed to the Rust
+port (`crates/remind_me_core/src/wiki_import.rs` + the `wiki-import` CLI
+subcommand and `remind_me_wiki_import` MCP tool), which reads the same
+front matter this export writes.

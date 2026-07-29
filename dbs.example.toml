@@ -14,6 +14,33 @@ default_overlap_seconds = 300    # re-scan window to avoid boundary gaps
 # Each [sources.NAME] block configures one backup source. The 'type' selects a
 # connector; the remaining keys are validated against that connector's schema
 # (see: dbs connectors describe <type>).
+#
+# An optional [sources.NAME.export] sub-table controls what this source
+# contributes to exports and how it renders. Every key is optional; one left
+# unset keeps the connector's own default. Inspect the resolved result for
+# every source with:  dbs export-profiles
+#
+#   [sources.NAME.export]
+#   enabled    = true              # false excludes the source from ALL export
+#                                  #   formats, not just the wiki
+#   item_kinds = ["post"]          # restrict which kinds are exported
+#   group_by   = ["subreddit"]     # raw fields that become wiki hub pages;
+#                                  #   each gets its own titled axis, so
+#                                  #   "Subreddit: rust" never merges with a
+#                                  #   same-named flair or tag. Omit to group
+#                                  #   on the generic `tags` list.
+#   body_from  = ["selftext"]      # raw fields to use as page body; first
+#                                  #   non-empty wins. Omit for the item's
+#                                  #   own body column.
+#   page_per   = "item"            # "item" or "topic" -- override the wiki
+#                                  #   export's grouping for this source only
+#
+# group_by/body_from read the verbatim raw payload, so an export run with
+# --no-raw can't resolve them and falls back to tag grouping.
+#
+# Connector defaults today: reddit -> subreddit + flair (body: selftext /
+# comment_body), youtube -> channel, vimeo -> user_name, podcast ->
+# feed_title. Everything else falls back to tags.
 
 [sources.raindrop]
 type = "raindrop"

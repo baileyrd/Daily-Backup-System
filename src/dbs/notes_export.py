@@ -115,7 +115,7 @@ def _resolve_filename(
 
 
 def export_notes(
-    service: "BackupService",
+    service: BackupService,
     out_dir: str | Path,
     *,
     sources: list[str] | None = None,
@@ -212,4 +212,86 @@ def export_notes(
     )
 
 
-__all__ = ["export_notes", "STATE_FILENAME"]
+def export_wiki_dir(
+    service: BackupService,
+    out_dir: str | Path,
+    *,
+    sources: list[str] | None = None,
+    item_types: list[str] | None = None,
+    since: datetime | None = None,
+    grouping: str = "topic",
+) -> ExportResult:
+    """Write the ``wiki`` export's pages loose into ``out_dir`` (unzipped).
+
+    Same rationale as :func:`export_notes` — a folder-watching consumer only
+    recognizes loose files — but deliberately **not** incremental, unlike
+    that function. A ``topic`` page is an aggregate: a source hub isn't
+    "new items since the cutoff", it's every item that source has. Writing
+    only the new ones would produce a hub page that silently lost its
+    history each run. So the full page set is rebuilt every call, which is
+    safe to repeat because pages are keyed by slug and overwritten in place
+    (and an unchanged page is byte-identical, so a downstream content-hash
+    dedup treats the rerun as a no-op).
+
+    ``index.md`` is extracted alongside ``pages/*.md`` here — unlike
+    ``export_notes``, which drops the manifest so a watcher scanning for
+    ``.md``/``.json`` doesn't pick it up — because the index *is* wiki
+    content and carries the [[wikilinks]] tying the page set together.
+    ``manifest.json`` is still left behind.
+
+    Returns:
+        An :class:`ExportResult` with ``item_count`` = items exported,
+        ``format="wiki-dir"``, ``path=str(out_dir)``, and ``extra`` carrying
+        ``pages`` (wiki pages, matching the ``wiki`` exporter's own count),
+        ``files`` (``pages`` plus the index) and ``grouping``.
+    """
+    out_dir = Path(out_dir).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    query = ExportQuery(
+        sources=sources,
+        item_types=item_types,
+        since=since,
+        include_deleted=False,
+        include_revisions=False,
+        # Raw payloads are REQUIRED here, unlike export_notes: a source's
+        # ExportProfile names its grouping axes and body fields as raw paths
+        # (Reddit's `subreddit`, YouTube's `channel`), and with raw omitted
+        # none of them resolve, so every source would silently fall back to
+        # generic tag grouping. Nothing from `raw` is written into the pages
+        # -- it's read to decide grouping and to pull body text, then dropped.
+        include_raw=True,
+        wiki_grouping=grouping,
+    )
+
+    pages = 0
+    files = 0
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_zip = Path(tmp_dir) / "wiki.zip"
+        result = service.export(query, "wiki", tmp_zip)
+        with zipfile.ZipFile(tmp_zip) as zf:
+            for name in zf.namelist():
+                is_page = name.startswith("pages/") and name.endswith(".md")
+                if not (is_page or name == "index.md"):
+                    continue  # manifest.json isn't wiki content
+                dest = out_dir / Path(name).name
+                dest_tmp = dest.with_name(dest.name + ".tmp")
+                dest_tmp.write_bytes(zf.read(name))
+                dest_tmp.replace(dest)
+                files += 1
+                pages += is_page
+
+    return ExportResult(
+        format="wiki-dir",
+        item_count=result.item_count,
+        path=str(out_dir),
+        extra={
+            "pages": pages,
+            "files": files,
+            "grouping": grouping,
+            "since": iso_z(since) if since else None,
+        },
+    )
+
+
+__all__ = ["STATE_FILENAME", "export_notes", "export_wiki_dir"]

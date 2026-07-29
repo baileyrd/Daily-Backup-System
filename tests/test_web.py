@@ -8,9 +8,11 @@ network, or captured session.
 
 from __future__ import annotations
 
+import io
 import json
 import threading
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -263,6 +265,48 @@ def test_export_download_after_backup(client):
 
 def test_export_unknown_format_400(client):
     assert client.get("/api/export", params={"format": "nope"}).status_code == 400
+
+
+def test_export_wiki_downloads_a_zip_of_pages(client):
+    job = client.post("/api/backup", json={"source": "courses"}).json()
+    _wait_done(client, job["id"])
+    r = client.get("/api/export", params={"format": "wiki"})
+    assert r.status_code == 200
+    # Regression: obsidian/wiki were missing from _FORMAT_META and downloaded
+    # as application/octet-stream named ".dat".
+    assert "dbs-export.zip" in r.headers.get("content-disposition", "")
+    assert r.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        names = zf.namelist()
+    assert "index.md" in names
+    assert any(n.startswith("pages/") and n.endswith(".md") for n in names)
+
+
+def test_export_wiki_item_grouping(client):
+    job = client.post("/api/backup", json={"source": "courses"}).json()
+    _wait_done(client, job["id"])
+    r = client.get(
+        "/api/export", params={"format": "wiki", "wiki_grouping": "item"}
+    )
+    assert r.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        pages = [n for n in zf.namelist() if n.startswith("pages/")]
+    assert len(pages) == 1  # one page per item, and the fixture has one item
+
+
+def test_export_wiki_unknown_grouping_400(client):
+    r = client.get(
+        "/api/export", params={"format": "wiki", "wiki_grouping": "nope"}
+    )
+    assert r.status_code == 400
+
+
+def test_export_obsidian_downloads_as_zip(client):
+    job = client.post("/api/backup", json={"source": "courses"}).json()
+    _wait_done(client, job["id"])
+    r = client.get("/api/export", params={"format": "obsidian"})
+    assert r.status_code == 200
+    assert "dbs-export.zip" in r.headers.get("content-disposition", "")
 
 
 def test_export_notes_writes_directory(client, tmp_path):
@@ -1378,3 +1422,13 @@ def test_meta_reports_scheduler_state(tmp_path, client):
     app = create_app(str(cfg), schedule_seconds=60)
     with TestClient(app) as c:
         assert c.get("/api/meta").json()["scheduler_enabled"] is True
+
+
+def test_export_profiles_endpoint(client):
+    r = client.get("/api/export/profiles")
+    assert r.status_code == 200
+    profiles = r.json()["profiles"]
+    assert profiles, "the test config declares at least one source"
+    entry = profiles[0]
+    for key in ("source", "type", "enabled", "group_by", "body_from", "overridden"):
+        assert key in entry

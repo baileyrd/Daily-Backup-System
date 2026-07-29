@@ -23,6 +23,7 @@ import httpx
 from .. import __version__
 from ..config import Config, SourceConfig, load_config, parse_env_file
 from ..export import EXPORTERS, get_exporter
+from .export_profile import ExportProfile, resolve_export_profile
 from ..export.base import ExportQuery, ExportResult
 from ..storage.base import BatchResult, ItemRow, Storage
 from ..storage.sqlite import SqliteStorage
@@ -69,21 +70,55 @@ logger = logging.getLogger("dbs")
 
 
 class _StorageExportSource:
-    """Adapts storage + query into the streaming :class:`ExportSource` protocol."""
+    """Adapts storage + query into the streaming :class:`ExportSource` protocol.
 
-    def __init__(self, storage: Storage, query: ExportQuery, manifest: dict[str, Any]):
+    Per-source :class:`ExportProfile` selection (``enabled``/``item_kinds``) is
+    applied here, as rows stream past, rather than pushed into the SQL filter:
+    the rules differ per source while :class:`ExportQuery` carries one global
+    ``item_types`` list, so they can't be expressed as a single WHERE clause.
+    Filtering here also means selection applies to *every* format — switching a
+    source off removes it from an ndjson or archive export too, not just the
+    wiki — which is what makes the profile the one place that answers "what
+    gets exported".
+    """
+
+    def __init__(
+        self,
+        storage: Storage,
+        query: ExportQuery,
+        manifest: dict[str, Any],
+        profiles: dict[str, ExportProfile] | None = None,
+    ):
         self._storage = storage
         self._query = query
         self._manifest = manifest
+        self._profiles = profiles or {}
+
+    @property
+    def profiles(self) -> dict[str, ExportProfile]:
+        """Resolved per-source rules, for exporters that render with them."""
+        return self._profiles
+
+    def _selected(self, rows: Iterator[ItemRow]) -> Iterator[ItemRow]:
+        for row in rows:
+            profile = self._profiles.get(row.get("source") or "")
+            # A source with no profile (e.g. rows for a source since removed
+            # from config) is exported unchanged rather than silently dropped.
+            if profile is None or profile.accepts_kind(row.get("item_kind")):
+                yield row
 
     def items(self) -> Iterator[ItemRow]:
-        return self._storage.iter_items(self._query)
+        return self._selected(self._storage.iter_items(self._query))
 
     def revisions(self) -> Iterator[ItemRow]:
-        return self._storage.iter_revisions(self._query)
+        return self._selected(self._storage.iter_revisions(self._query))
 
     def media_blobs(self) -> Iterator[ItemRow]:
-        return self._storage.iter_media_blobs(self._query)
+        # Media rows carry no item_kind, so only the source-level switch applies.
+        for row in self._storage.iter_media_blobs(self._query):
+            profile = self._profiles.get(row.get("source") or "")
+            if profile is None or profile.enabled:
+                yield row
 
     @property
     def manifest(self) -> dict[str, Any]:
@@ -770,7 +805,9 @@ class BackupService:
         *, encrypt: bool = False, passphrase_env: str | None = None,
     ) -> ExportResult:
         exporter = get_exporter(fmt)
-        source = _StorageExportSource(self.storage, query, self._manifest(query))
+        source = _StorageExportSource(
+            self.storage, query, self._manifest(query), self.export_profiles()
+        )
 
         def _write_to(fh) -> ExportResult:
             if not encrypt:
@@ -817,6 +854,23 @@ class BackupService:
 
     def available_formats(self) -> list[str]:
         return sorted(EXPORTERS)
+
+    def export_profiles(self) -> dict[str, ExportProfile]:
+        """Resolve every configured source's export rules.
+
+        Connector default, then the source's ``[sources.NAME.export]`` block,
+        field by field. A source whose connector type can't be loaded still
+        gets its config block honored over a plain default, so a missing
+        optional dependency doesn't silently change what an export contains.
+        """
+        profiles: dict[str, ExportProfile] = {}
+        for name, sc in self.config.sources.items():
+            try:
+                default = self.registry.get(sc.type).cls.export_profile
+            except Exception:
+                default = None
+            profiles[name] = resolve_export_profile(default, sc.export)
+        return profiles
 
     def _manifest(self, query: ExportQuery) -> dict[str, Any]:
         from ..storage.migrations import SCHEMA_VERSION

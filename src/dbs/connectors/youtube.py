@@ -37,9 +37,10 @@ from ..core import (
     BackupItem,
     Capabilities,
     Checkpoint,
-    ConnectorConfigError,
     Connector,
+    ConnectorConfigError,
     Cursor,
+    ExportProfile,
     ItemKind,
     MediaRef,
     ReconcileMarker,
@@ -102,6 +103,9 @@ class YouTubeConnector(Connector):
         login_url="https://www.youtube.com/",
         label="YouTube login",
     )
+    # `tags` holds [list_label, channel]; naming the channel explicitly stops
+    # a channel page from merging with a same-named playlist page.
+    export_profile = ExportProfile(group_by=["channel"])
     item_kinds = (ItemKind(name="video", display_name="Video"),)
     capabilities = Capabilities(
         supports_incremental=False,  # no server-side delta -> every run is full

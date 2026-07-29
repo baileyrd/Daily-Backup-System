@@ -13,6 +13,7 @@ from .json import JsonExporter
 from .markdown import MarkdownExporter
 from .ndjson import NdjsonExporter
 from .obsidian import ObsidianExporter
+from .wiki import WikiExporter
 
 EXPORTERS: dict[str, Exporter] = {
     e.format: e
@@ -23,6 +24,7 @@ EXPORTERS: dict[str, Exporter] = {
         MarkdownExporter(),
         ArchiveExporter(),
         ObsidianExporter(),
+        WikiExporter(),
     )
 }
 
