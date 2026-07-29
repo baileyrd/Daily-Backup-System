@@ -44,10 +44,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 from .core.errors import ConfigError
+from .core.export_profile import ExportProfileOverride
 
 _RESERVED_SOURCE_KEYS = {
     "type", "enabled", "schedule", "reconcile_every_runs", "store_media", "max_media_mb",
-    "requires_vpn", "keep_revisions",
+    "requires_vpn", "keep_revisions", "export",
 }
 _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _SECRET_KEY_HINTS = ("token", "secret", "password", "api_key", "apikey", "access_key")
@@ -72,6 +73,10 @@ class SourceConfig(BaseModel):
     # maintain` (0 = keep everything). The current row and the newest
     # revision are always kept; items are never touched.
     keep_revisions: int = 0
+    # Per-source export rules ([sources.NAME.export]): what to export from this
+    # source and how it renders. Every field is optional -- one left unset keeps
+    # the connector's own declared default (see core/export_profile.py).
+    export: ExportProfileOverride | None = None
     options: dict[str, Any] = {}
 
 
@@ -166,6 +171,22 @@ class Config(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
+def _parse_export_block(name: str, body: Any) -> ExportProfileOverride | None:
+    """Validate a ``[sources.NAME.export]`` table into an override.
+
+    Raised as a ConfigError rather than a pydantic ValidationError so a typo
+    in the block reads like every other config mistake.
+    """
+    if body is None:
+        return None
+    if not isinstance(body, dict):
+        raise ConfigError(f"source {name!r}: 'export' must be a table")
+    try:
+        return ExportProfileOverride(**body)
+    except Exception as exc:
+        raise ConfigError(f"source {name!r}: invalid 'export' block: {exc}") from exc
+
+
 def load_config(path: str | Path) -> Config:
     path = Path(path).expanduser()
     if not path.exists():
@@ -199,6 +220,7 @@ def load_config(path: str | Path) -> Config:
             max_media_mb=int(body.get("max_media_mb", 0) or 0),
             requires_vpn=bool(body.get("requires_vpn", False)),
             keep_revisions=int(body.get("keep_revisions", 0) or 0),
+            export=_parse_export_block(name, body.get("export")),
             options=options,
         )
 

@@ -1087,6 +1087,30 @@ def create_app(
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
+    @app.get("/api/export/profiles")
+    def export_profiles() -> dict[str, Any]:
+        """Each source's resolved export rules, and which fields config set."""
+        svc = open_service()
+        try:
+            profiles = svc.export_profiles()
+            return {
+                "profiles": [
+                    {
+                        "source": name,
+                        "type": svc.config.sources[name].type,
+                        **profile.model_dump(),
+                        "overridden": sorted(
+                            (svc.config.sources[name].export.model_dump(exclude_none=True))
+                            if svc.config.sources[name].export
+                            else {}
+                        ),
+                    }
+                    for name, profile in profiles.items()
+                ]
+            }
+        finally:
+            svc.close()
+
     # -- export (download) --------------------------------------------------
 
     @app.get("/api/export")

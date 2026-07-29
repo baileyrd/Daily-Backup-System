@@ -254,7 +254,13 @@ def export_wiki_dir(
         since=since,
         include_deleted=False,
         include_revisions=False,
-        include_raw=False,
+        # Raw payloads are REQUIRED here, unlike export_notes: a source's
+        # ExportProfile names its grouping axes and body fields as raw paths
+        # (Reddit's `subreddit`, YouTube's `channel`), and with raw omitted
+        # none of them resolve, so every source would silently fall back to
+        # generic tag grouping. Nothing from `raw` is written into the pages
+        # -- it's read to decide grouping and to pull body text, then dropped.
+        include_raw=True,
         wiki_grouping=grouping,
     )
 

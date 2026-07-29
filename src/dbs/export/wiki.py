@@ -27,9 +27,21 @@ Grouping (``ExportQuery.wiki_grouping``):
     One page per item. Closest to the raw backup; tags and source are
     rendered as plain metadata because no hub pages exist to link to.
 ``topic`` (default)
-    One page per source and one per tag, each listing its items inline and
-    cross-linked to the other. Titles are prefixed (``Source: raindrop`` /
-    ``Tag: rust``) so a source and a tag sharing a name stay distinct pages.
+    One page per source and one per grouping value, each listing its items
+    inline and cross-linked to the other. Titles are prefixed (``Source:
+    raindrop`` / ``Tag: rust``) so a source and a tag sharing a name stay
+    distinct pages.
+
+Per-source rules (:class:`~dbs.core.export_profile.ExportProfile`, reachable
+via ``source.profiles``) refine both. A connector declares the raw fields
+that are its real grouping axes — Reddit's ``subreddit``, YouTube's
+``channel`` — and each becomes its own titled axis (``Subreddit: rust``)
+instead of collapsing into the generic ``Tag:`` namespace, which is what
+stops a subreddit and a same-named flair from merging onto one page. A
+source with no ``group_by`` keeps grouping on ``tags``. ``body_from`` names
+where the item's prose lives (``selftext`` vs ``comment_body``), and
+``page_per`` lets one source render per-item while another collapses onto
+hubs in the same export.
 
 Streaming caveat: ``topic`` grouping cannot stream — a source hub is not
 complete until the last item is read — so it accumulates one compact record
@@ -44,9 +56,13 @@ import re
 import zipfile
 from typing import Any, BinaryIO, Iterable
 
+from ..core.export_profile import ExportProfile, axis_label, group_values, raw_value
 from .base import Exporter, ExportQuery, ExportResult, ExportSource
 
 GROUPINGS = ("topic", "item")
+
+# The axis a source with no declared `group_by` falls back to.
+_TAG_AXIS = "tags"
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -155,11 +171,12 @@ class WikiExporter(Exporter):
         item_count = 0
         taken: set[str] = set()
 
+        profiles: dict[str, ExportProfile] = getattr(source, "profiles", None) or {}
+
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
-            if grouping == "item":
-                pages, item_count, by_source = self._item_pages(source, taken)
-            else:
-                pages, item_count, by_source = self._topic_pages(source, taken)
+            pages, item_count, by_source = self._build_pages(
+                source, grouping, profiles, taken
+            )
 
             written: list[_Page] = []
             for page in pages:
@@ -221,42 +238,168 @@ class WikiExporter(Exporter):
         taken.add(slug)
         return slug
 
-    # -- item grouping ------------------------------------------------------
+    # -- page building ------------------------------------------------------
 
-    def _item_pages(
-        self, source: ExportSource, taken: set[str]
+    def _build_pages(
+        self,
+        source: ExportSource,
+        grouping: str,
+        profiles: dict[str, ExportProfile],
+        taken: set[str],
     ) -> tuple[list[_Page], int, dict[str, int]]:
-        pages: list[_Page] = []
+        """One streaming pass, routing each row by its source's profile.
+
+        Granularity is per-source (``page_per`` overrides the export-wide
+        grouping), so a single export can give every YouTube video its own
+        page while collapsing Raindrop bookmarks onto tag hubs. That rules
+        out separate item-mode and topic-mode passes -- both shapes can be
+        live at once, so rows are routed as they arrive.
+        """
         by_source: dict[str, int] = {}
         count = 0
+
+        item_rows: list[tuple[dict[str, Any], ExportProfile, str]] = []
+        # src -> (axis label, value) -> records, plus the source's untagged ones.
+        hubs: dict[str, dict[tuple[str, str], list[dict[str, Any]]]] = {}
+        untagged: dict[str, list[dict[str, Any]]] = {}
+        # (axis label, value) -> records, across every source.
+        axes: dict[tuple[str, str], list[dict[str, Any]]] = {}
+
         for row in source.items():
             src = row.get("source") or "unknown"
+            profile = profiles.get(src) or ExportProfile()
             by_source[src] = by_source.get(src, 0) + 1
-            title = str(
-                row.get("title") or row.get("url") or row.get("external_id") or "item"
-            )
-            slug = self._unique_slug(
-                slugify(title)[:80], row.get("external_id"), taken
-            )
-            tags = [str(t) for t in (row.get("tags") or [])]
-            front: dict[str, Any] = {
-                "tags": tags,
-                "dbs_source": src,
-                "dbs_external_id": row.get("external_id"),
-                "dbs_item_kind": row.get("item_kind"),
-                "dbs_url": row.get("url"),
-                "dbs_created_at": row.get("created_at"),
-            }
-            if row.get("deleted"):
-                front["dbs_deleted"] = True
-            pages.append(
-                _Page(slug, title, src, front, self._item_body(row, tags, src))
-            )
             count += 1
+
+            if (profile.page_per or grouping) == "item":
+                item_rows.append((row, profile, src))
+                continue
+
+            record = {
+                "title": str(
+                    row.get("title")
+                    or row.get("url")
+                    or row.get("external_id")
+                    or "item"
+                ),
+                "url": row.get("url"),
+                "excerpt": _excerpt(self._body_text(row, profile)),
+                "source": src,
+                "deleted": bool(row.get("deleted")),
+            }
+            buckets = hubs.setdefault(src, {})
+            placed = False
+            for label, value in self._axis_values(row, profile):
+                key = (label, value)
+                buckets.setdefault(key, []).append(record)
+                axes.setdefault(key, []).append(record)
+                placed = True
+            if not placed:
+                untagged.setdefault(src, []).append(record)
+
+        pages: list[_Page] = []
+        # Source hubs first so they win any slug collision with an axis page.
+        for src in sorted(hubs.keys() | untagged.keys()):
+            buckets = hubs.get(src, {})
+            keys = sorted(buckets)
+            slug = self._unique_slug(f"source-{slugify(src)}", None, taken)
+            pages.append(
+                _Page(
+                    slug,
+                    f"Source: {src}",
+                    "source",
+                    {
+                        "dbs_source": src,
+                        "dbs_item_count": by_source.get(src, 0),
+                        "dbs_axes": sorted({label for label, _ in keys}),
+                    },
+                    self._source_body(
+                        src, by_source.get(src, 0), buckets, keys, untagged.get(src, [])
+                    ),
+                )
+            )
+        for label, value in sorted(axes):
+            records = axes[(label, value)]
+            slug = self._unique_slug(f"{slugify(label)}-{slugify(value)}", None, taken)
+            srcs = sorted({r["source"] for r in records})
+            pages.append(
+                _Page(
+                    slug,
+                    f"{label}: {value}",
+                    label.lower(),
+                    {"dbs_item_count": len(records), "dbs_sources": srcs},
+                    self._axis_body(label, value, records, srcs),
+                )
+            )
+        # Item pages last: their slugs are the most disposable of the three.
+        for row, profile, src in item_rows:
+            pages.append(self._item_page(row, profile, src, taken))
         return pages, count, by_source
 
     @staticmethod
-    def _item_body(row: dict[str, Any], tags: list[str], src: str) -> list[str]:
+    def _body_text(row: dict[str, Any], profile: ExportProfile) -> Any:
+        """The item's prose, per the profile's declared fields.
+
+        Reddit keeps a post's text in ``selftext`` but a comment's in
+        ``comment_body``, so the first non-empty field wins. Falls back to the
+        normalized ``body`` column -- which is also what happens under
+        ``--no-raw``, where the named fields simply aren't in the row.
+        """
+        for path in profile.body_from:
+            value = raw_value(row, path)
+            if value:
+                return value
+        return row.get("body")
+
+    @staticmethod
+    def _axis_values(
+        row: dict[str, Any], profile: ExportProfile
+    ) -> list[tuple[str, str]]:
+        """``(axis label, value)`` pairs this row belongs on.
+
+        A profile naming ``subreddit`` yields ``("Subreddit", "rust")``, which
+        is what keeps it off the generic ``Tag: rust`` page. With no declared
+        axes -- or under ``--no-raw``, where none of them resolve -- this falls
+        back to the row's own ``tags`` so grouping still works.
+        """
+        out: list[tuple[str, str]] = []
+        for path in profile.group_by:
+            label = axis_label(path)
+            for value in group_values(row, path):
+                out.append((label, value))
+        if not out:
+            out = [("Tag", str(t)) for t in (row.get("tags") or []) if str(t).strip()]
+        return out
+
+    def _item_page(
+        self,
+        row: dict[str, Any],
+        profile: ExportProfile,
+        src: str,
+        taken: set[str],
+    ) -> _Page:
+        title = str(
+            row.get("title") or row.get("url") or row.get("external_id") or "item"
+        )
+        slug = self._unique_slug(slugify(title)[:80], row.get("external_id"), taken)
+        tags = [str(t) for t in (row.get("tags") or [])]
+        front: dict[str, Any] = {
+            "tags": tags,
+            "dbs_source": src,
+            "dbs_external_id": row.get("external_id"),
+            "dbs_item_kind": row.get("item_kind"),
+            "dbs_url": row.get("url"),
+            "dbs_created_at": row.get("created_at"),
+        }
+        if row.get("deleted"):
+            front["dbs_deleted"] = True
+        body = self._item_body(row, tags, src, self._body_text(row, profile))
+        return _Page(slug, title, src, front, body)
+
+    @staticmethod
+    def _item_body(
+        row: dict[str, Any], tags: list[str], src: str, body_text: Any
+    ) -> list[str]:
         kind = row.get("item_kind") or "item"
         created = (row.get("created_at") or "")[:10]
         summary = f"A `{kind}` backed up from the `{src}` source"
@@ -265,8 +408,8 @@ class WikiExporter(Exporter):
         if row.get("deleted"):
             lines.append("> This item is marked deleted upstream.")
             lines.append("")
-        if row.get("body"):
-            lines.append(str(row["body"]).strip())
+        if body_text:
+            lines.append(str(body_text).strip())
             lines.append("")
         if row.get("url"):
             lines.append(f"Source: <{row['url']}>")
@@ -277,75 +420,6 @@ class WikiExporter(Exporter):
             lines.append("Tags: " + ", ".join(f"`{t}`" for t in tags))
             lines.append("")
         return lines
-
-    # -- topic grouping -----------------------------------------------------
-
-    def _topic_pages(
-        self, source: ExportSource, taken: set[str]
-    ) -> tuple[list[_Page], int, dict[str, int]]:
-        by_source: dict[str, int] = {}
-        # source name -> tag -> [record]; "" collects that source's untagged items.
-        sources: dict[str, dict[str, list[dict[str, Any]]]] = {}
-        tags_index: dict[str, list[dict[str, Any]]] = {}
-        count = 0
-
-        for row in source.items():
-            src = row.get("source") or "unknown"
-            by_source[src] = by_source.get(src, 0) + 1
-            record = {
-                "title": str(
-                    row.get("title")
-                    or row.get("url")
-                    or row.get("external_id")
-                    or "item"
-                ),
-                "url": row.get("url"),
-                "excerpt": _excerpt(row.get("body")),
-                "source": src,
-                "deleted": bool(row.get("deleted")),
-            }
-            tags = [str(t) for t in (row.get("tags") or [])]
-            buckets = sources.setdefault(src, {})
-            if tags:
-                for tag in tags:
-                    buckets.setdefault(tag, []).append(record)
-                    tags_index.setdefault(tag, []).append(record)
-            else:
-                buckets.setdefault("", []).append(record)
-            count += 1
-
-        pages: list[_Page] = []
-        # Source hubs first so their slugs win any collision with a tag page.
-        for src in sorted(sources):
-            tag_names = sorted(t for t in sources[src] if t)
-            slug = self._unique_slug(f"source-{slugify(src)}", None, taken)
-            pages.append(
-                _Page(
-                    slug,
-                    f"Source: {src}",
-                    "source",
-                    {
-                        "dbs_source": src,
-                        "dbs_item_count": by_source[src],
-                        "tags": tag_names,
-                    },
-                    self._source_body(src, by_source[src], sources[src], tag_names),
-                )
-            )
-        for tag in sorted(tags_index):
-            records = tags_index[tag]
-            slug = self._unique_slug(f"tag-{slugify(tag)}", None, taken)
-            srcs = sorted({r["source"] for r in records})
-            pages.append(
-                _Page(
-                    slug,
-                    f"Tag: {tag}",
-                    "tag",
-                    {"dbs_item_count": len(records), "dbs_sources": srcs},
-                    self._tag_body(tag, records, srcs),
-                )
-            )
-        return pages, count, by_source
 
     @staticmethod
     def _bullet(record: dict[str, Any], suffix: str = "") -> str:
@@ -363,43 +437,53 @@ class WikiExporter(Exporter):
         self,
         src: str,
         total: int,
-        buckets: dict[str, list[dict[str, Any]]],
-        tag_names: list[str],
+        buckets: dict[tuple[str, str], list[dict[str, Any]]],
+        keys: list[tuple[str, str]],
+        untagged: list[dict[str, Any]],
     ) -> list[str]:
+        labels = sorted({label for label, _ in keys})
+        axis_desc = ", ".join(f"{label.lower()}" for label in labels) or "no axis"
         lines = [
             f"{_plural(total, 'item')} backed up from the `{src}` source, "
-            f"spanning {_plural(len(tag_names), 'tag')}.",
+            f"grouped by {axis_desc}.",
             "",
         ]
-        for tag in tag_names:
-            lines.append(f"## {_md_inline(tag)}")
+        for label, value in keys:
+            lines.append(f"## {_md_inline(f'{label}: {value}')}")
             lines.append("")
-            for record in buckets[tag]:
+            for record in buckets[(label, value)]:
                 lines.append(self._bullet(record))
             lines.append("")
-        if buckets.get(""):
-            lines.append("## Untagged")
+        if untagged:
+            lines.append("## Ungrouped")
             lines.append("")
-            for record in buckets[""]:
+            for record in untagged:
                 lines.append(self._bullet(record))
             lines.append("")
-        if tag_names:
+        if keys:
             lines.append(
-                "Related: " + " · ".join(f"[[Tag: {t}]]" for t in tag_names)
+                "Related: "
+                + " · ".join(f"[[{label}: {value}]]" for label, value in keys)
             )
             lines.append("")
         return lines
 
-    def _tag_body(
-        self, tag: str, records: list[dict[str, Any]], srcs: list[str]
+    def _axis_body(
+        self,
+        label: str,
+        value: str,
+        records: list[dict[str, Any]],
+        srcs: list[str],
     ) -> list[str]:
         lines = [
-            f"{_plural(len(records), 'item')} tagged `{tag}`, "
+            f"{_plural(len(records), 'item')} with {label.lower()} `{value}`, "
             f"from {_plural(len(srcs), 'source')}.",
             "",
         ]
         for record in records:
-            lines.append(self._bullet(record, suffix=f"from [[Source: {record['source']}]]"))
+            lines.append(
+                self._bullet(record, suffix=f"from [[Source: {record['source']}]]")
+            )
         lines.append("")
         lines.append("Sources: " + " · ".join(f"[[Source: {s}]]" for s in srcs))
         lines.append("")

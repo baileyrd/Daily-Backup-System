@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .. import CORE_API_VERSION
 from .capabilities import AuthCapture, Capabilities, ItemKind
+from .export_profile import ExportProfile, ExportProfileOverride, resolve_export_profile
 from .connector import Connector
 from .errors import (
     ConnectorAuthError,
@@ -45,6 +46,9 @@ __all__ = [
     # plugin base + declarations
     "Connector",
     "Capabilities",
+    "ExportProfile",
+    "ExportProfileOverride",
+    "resolve_export_profile",
     "ItemKind",
     "AuthCapture",
     # models a connector emits / receives

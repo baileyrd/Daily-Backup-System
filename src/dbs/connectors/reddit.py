@@ -64,10 +64,11 @@ from ..core import (
     BackupItem,
     Capabilities,
     Checkpoint,
+    Connector,
     ConnectorAuthError,
     ConnectorConfigError,
-    Connector,
     Cursor,
+    ExportProfile,
     ItemKind,
     MediaRef,
     RateLimitedError,
@@ -186,6 +187,14 @@ class RedditConnector(Connector):
         secret_key="REDDIT_SESSION_DIR",
         login_url="https://www.reddit.com/login/",
         label="Reddit login",
+    )
+    # Reddit's real grouping axes are the subreddit and the post flair; both
+    # currently land in the flat `tags` list, where they're indistinguishable.
+    # Naming them here keeps `Subreddit: rust` and `Flair: rust` distinct pages.
+    export_profile = ExportProfile(
+        group_by=["subreddit", "flair"],
+        # A post's text is `selftext`; a saved comment's is `comment_body`.
+        body_from=["selftext", "comment_body"],
     )
     item_kinds = (
         ItemKind(name="post", display_name="Post"),

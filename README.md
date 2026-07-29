@@ -86,6 +86,7 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | `dbs stats [--json]` | Aggregate database metrics — the web UI's metrics strip, in the terminal: live/deleted item counts per source and kind, revision count, archived media count + bytes. |
 | `dbs export --format FMT --out PATH [filters] [--encrypt]` | Export to `json`/`ndjson`/`csv`/`markdown`/`obsidian`/`wiki`/`archive`. Filters include `--since`/`--until` (item creation date) and `--since-updated`/`--until-updated` (item update date, per the source's own reported edit time — e.g. Raindrop's `lastUpdate`); the two pairs are independent (AND-ed like every other filter). `--encrypt` seals the output with a passphrase (scrypt + AES-256-GCM, from `DBS_EXPORT_PASSPHRASE` in `.env`/the environment — never argv) so it's safe to park on untrusted storage; needs the `[crypto]` extra. |
 | `dbs export-notes --out-dir DIR [--source S] [--type T] [--since D \| --full]` | Write one Markdown note per live item into a plain directory (unzipped `obsidian`-format notes) for a tool that watches a folder for new files, e.g. [remind_me](https://github.com/baileyrd/remind_me)'s folder watcher. Incremental by default — items created *or updated* since the last successful run are (re-)written, tracked in `<out-dir>/.dbs_export_state.json`. See [docs/scheduling.md](docs/scheduling.md#feeding-a-downstream-knowledge-base-eg-remind_me). |
+| `dbs export-profiles [--json]` | Show each source's resolved export rules — whether it's exported at all, which item kinds, and how its items become wiki pages. Rules come from the connector's own defaults, overridden field by field by a `[sources.NAME.export]` config block; fields the config set are marked `*`. |
 | `dbs export-wiki --out-dir DIR [--grouping topic\|item] [--source S] [--type T] [--since D]` | Write wiki-shaped Markdown pages loose into a directory (unzipped `--format wiki`) for a wiki that ingests files — [remind_me](https://github.com/baileyrd/remind_me)'s folder watcher, or [`rusty-remind-me wiki-import`](https://github.com/baileyrd/rusty_remind_me). Each page carries `slug`/`title`/`topic` front matter and `[[wikilinks]]`. `--grouping topic` (default) builds cross-linked source and tag hub pages; `--grouping item` writes one page per item. Not incremental — hub pages are aggregates, so the full set is rebuilt each run (safe to repeat; pages are keyed by slug). |
 | `dbs decrypt SRC [--out PATH]` | Decrypt a `dbs export --encrypt` file back to its plain form (`dbs restore` reads encrypted bundles directly). |
 | `dbs restore PATH [--dry-run] [--json]` | Restore an exported backup (archive `.zip` or raw-bearing `.ndjson`) into the database. Idempotent — re-restoring the same bundle changes nothing. |
@@ -128,6 +129,27 @@ Export filters: `--source`, `--type`, `--since`, `--until`, `--include-deleted`,
 > `topic` are the three columns the Rust port's `wiki_pages` table needs,
 > carried explicitly, while the Python port derives its own slug from the
 > title and ignores the rest. One export feeds both.
+>
+> **Per-source rules.** Sources aren't interchangeable: Reddit's natural
+> grouping axis is the subreddit, YouTube's is the channel, Raindrop's is your
+> own tags — and every connector currently folds those into one flat `tags`
+> list, so a `rust` tag on a Reddit item could be the subreddit *or* the post
+> flair. Each connector therefore declares an export profile naming the real
+> raw fields, and each becomes its own titled axis (`Subreddit: rust` stays
+> distinct from `Flair: rust`). Override any of it per source in `dbs.toml`:
+>
+> ```toml
+> [sources.reddit.export]
+> enabled    = true                 # false excludes it from ALL export formats
+> item_kinds = ["post"]             # skip saved comments
+> group_by   = ["subreddit"]        # drop the flair axis the connector adds
+> body_from  = ["selftext"]         # where the page body comes from
+> page_per   = "item"               # this source renders per item; others don't
+> ```
+>
+> Run `dbs export-profiles` to see what every source resolves to. Note that
+> `group_by`/`body_from` read the verbatim raw payload, so an export with
+> `--no-raw` can't resolve them and falls back to tag grouping.
 
 ## Web UI
 

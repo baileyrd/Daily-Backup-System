@@ -725,6 +725,66 @@ def export_notes_cmd(
         svc.close()
 
 
+@app.command(name="export-profiles")
+def export_profiles_cmd(
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Show each source's resolved export rules — what gets exported and how.
+
+    Rules come from the connector's own defaults, overridden field by field by
+    a `[sources.NAME.export]` block. Fields the config set are marked `*`, so
+    it's clear which behavior is yours and which is the connector's.
+    """
+    svc = _service()
+    try:
+        profiles = svc.export_profiles()
+        overrides = {
+            name: (sc.export.model_dump(exclude_none=True) if sc.export else {})
+            for name, sc in svc.config.sources.items()
+        }
+        if as_json:
+            typer.echo(json.dumps(
+                {
+                    name: {
+                        "type": svc.config.sources[name].type,
+                        "resolved": p.model_dump(),
+                        "overridden": sorted(overrides.get(name, {})),
+                    }
+                    for name, p in profiles.items()
+                },
+                indent=2,
+            ))
+            return
+        if not profiles:
+            typer.secho("No sources configured.", fg=typer.colors.YELLOW)
+            return
+        for name, p in profiles.items():
+            over = overrides.get(name, {})
+            mark = lambda f: "*" if f in over else " "  # noqa: E731
+            state = "enabled" if p.enabled else typer.style("EXCLUDED", fg=typer.colors.RED)
+            typer.echo(
+                f"\n{typer.style(name, bold=True)}  "
+                f"({svc.config.sources[name].type}) — {state}{mark('enabled')}"
+            )
+            kinds = ", ".join(p.item_kinds) if p.item_kinds else "all"
+            typer.echo(f"  {mark('item_kinds')} item kinds : {kinds}")
+            typer.echo(
+                f"  {mark('group_by')} group by   : "
+                + (", ".join(p.group_by) if p.group_by else "tags (generic fallback)")
+            )
+            typer.echo(
+                f"  {mark('body_from')} body from  : "
+                + (", ".join(p.body_from) if p.body_from else "the item's body column")
+            )
+            typer.echo(
+                f"  {mark('page_per')} page per   : {p.page_per or 'follows --grouping'}"
+            )
+        typer.echo("\n* = set by a [sources.NAME.export] block; the rest are connector defaults.")
+        typer.echo("group_by/body_from read the raw payload, so --no-raw falls back to tags.")
+    finally:
+        svc.close()
+
+
 @app.command(name="export-wiki")
 def export_wiki_cmd(
     out_dir: Path = typer.Option(

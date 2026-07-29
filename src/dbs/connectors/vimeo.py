@@ -45,9 +45,10 @@ from ..core import (
     BackupItem,
     Capabilities,
     Checkpoint,
-    ConnectorConfigError,
     Connector,
+    ConnectorConfigError,
     Cursor,
+    ExportProfile,
     ItemKind,
     MediaRef,
     ReconcileMarker,
@@ -124,6 +125,7 @@ class VimeoConnector(Connector):
     # core httpx client alone. Declared so setup tooling can offer the extra,
     # but NOT in runtime_imports — a metadata-only user is "ready" without it.
     pip_requirements = ("yt-dlp[default,curl-cffi]>=2026.1.29",)
+    export_profile = ExportProfile(group_by=["user_name"], body_from=["description"])
     item_kinds = (ItemKind(name="video", display_name="Video"),)
     capabilities = Capabilities(
         supports_incremental=False,  # re-read /me/videos every run

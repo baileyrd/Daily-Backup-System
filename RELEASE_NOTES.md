@@ -22,6 +22,38 @@ One entry per change merged to `main`, newest first.
 
 ---
 
+## Per-source export profiles: decide what each source exports, and how
+**2026-07-29** · branch `claude/repo-export-functionality-1y1jbt`
+
+- **Added:** sources are not interchangeable at export time, but the wiki
+  exporter treated them as if they were. Every connector folds its natural
+  grouping axis into the flat `tags` list — Reddit puts `[subreddit, flair]`
+  there, YouTube `[list_label, channel]` — which loses *which axis a value came
+  from*, so a `rust` tag on a Reddit item could be the subreddit or the flair
+  and both landed on one merged page. Connectors now declare an `ExportProfile`
+  naming the real raw fields; each becomes its own titled axis, so
+  `Subreddit: rust` and `Flair: rust` stay distinct pages.
+- **Added:** a `[sources.NAME.export]` config block overrides any of it per
+  source — `enabled`, `item_kinds`, `group_by`, `body_from`, `page_per` — field
+  by field, so an unset key keeps the connector's default rather than resetting
+  it. `enabled`/`item_kinds` are *selection* and apply to every export format;
+  switching a source off removes it from ndjson and archive exports too.
+  `page_per` is per source, so one export can render YouTube per-video while
+  collapsing Raindrop onto tag hubs.
+- **Added:** `dbs export-profiles [--json]` and `GET /api/export/profiles`
+  print each source's resolved rules, marking which fields config set versus
+  which came from the connector — the "what will actually be exported" answer
+  without running an export.
+- **Changed:** `dbs export-wiki` now requests raw payloads. `group_by`/
+  `body_from` resolve against `raw`, and the command previously passed
+  `include_raw=False`, which silently disabled the whole feature on its main
+  path. Raw is read to decide grouping and pull body text, then dropped — it is
+  not written into the exported pages.
+- **Known limitation:** `--no-raw` still can't resolve named fields, so such a
+  run degrades to generic tag grouping rather than failing. `dbs
+  export-profiles` says so in its footer.
+- 12 new unit tests (11 exporter/profile, 1 web tier); 673 passed.
+
 ## Add a `wiki` export format for remind_me wiki ingestion
 **2026-07-29** · branch `claude/repo-export-functionality-1y1jbt`
 

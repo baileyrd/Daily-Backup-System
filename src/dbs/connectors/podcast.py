@@ -48,6 +48,7 @@ from ..core import (
     Connector,
     ConnectorConfigError,
     Cursor,
+    ExportProfile,
     FetchEvent,
     ItemKind,
     MediaRef,
@@ -97,6 +98,7 @@ class PodcastConnector(Connector):
     config_model = PodcastConfig
     secret_keys: tuple[str, ...] = ()
     wants_managed_http = True
+    export_profile = ExportProfile(group_by=["feed_title"], body_from=["summary"])
     item_kinds = (ItemKind("episode", "Episode"),)
     capabilities = Capabilities(
         supports_incremental=False,      # no reliable delta; feeds are small

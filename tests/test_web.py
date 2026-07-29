@@ -1422,3 +1422,13 @@ def test_meta_reports_scheduler_state(tmp_path, client):
     app = create_app(str(cfg), schedule_seconds=60)
     with TestClient(app) as c:
         assert c.get("/api/meta").json()["scheduler_enabled"] is True
+
+
+def test_export_profiles_endpoint(client):
+    r = client.get("/api/export/profiles")
+    assert r.status_code == 200
+    profiles = r.json()["profiles"]
+    assert profiles, "the test config declares at least one source"
+    entry = profiles[0]
+    for key in ("source", "type", "enabled", "group_by", "body_from", "overridden"):
+        assert key in entry
