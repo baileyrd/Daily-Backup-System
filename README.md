@@ -84,8 +84,9 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | `dbs history [SOURCE] [-n N] [--json]` | Recent backup runs and their stats. |
 | `dbs items [ID] [--source S] [--type T] [--since D] [--until D] [--include-deleted] [-q TEXT] [-n N] [--offset N] [--json]` | Browse what's actually stored — the CLI counterpart of the web *Browse* tab. Lists items newest-first with the same filters and full-text search as the web UI (FTS5 with a substring fallback); `-n`/`--offset` page through. `dbs items ID` shows one item's full detail: fields, archived-media list, and the verbatim raw payload. |
 | `dbs stats [--json]` | Aggregate database metrics — the web UI's metrics strip, in the terminal: live/deleted item counts per source and kind, revision count, archived media count + bytes. |
-| `dbs export --format FMT --out PATH [filters] [--encrypt]` | Export to `json`/`ndjson`/`csv`/`markdown`/`obsidian`/`archive`. Filters include `--since`/`--until` (item creation date) and `--since-updated`/`--until-updated` (item update date, per the source's own reported edit time — e.g. Raindrop's `lastUpdate`); the two pairs are independent (AND-ed like every other filter). `--encrypt` seals the output with a passphrase (scrypt + AES-256-GCM, from `DBS_EXPORT_PASSPHRASE` in `.env`/the environment — never argv) so it's safe to park on untrusted storage; needs the `[crypto]` extra. |
+| `dbs export --format FMT --out PATH [filters] [--encrypt]` | Export to `json`/`ndjson`/`csv`/`markdown`/`obsidian`/`wiki`/`archive`. Filters include `--since`/`--until` (item creation date) and `--since-updated`/`--until-updated` (item update date, per the source's own reported edit time — e.g. Raindrop's `lastUpdate`); the two pairs are independent (AND-ed like every other filter). `--encrypt` seals the output with a passphrase (scrypt + AES-256-GCM, from `DBS_EXPORT_PASSPHRASE` in `.env`/the environment — never argv) so it's safe to park on untrusted storage; needs the `[crypto]` extra. |
 | `dbs export-notes --out-dir DIR [--source S] [--type T] [--since D \| --full]` | Write one Markdown note per live item into a plain directory (unzipped `obsidian`-format notes) for a tool that watches a folder for new files, e.g. [remind_me](https://github.com/baileyrd/remind_me)'s folder watcher. Incremental by default — items created *or updated* since the last successful run are (re-)written, tracked in `<out-dir>/.dbs_export_state.json`. See [docs/scheduling.md](docs/scheduling.md#feeding-a-downstream-knowledge-base-eg-remind_me). |
+| `dbs export-wiki --out-dir DIR [--grouping topic\|item] [--source S] [--type T] [--since D]` | Write wiki-shaped Markdown pages loose into a directory (unzipped `--format wiki`) for a wiki that ingests files — [remind_me](https://github.com/baileyrd/remind_me)'s folder watcher, or [`rusty-remind-me wiki-import`](https://github.com/baileyrd/rusty_remind_me). Each page carries `slug`/`title`/`topic` front matter and `[[wikilinks]]`. `--grouping topic` (default) builds cross-linked source and tag hub pages; `--grouping item` writes one page per item. Not incremental — hub pages are aggregates, so the full set is rebuilt each run (safe to repeat; pages are keyed by slug). |
 | `dbs decrypt SRC [--out PATH]` | Decrypt a `dbs export --encrypt` file back to its plain form (`dbs restore` reads encrypted bundles directly). |
 | `dbs restore PATH [--dry-run] [--json]` | Restore an exported backup (archive `.zip` or raw-bearing `.ndjson`) into the database. Idempotent — re-restoring the same bundle changes nothing. |
 | `dbs sources list [--json] \| add NAME --type TYPE [--set k=v] \| check` | Manage and validate configured sources. |
@@ -101,7 +102,8 @@ pip install -e ".[web]" && dbs serve            # http://127.0.0.1:8000
 | `dbs version` | Tool + core API version. |
 
 Export filters: `--source`, `--type`, `--since`, `--until`, `--include-deleted`,
-`--include-revisions`, `--no-raw`.
+`--include-revisions`, `--no-raw`. `--wiki-grouping topic|item` selects the
+`wiki` format's page layout and is ignored by every other format.
 
 > **Feeding an AI memory (e.g. [remind_me](https://github.com/baileyrd/remind_me)):**
 > `dbs export-notes` above is the lowest-effort path (see
@@ -114,6 +116,18 @@ Export filters: `--source`, `--type`, `--since`, `--until`, `--include-deleted`,
 > setup needed. See
 > [docs/remind-me-integration-review-2026-07-21.md](docs/remind-me-integration-review-2026-07-21.md)
 > for the full comparison.
+>
+> **Feeding a remind_me *wiki* specifically:** use `dbs export-wiki` instead.
+> `export-notes` mirrors items one-note-per-item, which suits a memory store
+> but not a wiki — on both remind_me implementations the wiki is a synthesis
+> layer ("distilled from raw memories, *not a copy of them*"), so a per-item
+> dump floods it with thin pages. `--grouping topic` emits the shape a wiki
+> actually adopts: one cross-linked page per source and per tag, each with a
+> stable `slug`, a `title` that doubles as page identity, and `[[wikilinks]]`
+> between them. Front matter is format-neutral on purpose — `slug`/`title`/
+> `topic` are the three columns the Rust port's `wiki_pages` table needs,
+> carried explicitly, while the Python port derives its own slug from the
+> title and ignores the rest. One export feeds both.
 
 ## Web UI
 
@@ -475,7 +489,7 @@ pytest            # 370+ tests, no network (Raindrop mocks httpx.MockTransport; 
 src/dbs/
   core/        # the public plugin API + engine + service (UI-agnostic)
   storage/     # Storage ABC + SQLite implementation + migrations
-  export/      # Exporter ABC + json/ndjson/csv/markdown/obsidian/archive
+  export/      # Exporter ABC + json/ndjson/csv/markdown/obsidian/wiki/archive
   connectors/  # built-in connectors (raindrop, reddit, youtube, skool)
   research/    # ad-hoc YouTube research pipeline (optional `[research]` extra)
   web/         # optional FastAPI UI (thin renderer over BackupService) + static SPA

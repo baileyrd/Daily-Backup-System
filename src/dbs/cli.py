@@ -39,6 +39,7 @@ from .core.models import ProgressEvent, ProgressPhase, RunResult, RunStatus
 from .core.service import BackupService
 from .export.base import ExportQuery
 from .notes_export import export_notes as _export_notes
+from .notes_export import export_wiki_dir as _export_wiki_dir
 from .templates import CONFIG_TEMPLATE, ENV_TEMPLATE
 
 app = typer.Typer(
@@ -611,7 +612,7 @@ def stats(json_out: bool = typer.Option(False, "--json")) -> None:
 @app.command()
 def export(
     out: Path = typer.Option(..., "--out", "-o", help="Output file (or .zip for archive)."),
-    fmt: str = typer.Option("ndjson", "--format", "-f", help="json|ndjson|csv|markdown|archive|obsidian."),
+    fmt: str = typer.Option("ndjson", "--format", "-f", help="json|ndjson|csv|markdown|archive|obsidian|wiki."),
     source: Optional[list[str]] = typer.Option(None, "--source", help="Filter by source name (repeatable)."),
     item_type: Optional[list[str]] = typer.Option(None, "--type", help="Filter by item kind (repeatable)."),
     since: Optional[str] = typer.Option(None, "--since", help="Only items created on/after (YYYY-MM-DD)."),
@@ -626,6 +627,11 @@ def export(
     include_deleted: bool = typer.Option(False, "--include-deleted"),
     include_revisions: bool = typer.Option(False, "--include-revisions", help="(archive) full history."),
     no_raw: bool = typer.Option(False, "--no-raw", help="Omit verbatim raw payloads."),
+    wiki_grouping: str = typer.Option(
+        "topic", "--wiki-grouping",
+        help="(wiki) Page layout: 'topic' for cross-linked source/tag hub "
+             "pages, 'item' for one page per item. Ignored by other formats.",
+    ),
     encrypt: bool = typer.Option(
         False, "--encrypt",
         help="Encrypt the output with a passphrase (scrypt + AES-256-GCM). "
@@ -651,17 +657,23 @@ def export(
             include_deleted=include_deleted,
             include_revisions=include_revisions,
             include_raw=not no_raw,
+            wiki_grouping=wiki_grouping,
         )
         try:
             result = svc.export(query, fmt, out, encrypt=encrypt, passphrase_env=passphrase_env)
         except KeyError as exc:
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(4)
+        except ValueError as exc:  # e.g. an unknown --wiki-grouping
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(4)
         media = result.extra.get("media") if result.extra else 0
+        pages = result.extra.get("pages") if result.extra else 0
         typer.secho(
             f"Exported {result.item_count} item(s)"
             + (f", {result.revision_count} revision(s)" if result.revision_count else "")
             + (f", {media} media file(s)" if media else "")
+            + (f" as {pages} wiki page(s)" if pages else "")
             + f" to {result.path} ({result.format})",
             fg=typer.colors.GREEN,
         )
@@ -707,6 +719,54 @@ def export_notes_cmd(
         since_desc = result.extra.get("since") or "the beginning"
         typer.secho(
             f"Wrote {result.item_count} note(s) to {result.path} (since {since_desc})",
+            fg=typer.colors.GREEN,
+        )
+    finally:
+        svc.close()
+
+
+@app.command(name="export-wiki")
+def export_wiki_cmd(
+    out_dir: Path = typer.Option(
+        ..., "--out-dir", "-d",
+        help="Directory to write loose wiki pages into (e.g. a remind_me "
+             "watched folder).",
+    ),
+    grouping: str = typer.Option(
+        "topic", "--grouping",
+        help="'topic' for cross-linked source/tag hub pages, 'item' for one "
+             "page per item.",
+    ),
+    source: Optional[list[str]] = typer.Option(None, "--source", help="Filter by source name (repeatable)."),
+    item_type: Optional[list[str]] = typer.Option(None, "--type", help="Filter by item kind (repeatable)."),
+    since: Optional[str] = typer.Option(None, "--since", help="Only items created on/after (YYYY-MM-DD)."),
+) -> None:
+    """Write wiki-shaped Markdown pages loose into a directory (unzipped
+    `--format wiki`) for a wiki that ingests files — remind_me's folder
+    watcher, or `rusty-remind-me wiki-import`.
+
+    Not incremental: hub pages are aggregates, so the full page set is
+    rebuilt every run. Safe to repeat — pages are keyed by slug and
+    overwritten in place.
+    """
+    svc = _service()
+    try:
+        try:
+            result = _export_wiki_dir(
+                svc,
+                out_dir,
+                sources=list(source) if source else None,
+                item_types=list(item_type) if item_type else None,
+                since=_parse_date(since),
+                grouping=grouping,
+            )
+        except ValueError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(4)
+        typer.secho(
+            f"Wrote {result.extra['pages']} page(s) + index from "
+            f"{result.item_count} item(s) to {result.path} "
+            f"(grouping: {result.extra['grouping']})",
             fg=typer.colors.GREEN,
         )
     finally:

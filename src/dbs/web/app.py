@@ -237,6 +237,8 @@ _FORMAT_META = {
     "csv": ("csv", "text/csv"),
     "markdown": ("md", "text/markdown"),
     "archive": ("zip", "application/zip"),
+    "obsidian": ("zip", "application/zip"),
+    "wiki": ("zip", "application/zip"),
 }
 
 
@@ -291,6 +293,7 @@ def create_app(
     from ..core.service import BackupService
     from ..export import EXPORTERS
     from ..export.base import ExportQuery
+    from ..export.wiki import GROUPINGS as WIKI_GROUPINGS
     from ..notes_export import export_notes as notes_export_fn
     from ..research.notebooklm_client import (
         DBS_STATE_SUBPATH,
@@ -1096,6 +1099,7 @@ def create_app(
         include_deleted: bool = Query(False),
         include_revisions: bool = Query(False),
         no_raw: bool = Query(False),
+        wiki_grouping: str = Query("topic"),
     ):
         if format not in EXPORTERS:
             raise HTTPException(
@@ -1111,9 +1115,16 @@ def create_app(
                 include_deleted=include_deleted,
                 include_revisions=include_revisions,
                 include_raw=not no_raw,
+                wiki_grouping=wiki_grouping,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"bad date: {exc}")
+        if format == "wiki" and wiki_grouping not in WIKI_GROUPINGS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown wiki_grouping {wiki_grouping!r}; "
+                       f"available: {sorted(WIKI_GROUPINGS)}",
+            )
 
         ext, media = _FORMAT_META.get(format, ("dat", "application/octet-stream"))
         # Export into a throwaway dir; FileResponse streams it, then the

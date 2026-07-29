@@ -35,6 +35,12 @@ class ExportQuery:
     semantics. A caller that wants "created OR updated since X" (e.g.
     `notes_export.export_notes`'s incremental cutoff) issues two queries —
     one per pair — and unions the results itself.
+
+    ``wiki_grouping`` is the one field here that isn't a filter: it's page
+    layout for the ``wiki`` exporter (``"topic"`` or ``"item"``) and every
+    other exporter ignores it, same as ``include_revisions`` is only read by
+    ``archive``. It rides on the query so the CLI and web tier keep sharing a
+    single request object rather than growing a per-format side channel.
     """
 
     sources: list[str] | None = None
@@ -46,6 +52,7 @@ class ExportQuery:
     include_deleted: bool = False
     include_revisions: bool = False
     include_raw: bool = True
+    wiki_grouping: str = "topic"
 
     @property
     def since_iso(self) -> str | None:

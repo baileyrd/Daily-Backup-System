@@ -18,19 +18,34 @@ category — and state known limitations or deliberate scope cuts plainly instea
 leaving them implied.
 -->
 
-<One-line description of what this file tracks and how entries are ordered.>
+One entry per change merged to `main`, newest first.
 
 ---
 
-## PR #N — <short imperative summary of what changed>
-**YYYY-MM-DD** · [#N](<PR link>)
+## Add a `wiki` export format for remind_me wiki ingestion
+**2026-07-29** · branch `claude/repo-export-functionality-1y1jbt`
 
-- **Added/Changed/Fixed:** <what changed, and why — not just the diff but the
-  reasoning a reader would otherwise have to dig for>
-- <Known limitation or deliberate scope cut, if any, stated plainly>
-- <Test count, if applicable: "N new/updated unit tests; X passed, Y ignored.">
-
-## PR #N-1 — ...
-**YYYY-MM-DD** · [#N-1](<PR link>)
-
-- ...
+- **Added:** a `wiki` exporter and `dbs export-wiki --out-dir`. The existing
+  `obsidian`/`export-notes` path mirrors items one-note-per-item, which suits a
+  memory store but is the wrong shape for a wiki — on both remind_me
+  implementations the wiki is a *synthesis* layer ("distilled from raw
+  memories, not a copy of them"), so a per-item dump floods it with thin,
+  uncross-linked pages. The default `--grouping topic` instead emits one
+  cross-linked page per source and per tag, each with a stable slug and
+  `[[wikilinks]]`; `--grouping item` keeps the per-item shape where it's wanted.
+- **Added:** front matter is deliberately format-neutral — `slug`/`title`/`topic`
+  are the three columns the Rust port's `wiki_pages` table needs, carried
+  explicitly rather than re-derived, while the Python port derives its own slug
+  from the title and ignores the rest. One export feeds both ports.
+- **Fixed:** web downloads of `obsidian` bundles were served as
+  `dbs-export.dat` / `application/octet-stream` — the format was missing from
+  the web tier's `_FORMAT_META` table.
+- **Deliberate scope cut:** `export-wiki` is *not* incremental, unlike
+  `export-notes`. A hub page is an aggregate, so writing only post-cutoff items
+  would produce a source page that silently shed its history each run; the full
+  page set is rebuilt every call instead (safe to repeat — pages are keyed by
+  slug and overwritten in place).
+- 15 new unit tests (11 exporter/CLI-path, 4 web tier); 658 passed. The
+  pre-existing `tests/test_crypto.py` failures in this environment are a broken
+  `cryptography`/`_cffi_backend` install, not a code regression — they fail
+  identically on a clean tree.

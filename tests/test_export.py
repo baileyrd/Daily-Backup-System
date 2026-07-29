@@ -368,3 +368,203 @@ def test_export_notes_cross_run_title_collision_does_not_overwrite(service, stor
     result = export_notes(service, out_dir)
     assert result.item_count == 0
     assert sorted(p.name for p in out_dir.glob("*.md")) == ["Same_Title-b.md", "Same_Title.md"]
+
+
+# -- wiki exporter ------------------------------------------------------
+
+
+def _read_zip_pages(out):
+    """slug -> page text, for every pages/*.md in a wiki zip."""
+    with zipfile.ZipFile(out) as zf:
+        return {
+            n[len("pages/") : -len(".md")]: zf.read(n).decode("utf-8")
+            for n in zf.namelist()
+            if n.startswith("pages/") and n.endswith(".md")
+        }
+
+
+def test_wiki_topic_grouping_builds_source_and_tag_hubs(service, storage, tmp_path):
+    _seed(storage)
+    out = tmp_path / "wiki.zip"
+    result = service.export(ExportQuery(), "wiki", out)
+    pages = _read_zip_pages(out)
+
+    # One source hub, plus one page per distinct tag on live items (x, y, z).
+    assert "source-rd" in pages
+    assert {"tag-x", "tag-y", "tag-z"} <= set(pages)
+    assert result.item_count == 2  # deleted excluded by default
+    assert result.extra["pages"] == len(pages)
+    assert result.extra["grouping"] == "topic"
+
+    hub = pages["source-rd"]
+    assert hub.startswith("---\n")
+    assert 'slug: "source-rd"' in hub
+    assert 'title: "Source: rd"' in hub
+    assert 'topic: "source"' in hub
+    assert "# Source: rd" in hub
+    # Items land inline on the hub, under their tag heading.
+    assert "[First](https://a)" in hub
+    assert "[Second](https://b)" in hub
+    # ...and the hub cross-links every tag page it produced.
+    assert "[[Tag: x]]" in hub
+
+    tag_page = pages["tag-y"]
+    assert 'topic: "tag"' in tag_page
+    assert "[[Source: rd]]" in tag_page  # links back to the hub
+
+
+def test_wiki_item_grouping_is_one_page_per_item(service, storage, tmp_path):
+    _seed(storage)
+    out = tmp_path / "wiki-items.zip"
+    result = service.export(ExportQuery(wiki_grouping="item"), "wiki", out)
+    pages = _read_zip_pages(out)
+
+    assert set(pages) == {"first", "second"}
+    assert result.item_count == 2
+    page = pages["first"]
+    assert 'slug: "first"' in page
+    assert 'title: "First"' in page
+    assert 'topic: "rd"' in page
+    assert 'dbs_external_id: "1"' in page
+    assert "# First" in page
+    assert "Source: <https://a>" in page
+    # No hub pages exist in this mode, so tags must NOT be emitted as
+    # wikilinks that would resolve to nothing.
+    assert "Tags: `x`" in page
+    assert "[[" not in page
+
+
+def test_wiki_index_links_every_page(service, storage, tmp_path):
+    _seed(storage)
+    out = tmp_path / "wiki-index.zip"
+    service.export(ExportQuery(), "wiki", out)
+    pages = _read_zip_pages(out)
+    with zipfile.ZipFile(out) as zf:
+        index = zf.read("index.md").decode("utf-8")
+        manifest = json.loads(zf.read("manifest.json"))
+
+    assert "# Index" in index
+    assert "[[Source: rd]]" in index
+    for tag in ("x", "y", "z"):
+        assert f"[[Tag: {tag}]]" in index
+    assert index.count("- [[") == len(pages)
+    assert manifest["counts"]["pages"] == len(pages)
+    assert manifest["query"]["wiki_grouping"] == "topic"
+
+
+def test_wiki_source_and_tag_of_same_name_get_distinct_pages(service, storage, tmp_path):
+    # A source literally named "rust" alongside a tag named "rust" is exactly
+    # the case the Source:/Tag: title prefixes exist to keep apart.
+    src = storage.upsert_source("rust", "raindrop", "test:raindrop", "{}", 1)
+    run = storage.begin_run(src.id, "test:raindrop", "full", None)
+    storage.upsert_items(src.id, run, [
+        PreparedItem("20", "link", "Tokio", "https://t", None, ["rust"],
+                     "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", "h20",
+                     json.dumps({"_id": 20}), False),
+    ])
+    out = tmp_path / "wiki-collide.zip"
+    service.export(ExportQuery(sources=["rust"]), "wiki", out)
+    pages = _read_zip_pages(out)
+    assert "source-rust" in pages and "tag-rust" in pages
+    assert 'title: "Source: rust"' in pages["source-rust"]
+    assert 'title: "Tag: rust"' in pages["tag-rust"]
+
+
+def test_wiki_item_slug_collision_is_disambiguated(service, storage, tmp_path):
+    src = storage.upsert_source("rd5", "raindrop", "test:raindrop", "{}", 1)
+    run = storage.begin_run(src.id, "test:raindrop", "full", None)
+    storage.upsert_items(src.id, run, [
+        PreparedItem("30", "link", "Same Title", "https://x1", None, [],
+                     "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", "h30",
+                     json.dumps({"_id": 30}), False),
+        PreparedItem("31", "link", "Same Title", "https://x2", None, [],
+                     "2024-01-02T00:00:00Z", "2024-01-02T00:00:00Z", "h31",
+                     json.dumps({"_id": 31}), False),
+    ])
+    out = tmp_path / "wiki-dupe.zip"
+    service.export(
+        ExportQuery(sources=["rd5"], wiki_grouping="item"), "wiki", out
+    )
+    pages = _read_zip_pages(out)
+    assert len(pages) == 2  # not silently overwritten
+    assert "same-title" in pages
+    assert "same-title-31" in pages
+
+
+def test_wiki_yaml_escapes_special_characters(service, storage, tmp_path):
+    src = storage.upsert_source("rd6", "raindrop", "test:raindrop", "{}", 1)
+    run = storage.begin_run(src.id, "test:raindrop", "full", None)
+    storage.upsert_items(src.id, run, [
+        PreparedItem("40", "link", 'Title: "quoted" & tricky', "https://x", None, [],
+                     "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", "h40",
+                     json.dumps({"_id": 40}), False),
+    ])
+    out = tmp_path / "wiki-yaml.zip"
+    service.export(
+        ExportQuery(sources=["rd6"], wiki_grouping="item"), "wiki", out
+    )
+    text = next(iter(_read_zip_pages(out).values()))
+    import re
+
+    m = re.search(r'^title: "(.*)"$', text, re.MULTILINE)
+    assert m is not None
+    assert m.group(1) == 'Title: \\"quoted\\" & tricky'
+
+
+def test_wiki_rejects_unknown_grouping(service, storage, tmp_path):
+    _seed(storage)
+    with pytest.raises(ValueError, match="wiki_grouping"):
+        service.export(
+            ExportQuery(wiki_grouping="nonsense"), "wiki", tmp_path / "bad.zip"
+        )
+
+
+def test_wiki_grouping_ignored_by_other_formats(service, storage, tmp_path):
+    # The field rides on the shared query; every other exporter must ignore it.
+    _seed(storage)
+    out = tmp_path / "backup.ndjson"
+    result = service.export(ExportQuery(wiki_grouping="nonsense"), "ndjson", out)
+    assert result.item_count == 2
+
+
+def test_export_wiki_dir_writes_loose_pages(service, storage, tmp_path):
+    from dbs.notes_export import export_wiki_dir
+
+    _seed(storage)
+    out_dir = tmp_path / "wiki-dir"
+    result = export_wiki_dir(service, out_dir)
+
+    names = sorted(p.name for p in out_dir.glob("*.md"))
+    assert "index.md" in names
+    assert "source-rd.md" in names
+    assert result.format == "wiki-dir"
+    assert result.item_count == 2
+    assert result.extra["files"] == len(names)
+    assert result.extra["pages"] == len(names) - 1  # index.md isn't a page
+    # The manifest is not wiki content and must not land in a watched folder.
+    assert not (out_dir / "manifest.json").exists()
+
+
+def test_export_wiki_dir_rebuilds_hubs_in_place(service, storage, tmp_path):
+    """A rerun must rewrite hubs wholesale, not append or shed earlier items."""
+    from dbs.notes_export import export_wiki_dir
+
+    src = _seed(storage)
+    out_dir = tmp_path / "wiki-dir2"
+    export_wiki_dir(service, out_dir)
+    first = (out_dir / "source-rd.md").read_text()
+    assert "[First](https://a)" in first
+
+    run = storage.begin_run(src.id, "test:raindrop", "full", None)
+    storage.upsert_items(src.id, run, [
+        PreparedItem("50", "link", "Third", "https://d", None, ["x"],
+                     "2024-06-01T00:00:00Z", "2024-06-01T00:00:00Z", "h50",
+                     json.dumps({"_id": 50}), False),
+    ])
+    result = export_wiki_dir(service, out_dir)
+    second = (out_dir / "source-rd.md").read_text()
+    # The new item is present AND the pre-existing ones survived the rebuild.
+    assert "[Third](https://d)" in second
+    assert "[First](https://a)" in second
+    assert "[Second](https://b)" in second
+    assert result.item_count == 3
