@@ -33,7 +33,11 @@ crypto = ["cryptography>=41"]
 # lazily and `dbs serve` errors helpfully if the extra is missing, so the CLI
 # stays usable without it.
 web = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9"]
-dev = ["pytest>=8", "pytest-cov", "ruff>=0.4", "httpx>=0.27", "fastapi>=0.110", "uvicorn>=0.29", "cryptography>=41", "python-multipart>=0.0.9"]
+# ruff is bounded to the minor the CI lint gate pins (see .github/workflows/ci.yml),
+# so `ruff check src tests` locally agrees with the gate. `ruff>=0.4` let a
+# contributor install a version whose default rules differ from CI's and get the
+# opposite answer. Bump both together.
+dev = ["pytest>=8", "pytest-cov", "ruff>=0.15.22,<0.16", "httpx>=0.27", "fastapi>=0.110", "uvicorn>=0.29", "cryptography>=41", "python-multipart>=0.0.9"]
 # Source connectors with heavy, browser/session-based dependencies. The core
 # never imports these; each connector imports them lazily at run time, so the
 # tool stays usable (and the connectors stay discoverable) without the extra.
