@@ -14,7 +14,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install ruff
-        run: pip install ruff
+        # Pinned deliberately. Unpinned, this resolves to whatever ruff shipped
+        # most recently, so the lint gate moves on its own: 0.16.0 widened the
+        # default rule set and turned `main` red (418 violations) with no code
+        # change behind it, failing unrelated PRs. Bump this on purpose, with
+        # the resulting fixes in the same commit -- don't let it drift.
+        run: pip install ruff==0.15.22
       - name: Lint
         run: ruff check src tests
 

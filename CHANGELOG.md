@@ -26,6 +26,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   source's resolved rules and which fields the config set.
 
 ### Changed
+- CI's lint gate pins `ruff==0.15.22` instead of installing it unpinned, and the
+  `dev` extra is bounded to the same minor. Unpinned, the gate moved whenever
+  ruff shipped new default rules — 0.16.0 widened them and turned `main` red
+  with 418 violations behind no code change, failing unrelated PRs.
 - `dbs export-wiki` now requests raw payloads (`include_raw=True`). Per-source
   `group_by`/`body_from` resolve against `raw`, so without it every source
   silently fell back to generic tag grouping. Nothing from `raw` is written into
